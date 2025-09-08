@@ -1,6 +1,6 @@
 import json
 from datetime import datetime
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 import logging
 import sqlite3
 import smtplib
@@ -37,7 +37,7 @@ def _sort_rows(rows, sort_key):
     return sorted(rows, key=keyfn, reverse=reverse)
 
 
-def _send_email(st: sqlite3.Row, subject: str, body: str) -> None:
+def _send_email(st: sqlite3.Row, subject: str, body: str, html_body: Optional[str] = None) -> None:
     """Send an email using settings stored in the database.
 
     This helper mirrors the logic used by the desktop application: the
@@ -57,6 +57,8 @@ def _send_email(st: sqlite3.Row, subject: str, body: str) -> None:
     msg["From"] = user
     msg["To"] = ", ".join(recips)
     msg.set_content(body)
+    if html_body:
+        msg.add_alternative(html_body, subtype="html")
 
     ctx = ssl.create_default_context(cafile=certifi.where())
 
@@ -314,56 +316,81 @@ async def scanner_run(request: Request):
             with sqlite3.connect(DB_PATH) as conn:
                 conn.row_factory = sqlite3.Row
                 st = get_settings(conn.cursor())
-            # Build a clean, aligned table for the email body
+            # Build text and HTML bodies with a 5-column table
             hdr = f"PatternFinder Scan Results — {now_et().strftime('%Y-%m-%d %H:%M')}"
             lines = [hdr, "=" * len(hdr), f"Scan: {ctx['note']}", ""]
 
-            # Determine column widths (excluding the rule column which is free-form)
             cols = [
                 ("ticker", "Ticker", "<"),
-                ("direction", "Dir", "<"),
-                ("avg_roi_pct", "ROI%", ">"),
+                ("direction", "Direction", "<"),
                 ("hit_pct", "Hit%", ">"),
-                ("support", "Support", ">"),
+                ("avg_roi_pct", "ROI %", ">"),
+                ("avg_dd_pct", "DD", ">"),
             ]
             widths = [len(label) for _, label, _ in cols]
             for r in rows:
                 values = [
                     r.get("ticker", ""),
                     r.get("direction", ""),
-                    f"{r.get('avg_roi_pct', 0):.2f}",
                     f"{r.get('hit_pct', 0):.2f}",
-                    str(r.get("support", 0)),
+                    f"{r.get('avg_roi_pct', 0):.2f}",
+                    f"{r.get('avg_dd_pct', 0):.2f}",
                 ]
                 for i, val in enumerate(values):
                     widths[i] = max(widths[i], len(val))
 
-            header = "  ".join(label.ljust(width) for (_, label, _), width in zip(cols, widths)) + "  Rule"
+            header = "  ".join(label.ljust(width) for (_, label, _), width in zip(cols, widths))
             lines.append(header)
-            lines.append(
-                "  ".join("-" * width for width in widths) + "  ----"
-            )
+            lines.append("  ".join("-" * width for width in widths))
 
             for r in rows:
                 values = [
                     r.get("ticker", ""),
                     r.get("direction", ""),
-                    f"{r.get('avg_roi_pct', 0):.2f}",
                     f"{r.get('hit_pct', 0):.2f}",
-                    str(r.get("support", 0)),
+                    f"{r.get('avg_roi_pct', 0):.2f}",
+                    f"{r.get('avg_dd_pct', 0):.2f}",
                 ]
                 parts = []
-                for (key, _, align), width, val in zip(cols, widths, values):
-                    if align == "<":
-                        parts.append(val.ljust(width))
-                    else:
-                        parts.append(val.rjust(width))
-                lines.append("  ".join(parts) + f"  {r.get('rule', '')}")
+                for (_, _, align), width, val in zip(cols, widths, values):
+                    parts.append(val.ljust(width) if align == "<" else val.rjust(width))
+                lines.append("  ".join(parts))
 
             lines.append("")
             lines.append("— Sent by PatternFinder")
             body = "\n".join(lines)
-            _send_email(st, "PatternFinder: Scan Results", body)
+
+            html_lines = [
+                "<html><body>",
+                f"<p><strong>{hdr}</strong></p>",
+                f"<p>Scan: {ctx['note']}</p>",
+                "<table style='border-collapse:collapse;'>",
+                "<thead><tr>",
+                "<th style='text-align:left;padding:8px;'>Ticker</th>",
+                "<th style='text-align:left;padding:8px;'>Direction</th>",
+                "<th style='text-align:right;padding:8px;'>Hit%</th>",
+                "<th style='text-align:right;padding:8px;'>ROI %</th>",
+                "<th style='text-align:right;padding:8px;'>DD</th>",
+                "</tr></thead>",
+                "<tbody>",
+            ]
+            for r in rows:
+                html_lines.append(
+                    "<tr>"
+                    f"<td style='padding:8px;border-top:1px solid #ddd;'>{r.get('ticker','')}</td>"
+                    f"<td style='padding:8px;border-top:1px solid #ddd;'>{r.get('direction','')}</td>"
+                    f"<td style='padding:8px;text-align:right;border-top:1px solid #ddd;'>{r.get('hit_pct',0):.2f}</td>"
+                    f"<td style='padding:8px;text-align:right;border-top:1px solid #ddd;'>{r.get('avg_roi_pct',0):.2f}</td>"
+                    f"<td style='padding:8px;text-align:right;border-top:1px solid #ddd;'>{r.get('avg_dd_pct',0):.2f}</td>"
+                    "</tr>"
+                )
+            html_lines.extend([
+                "</tbody></table>",
+                "<p>— Sent by PatternFinder</p>",
+                "</body></html>",
+            ])
+            html_body = "\n".join(html_lines)
+            _send_email(st, "PatternFinder: Scan Results", body, html_body=html_body)
         except Exception as e:
             logger.error("scan email failed: %s", e)
 
