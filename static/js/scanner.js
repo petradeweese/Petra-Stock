@@ -1,5 +1,4 @@
 (function(){
-  const overlay = document.getElementById('scan-overlay');
   const menu = document.getElementById('ctx-menu');
   const toast = document.getElementById('toast');
   const progressFill = document.getElementById('progress-fill');
@@ -24,15 +23,6 @@
     clearInterval(progressTimer);
     progressFill.style.width = '100%';
     progressText.textContent = '100%';
-  }
-
-  function showOverlay(){
-    overlay.style.display = 'grid';
-    startProgress();
-  }
-  function hideOverlay(){
-    overlay.style.display = 'none';
-    stopProgress();
   }
 
   function showMenu(x,y, tr){
@@ -158,17 +148,17 @@
     await addFavoriteFromRow(ctxRow);
   });
 
-  // HTMX hooks -> overlay + (re)bind delegates
-  document.body.addEventListener('htmx:beforeRequest', (evt)=>{
-    if (evt.detail.elt?.closest && evt.detail.elt.closest('#scan-form')) showOverlay();
+  // HTMX hooks -> start/stop progress + (re)bind delegates
+  document.body.addEventListener('htmx:send', (evt)=>{
+    if (evt.target.closest('#scan-form')) startProgress();
   });
   document.body.addEventListener('htmx:afterSwap', (evt)=>{
-    if (evt.detail.target?.id === 'scan-results') {
+    if (evt.target.id === 'scan-results') {
       bindResultsDelegates();
-      hideOverlay();
+      stopProgress();
     }
   });
-  document.body.addEventListener('htmx:responseError', hideOverlay);
+  document.body.addEventListener('htmx:responseError', stopProgress);
   document.addEventListener('DOMContentLoaded', bindResultsDelegates);
 })();
 
