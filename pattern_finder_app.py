@@ -13,6 +13,7 @@
 # - Diagnostics: shows gated bar count so you can tune filters
 
 import os, json, math, warnings, threading, itertools
+import platform
 warnings.filterwarnings("ignore")
 
 # Tkinter is only required for the optional desktop GUI.  The server
@@ -42,8 +43,9 @@ from sklearn.model_selection import TimeSeriesSplit
 from multiprocessing import Pool, cpu_count
 from indices import SP100, TOP150, TOP250  # Index lists
 
-# Trust store for TLS (fixes CERTIFICATE_VERIFY_FAILED on macOS)
-os.environ.setdefault("SSL_CERT_FILE", certifi.where())
+# Trust store for TLS using certifi when running on macOS
+if platform.system() == "Darwin":
+    os.environ.setdefault("SSL_CERT_FILE", certifi.where())
 
 # -----------------------------
 # Files & Cache
@@ -567,7 +569,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 def scan_parallel_threaded(tickers, cfg, max_workers=None):
     """
-    Threaded variant: avoids macOS spawn + BrokenPipe issues when running
+    Threaded variant: avoids spawn-related BrokenPipe issues when running
     many back-to-back scans from the Auto-Scanner.
     """
     tasks = [(t, cfg) for t in tickers]
@@ -1398,7 +1400,7 @@ class App:
         msg["To"] = ", ".join(cfg["recipients"])
         msg.set_content(body)
 
-        # Trust store for TLS (fixes CERTIFICATE_VERIFY_FAILED on macOS)
+        # Trust store for TLS using certifi to provide a consistent CA bundle
         ctx = ssl.create_default_context(cafile=certifi.where())
 
         # Gmail app passwords are shown with spaces — strip them out
@@ -1539,15 +1541,16 @@ class App:
         self.alert_status.set("Daily alerts stopped.")
 
 # -----------------------------
-# Main (macOS-friendly)
+# Main entry point
 # -----------------------------
 if __name__ == "__main__":
-    # macOS requires 'spawn' for multiprocessing with Tk apps
     import multiprocessing as mp
-    try:
-        mp.set_start_method("spawn", force=True)
-    except RuntimeError:
-        pass
+    if platform.system() == "Darwin":
+        # macOS requires 'spawn' for multiprocessing with Tk apps
+        try:
+            mp.set_start_method("spawn", force=True)
+        except RuntimeError:
+            pass
     root = tk.Tk()
     App(root)
     root.mainloop()
