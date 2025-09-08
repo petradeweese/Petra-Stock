@@ -15,8 +15,16 @@
 import os, json, math, warnings, threading, itertools
 warnings.filterwarnings("ignore")
 
-import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
+# Tkinter is only required for the optional desktop GUI.  The server
+# environment used by the web API runs headless and does not ship with the
+# tkinter module.  Import it lazily and fall back to stubs when unavailable so
+# that the core scanning functions remain importable.
+try:  # pragma: no cover - optional dependency
+    import tkinter as tk
+    from tkinter import ttk, messagebox, filedialog
+except Exception:  # ModuleNotFoundError on headless servers
+    tk = None  # type: ignore
+    ttk = messagebox = filedialog = None  # type: ignore
 
 import pandas as pd
 import numpy as np
