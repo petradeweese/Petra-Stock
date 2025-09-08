@@ -19,7 +19,7 @@
         {% for r in runs %}
         <tr>
           <td>{{ r["id"] }}</td>
-          <td>{{ r["started_at"] }}</td>
+          <td>{{ r["started_display"] }}</td>
           <td>{{ r["scan_type"] }}</td>
           <td>{{ (r["universe"] or "").split(",") | length }}</td>
           <td>{{ r["hit_count"] }}</td>
