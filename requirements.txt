@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+pandas
+pandas_market_calendars
+numpy
+yfinance
+ta
+scikit-learn
+Jinja2
+certifi
+python-multipart
