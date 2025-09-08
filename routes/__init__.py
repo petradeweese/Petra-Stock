@@ -124,7 +124,7 @@ def results_from_archive(request: Request, run_id: int, db=Depends(get_db)):
             dt = dt.replace(tzinfo=TZ)
         else:
             dt = dt.astimezone(TZ)
-        ran_at = dt.strftime("%m/%-d/%y,%-I:%M%p")
+        ran_at = dt.strftime("%m/%d/%y,%I:%M%p").replace("/0", "/").replace(",0", ",")
     except Exception:
         pass
 
@@ -330,7 +330,8 @@ def archive_page(request: Request, db=Depends(get_db)):
                 dt = dt.replace(tzinfo=TZ)
             else:
                 dt = dt.astimezone(TZ)
-            r["started_display"] = f"{dt.strftime('%m/%-d/%y,%-I:%M%p')}-{rule_summary}" if rule_summary else dt.strftime('%m/%-d/%y,%-I:%M%p')
+            fmt = dt.strftime("%m/%d/%y,%I:%M%p").replace("/0", "/").replace(",0", ",")
+            r["started_display"] = f"{fmt}-{rule_summary}" if rule_summary else fmt
         except Exception:
             r["started_display"] = r["started_at"]
     return templates.TemplateResponse("archive.html", {"request": request, "runs": runs, "active_tab": "archive"})
@@ -481,7 +482,7 @@ async def scanner_run(request: Request):
     ctx = {
         "request": request,
         "rows": rows,
-        "ran_at": datetime.now().strftime("%-I:%M:%S %p"),
+        "ran_at": datetime.now().strftime("%I:%M:%S %p").lstrip("0"),
         "note": f"{scan_type} • {params.get('interval')} • {params.get('direction')} • window {params.get('window_value')} {params.get('window_unit')}"
     }
 
