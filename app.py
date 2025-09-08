@@ -853,11 +853,9 @@ def compute_scan_for_ticker(ticker: str, params: Dict[str, Any]) -> Dict[str, An
 
 
 # --- Parity route: run fixed TOP150 scan (matches desktop screenshot) ---
-from flask import render_template
-from pattern_finder_app import TOP150
 
 @app.post("/scanner/parity")
-def scanner_parity():
+def scanner_parity(request: Request, sort: str | None = None):
     PARAMS = dict(
         interval="15m", direction="BOTH",
         target_pct=1.5, stop_pct=0.7,
@@ -880,11 +878,14 @@ def scanner_parity():
 
     rows.sort(key=lambda x: (x["avg_roi_pct"], x["hit_pct"], x["support"], x["stability"]), reverse=True)
 
-    return render_template(
+    return templates.TemplateResponse(
         "results.html",
-        rows = _sort_rows(rows, form.get('sort')),
-        ran_at=datetime.now().strftime("%Y-%m-%d %H:%M"),
-        note=f"TOP150 parity run • kept {len(rows)}"
+        {
+            "request": request,
+            "rows": _sort_rows(rows, sort),
+            "ran_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "note": f"TOP150 parity run • kept {len(rows)}",
+        },
     )
 
 
