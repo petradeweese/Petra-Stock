@@ -23,6 +23,32 @@
     setTimeout(()=>toast.hidden=true, 1800);
   }
 
+  async function addFavoriteFromRow(tr){
+    if(!tr){ showToast('No row selected', false); return; }
+    const payload = {
+      ticker: tr.dataset.tkr || '',
+      direction: (tr.dataset.dir || 'UP').toUpperCase(),
+      rule: tr.dataset.rule || '',
+      interval: document.querySelector('select[name="interval"]')?.value || '15m'
+    };
+    if(!payload.ticker || !payload.rule){
+      showToast('Missing ticker or rule', false);
+      return;
+    }
+    try{
+      const res = await fetch('/favorites/add', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      if (data?.ok) showToast(`Added ${payload.ticker} to Favorites`);
+      else showToast(data?.error || 'Failed to add favorite', false);
+    }catch(e){
+      showToast('Network error adding favorite', false);
+    }
+  }
+
   // Delegate inside #scan-results so it works after HTMX swaps
   function bindResultsDelegates(){
     const root = document.getElementById('scan-results');
@@ -36,8 +62,14 @@
       showMenu(e.clientX, e.clientY, tr);
     });
 
-    // Save to Archive button
+    // Left-click on row -> add to favorites (event delegation)
     root.addEventListener('click', async function(e){
+      const tr = e.target.closest('tbody tr.row-hover');
+      if(tr){
+        await addFavoriteFromRow(tr);
+        return;
+      }
+
       const btn = e.target.closest('#btn-archive');
       if(!btn) return;
 
@@ -95,30 +127,7 @@
   document.getElementById('ctx-add-fav').addEventListener('click', async function(ev){
     ev.stopPropagation();
     hideMenu();
-    const tr = ctxRow;
-    if(!tr){ showToast('No row selected', false); return; }
-    const payload = {
-      ticker: tr.dataset.tkr || '',
-      direction: (tr.dataset.dir || 'UP').toUpperCase(),
-      rule: tr.dataset.rule || '',
-      interval: document.querySelector('select[name="interval"]')?.value || '15m'
-    };
-    if(!payload.ticker || !payload.rule){
-      showToast('Missing ticker or rule', false);
-      return;
-    }
-    try{
-      const res = await fetch('/favorites/add', {
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body: JSON.stringify(payload)
-      });
-      const data = await res.json();
-      if (data?.ok) showToast(`Added ${payload.ticker} to Favorites`);
-      else showToast(data?.error || 'Failed to add favorite', false);
-    }catch(e){
-      showToast('Network error adding favorite', false);
-    }
+    await addFavoriteFromRow(ctxRow);
   });
 
   // HTMX hooks -> overlay + (re)bind delegates

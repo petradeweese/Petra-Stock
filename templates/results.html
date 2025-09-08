@@ -86,7 +86,7 @@
   }
   .table th { text-align:left; color:#b9c7de; }
   .table tbody tr:hover { background:#111726; }
-  .row-hover { cursor: context-menu; }
+  .row-hover { cursor: pointer; }
   .rule-td { max-width: 480px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .linklike { border: 0; background: transparent; color: #7fb3ff; cursor: pointer; }
   .linklike:hover { text-decoration: underline; }
@@ -122,6 +122,28 @@
     setTimeout(() => { toast.hidden = true; }, 1800);
   }
 
+  async function addFavorite(payload){
+    if (!payload || !payload.ticker || !payload.rule) {
+      showToast('Missing ticker or rule', false);
+      return;
+    }
+    try {
+      const res = await fetch('/favorites/add', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      if (data && data.ok) {
+        showToast(`Added ${payload.ticker} to Favorites`);
+      } else {
+        showToast(data?.error || 'Failed to add favorite', false);
+      }
+    } catch (err) {
+      showToast('Network error adding favorite', false);
+    }
+  }
+
   // --- Right-click handler on table rows (event delegation) ---
   document.addEventListener('contextmenu', function(e) {
     const tr = e.target?.closest('tr.row-hover');
@@ -141,29 +163,23 @@
   window.addEventListener('resize', hideMenu);
   window.addEventListener('scroll', hideMenu);
 
-  // --- Add to favorites -> POST /favorites/add ---
-  addBtn.addEventListener('click', async function(ev) {
+  // --- Left click on row adds to favorites ---
+  tbl?.addEventListener('click', function(e){
+    const tr = e.target?.closest('tr.row-hover');
+    if (!tr || !tbl.contains(tr)) return;
+    const payload = {
+      ticker: tr.dataset.tkr || '',
+      direction: (tr.dataset.dir || 'UP').toUpperCase(),
+      rule: tr.dataset.rule || ''
+    };
+    addFavorite(payload);
+  });
+
+  // --- Add to favorites via context menu button ---
+  addBtn.addEventListener('click', function(ev){
     ev.stopPropagation();
     hideMenu();
-    if (!ctxPayload || !ctxPayload.ticker || !ctxPayload.rule) {
-      showToast('Missing ticker or rule', false);
-      return;
-    }
-    try {
-      const res = await fetch('/favorites/add', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify(ctxPayload)
-      });
-      const data = await res.json();
-      if (data && data.ok) {
-        showToast(`Added ${ctxPayload.ticker} to Favorites`);
-      } else {
-        showToast(data?.error || 'Failed to add favorite', false);
-      }
-    } catch (err) {
-      showToast('Network error adding favorite', false);
-    }
+    addFavorite(ctxPayload);
   });
 
   // --- Save to Archive -> POST /archive/save (unchanged) ---
