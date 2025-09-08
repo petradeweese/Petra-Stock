@@ -1,0 +1,350 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Pattern Finder — Scanner</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <script src="/static/htmx.min.js" defer></script>
+  <style>
+    :root { --card:#0e1116; --ink:#e8eefc; --muted:#99a3b3; --accent:#5ea0ff; --line:#1a2337; }
+    html { font-size: clamp(16px, 1.2vw + 0.5rem, 22px); }
+    body { margin:0; background:#0b0e14; color:var(--ink); font-family: system-ui,-apple-system,Segoe UI,Roboto,Inter,sans-serif; }
+    .wrap { max-width: 1400px; margin: 0 auto; padding: clamp(16px, 2vw, 28px); }
+    .tabs { display:flex; gap:.75rem; flex-wrap:wrap; margin-bottom:1rem; }
+    .tab { text-decoration:none; color:var(--ink); padding:.6rem .9rem; border-radius:.8rem; background:#111726; border:1px solid var(--line); }
+    .tab.active { background:linear-gradient(180deg,#16243b,#122033); border-color:#2a3a5d; box-shadow:0 6px 20px #000 inset,0 1px 0 #2a3a5d; }
+    .card { background: var(--card); border:1px solid var(--line); border-radius: 1rem; padding:1rem; box-shadow: 0 20px 60px rgba(0,0,0,.35); }
+    .grid { display:grid; grid-template-columns: repeat(auto-fit,minmax(220px,1fr)); gap:1rem; }
+    label { display:block; color:var(--muted); margin-bottom:.35rem; }
+    input, select { width:100%; padding:.7rem .8rem; border-radius:.7rem; border:1px solid var(--line); background:#0c1220; color:var(--ink); }
+    .row { display:grid; grid-template-columns: repeat(auto-fit,minmax(220px,1fr)); gap:1rem; margin-top:.5rem; }
+    .actions { display:flex; gap:.7rem; flex-wrap:wrap; margin-top:1rem; align-items:center; }
+    button { cursor:pointer; background: var(--accent); border:none; color:#07101e; font-weight:700; padding:.8rem 1.1rem; border-radius:.8rem; }
+    .note { color: var(--muted); font-size:.95rem; }
+    .results-card { margin-top:1.2rem; border-radius:1rem; border:1px solid #223056; box-shadow: inset 0 0 0 1px #0b1020, 0 20px 60px rgba(0,0,0,.3); padding:1rem; }
+
+    /* Global ctx-menu + toast (live across swaps) */
+    #ctx-menu {
+      position: fixed; z-index: 9999; background: #111; color: #eee;
+      border: 1px solid #333; border-radius: 8px; padding: 6px; min-width: 200px;
+      box-shadow: 0 8px 28px rgba(0,0,0,.25);
+    }
+    #ctx-menu[hidden] { display:none; }
+    #ctx-menu .menu-item {
+      width: 100%; text-align: left; border: 0; background: transparent; color: #eee;
+      padding: 8px 10px; border-radius: 6px; cursor: pointer; font-size: 14px;
+    }
+    #ctx-menu .menu-item:hover { background: #1e1e1e; }
+    #toast {
+      position: fixed; bottom: 20px; right: 20px; z-index: 9999;
+      background: #111; color: #eee; border: 1px solid #333; border-radius: 10px;
+      padding: 10px 14px; font-size: 14px; box-shadow: 0 8px 28px rgba(0,0,0,.25);
+    }
+    #toast[hidden] { display:none; }
+
+    /* Spinner overlay */
+    #scan-overlay {
+      position: fixed; inset: 0; background: rgba(0,0,0,.5);
+      display: none; place-items: center; z-index: 9998;
+    }
+    #scan-overlay .box {
+      background: #0f1220; border:1px solid #223056; padding:16px 18px; border-radius:12px;
+      box-shadow: 0 8px 40px rgba(0,0,0,.4);
+    }
+  
+  /* Show spinner while HTMX request is active */
+  #scan-spinner.htmx-request { display:block !important; }
+  /* optional: dim the results area while loading */
+  .htmx-request #scan-results { opacity:.4; filter:grayscale(30%); }
+
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <nav class="tabs">
+      <a class="tab active" href="/scanner">Scanner</a>
+      <a class="tab" href="/favorites">Favorites</a>
+      <a class="tab" href="/archive">Archive</a>
+      <a class="tab" href="/settings">Settings</a>
+    </nav>
+
+    <div class="card">
+      <h1 style="margin:0 0 1rem 0">Scanner</h1>
+
+      <!-- Form -->
+      <form id="scan-form" action="/scanner/run" method="post"
+            hx-post="/scanner/run" hx-target="#scan-results" hx-indicator="#scan-overlay">
+        <div class="row">
+          <div>
+            <label>Scan Type</label>
+            <select name="scan_type" required>
+              <option value="scan150">Top 150</option>
+              <option value="sp100">S&amp;P 100</option>
+              <option value="single">Single Ticker</option>
+            </select>
+          </div>
+          <div>
+            <label>Ticker (for Single)</label>
+            <input name="ticker" placeholder="AAPL" />
+          </div>
+          <div>
+            <label>Interval</label>
+            <select name="interval">
+              <option>15m</option><option>5m</option><option>30m</option><option>1h</option>
+            </select>
+          </div>
+          <div>
+            <label>Direction</label>
+            <select name="direction">
+              <option>BOTH</option><option>UP</option><option>DOWN</option>
+            </select>
+          </div>
+          <div>
+            <label>Target %</label>
+            <input name="target_pct" type="number" step="0.01" value="1.0" />
+          </div>
+          <div>
+            <label>Stop %</label>
+            <input name="stop_pct" type="number" step="0.01" value="0.5" />
+          </div>
+          <div>
+            <label>Within</label>
+            <div style="display:flex; gap:.5rem;">
+              <input name="window_value" type="number" step="0.5" value="4.0" style="flex:1;" />
+              <select name="window_unit" style="flex:1;">
+                <option>Hours</option><option>Days</option>
+              </select>
+            </div>
+          </div>
+          <div>
+            <label>Lookback (years)</label>
+            <input name="lookback_years" type="number" step="0.1" value="2.0" />
+          </div>
+          <div>
+            <label>Max TT Bars</label>
+            <input name="max_tt_bars" type="number" step="1" value="12" />
+          </div>
+          <div>
+            <label>Min Support</label>
+            <input name="min_support" type="number" step="1" value="20" />
+          </div>
+          <div>
+            <label>Delta (assumed)</label>
+            <input name="delta_assumed" type="number" step="0.01" value="0.40" />
+          </div>
+          <div>
+            <label>Theta per day %</label>
+            <input name="theta_per_day_pct" type="number" step="0.01" value="0.20" />
+          </div>
+          <div>
+            <label>ATRz gate</label>
+            <input name="atrz_gate" type="number" step="0.01" value="0.10" />
+          </div>
+          <div>
+            <label>Slope gate %</label>
+            <input name="slope_gate_pct" type="number" step="0.01" value="0.02" />
+          </div>
+          <div>
+            <label>Use Regime</label>
+            <select name="use_regime"><option value="0">No</option><option value="1">Yes</option></select>
+          </div>
+          <div>
+            <label>Regime Trend Only</label>
+            <select name="regime_trend_only"><option value="0">No</option><option value="1">Yes</option></select>
+          </div>
+          <div>
+            <label>VIX z max</label>
+            <input name="vix_z_max" type="number" step="0.1" value="3.0" />
+          </div>
+          <div>
+            <label>Slippage (bps)</label>
+            <input name="slippage_bps" type="number" step="1" value="7" />
+          </div>
+          <div>
+            <label>Vega scale</label>
+            <input name="vega_scale" type="number" step="0.01" value="0.03" />
+          </div>
+          <div>
+            <label>Scan min Hit %</label>
+            <input name="scan_min_hit" type="number" step="1" value="50" />
+          </div>
+          <div>
+            <label>Scan max DD %</label>
+            <input name="scan_max_dd" type="number" step="1" value="50" />
+          </div>
+          <div>
+            <label>Email results</label>
+            <select name="email_checkbox"><option value="">No</option><option value="on">Yes</option></select>
+          </div>
+        </div>
+
+        <div class="actions">
+          <button type="submit">Run Scan</button>
+          <span class="note">Results appear below with sortable buttons.</span>
+        </div>
+
+        <div class="actions" style="margin-top:1rem;">
+          <button type="submit" name="sort" value="ticker">Sort: Ticker</button>
+          <button type="submit" name="sort" value="roi">Sort: ROI</button>
+          <button type="submit" name="sort" value="hit">Sort: Hit%</button>
+        </div>
+      </form>
+
+      <div class="results-card">
+        <h2 style="margin:0 0 .5rem 0">Results</h2>
+        <div id="scan-results">
+          <p>No results.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Global context menu + toast lives outside swapped area -->
+  <div id="ctx-menu" hidden>
+    <button id="ctx-add-fav" class="menu-item">➕ Add to Favorites</button>
+  </div>
+  <div id="toast" hidden></div>
+
+  <!-- Spinner overlay -->
+  <div id="scan-overlay"><div class="box">⏳ Running scan…</div></div>
+
+  <script>
+  (function(){
+    const overlay = document.getElementById('scan-overlay');
+    const menu = document.getElementById('ctx-menu');
+    const toast = document.getElementById('toast');
+    let ctxRow = null; // current row element
+
+    function showOverlay(){ overlay.style.display = 'grid'; }
+    function hideOverlay(){ overlay.style.display = 'none'; }
+
+    function showMenu(x,y, tr){
+      ctxRow = tr;
+      menu.style.left = x+'px';
+      menu.style.top  = y+'px';
+      menu.hidden = false;
+    }
+    function hideMenu(){ menu.hidden = true; ctxRow = null; }
+
+    function showToast(msg, ok=true){
+      toast.textContent = msg;
+      toast.style.borderColor = ok ? '#2e7d32' : '#8b0000';
+      toast.style.background  = ok ? '#0f3311' : '#2b0f0f';
+      toast.hidden = false;
+      setTimeout(()=>toast.hidden=true, 1800);
+    }
+
+    // Delegate inside #scan-results so it works after HTMX swaps
+    function bindResultsDelegates(){
+      const root = document.getElementById('scan-results');
+      if(!root) return;
+
+      // Right-click on any results row
+      root.addEventListener('contextmenu', function(e){
+        const tr = e.target.closest('tr.row-hover');
+        if(!tr) return;
+        e.preventDefault();
+        showMenu(e.clientX, e.clientY, tr);
+      });
+
+      // Save to Archive button
+      root.addEventListener('click', async function(e){
+        const btn = e.target.closest('#btn-archive');
+        if(!btn) return;
+
+        try {
+          const form = document.getElementById('scan-form');
+          const params = {};
+          if(form){
+            const fd = new FormData(form);
+            for (const [k,v] of fd.entries()) params[k]=v;
+          }
+
+          const rows = [...root.querySelectorAll('tbody tr.row-hover')].map(tr=>{
+            const tds = tr.querySelectorAll('td');
+            return {
+              ticker: tr.dataset.tkr,
+              direction: tr.dataset.dir || 'UP',
+              avg_roi_pct: parseFloat(tds[2].textContent || '0'),
+              hit_pct: parseFloat(tds[3].textContent || '0'),
+              support: parseInt(tds[4].textContent || '0', 10),
+              avg_dd_pct: parseFloat(tds[5].textContent || '0'),
+              stability: parseFloat(tds[6].textContent || '0'),
+              rule: tr.dataset.rule || ''
+            };
+          });
+
+          if (rows.length === 0) {
+            showToast('No rows to archive', false);
+            return;
+          }
+
+          const res = await fetch('/archive/save', {
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({params, rows})
+          });
+          const data = await res.json();
+          if (data?.ok) {
+            showToast('Saved to Archive');
+            if (data.run_id) setTimeout(()=>{ window.location.href = `/results/${data.run_id}` }, 750);
+          } else {
+            showToast(data?.error || 'Failed to save', false);
+          }
+        } catch(e){
+          showToast('Network error saving archive', false);
+        }
+      });
+    }
+
+    // Global listeners
+    document.addEventListener('click', hideMenu);
+    window.addEventListener('blur', hideMenu);
+    window.addEventListener('resize', hideMenu);
+    window.addEventListener('scroll', hideMenu);
+
+    document.getElementById('ctx-add-fav').addEventListener('click', async function(ev){
+      ev.stopPropagation();
+      hideMenu();
+      const tr = ctxRow;
+      if(!tr){ showToast('No row selected', false); return; }
+      const payload = {
+        ticker: tr.dataset.tkr || '',
+        direction: (tr.dataset.dir || 'UP').toUpperCase(),
+        rule: tr.dataset.rule || '',
+        interval: document.querySelector('select[name="interval"]')?.value || '15m'
+      };
+      if(!payload.ticker || !payload.rule){
+        showToast('Missing ticker or rule', false);
+        return;
+      }
+      try{
+        const res = await fetch('/favorites/add', {
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        if (data?.ok) showToast(`Added ${payload.ticker} to Favorites`);
+        else showToast(data?.error || 'Failed to add favorite', false);
+      }catch(e){
+        showToast('Network error adding favorite', false);
+      }
+    });
+
+    // HTMX hooks -> overlay + (re)bind delegates
+    document.body.addEventListener('htmx:beforeRequest', (evt)=>{
+      if (evt.detail.elt?.closest && evt.detail.elt.closest('#scan-form')) showOverlay();
+    });
+    document.body.addEventListener('htmx:afterSwap', (evt)=>{
+      if (evt.detail.target?.id === 'scan-results') {
+        bindResultsDelegates();
+        hideOverlay();
+      }
+    });
+    document.body.addEventListener('htmx:responseError', hideOverlay);
+    document.addEventListener('DOMContentLoaded', bindResultsDelegates);
+  })();
+  </script>
+</body>
+</html>

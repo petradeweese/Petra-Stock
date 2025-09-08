@@ -1,0 +1,242 @@
+{% set safe_rows = rows or [] %}
+<div class="card">
+  <div class="card-header" style="display:flex;align-items:center;gap:.75rem;flex-wrap:wrap;">
+    <strong>Results</strong>
+    {% if ran_at %}<span class="muted"> at {{ ran_at }} </span>{% endif %}
+    {% if note %}<span class="muted"> • {{ note }}</span>{% endif %}
+    <span style="flex:1 1 auto"></span>
+    <button id="btn-archive" class="btn" title="Save this run and rows to Archive">💾 Save to Archive</button>
+  </div>
+
+  {% if safe_rows|length == 0 %}
+    <div class="card-body"><div class="muted">No results.</div></div>
+  {% else %}
+  <div class="card-body" style="overflow:auto;">
+    <table class="table" id="results-table">
+      <thead>
+        <tr>
+          <th><button class="linklike" data-sort="ticker">Ticker</button></th>
+          <th><button class="linklike" data-sort="direction">Dir</button></th>
+          <th><button class="linklike" data-sort="avg_roi_pct">ROI%</button></th>
+          <th><button class="linklike" data-sort="hit_pct">Hit%</button></th>
+          <th>Supp</th>
+          <th>DD%</th>
+          <th>Stability</th>
+          <th>Rule</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in safe_rows %}
+        <tr class="row-hover"
+            data-tkr="{{ r.ticker }}"
+            data-dir="{{ r.direction }}"
+            data-roi="{{ '%.6f'|format(r.avg_roi_pct) }}"
+            data-hit="{{ '%.6f'|format(r.hit_pct) }}"
+            data-supp="{{ r.support }}"
+            data-dd="{{ '%.6f'|format(r.avg_dd_pct) }}"
+            data-stab="{{ '%.6f'|format(r.stability) }}"
+            data-rule="{{ r.rule|e }}">
+          <td>{{ r.ticker }}</td>
+          <td>{{ r.direction }}</td>
+          <td>{{ '%.2f'|format(r.avg_roi_pct) }}</td>
+          <td>{{ '%.1f'|format(r.hit_pct) }}</td>
+          <td>{{ r.support }}</td>
+          <td>{{ '%.2f'|format(r.avg_dd_pct) }}</td>
+          <td>{{ '%.2f'|format(r.stability) }}</td>
+          <td class="rule-td" title="{{ r.rule }}">{{ r.rule }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</div>
+
+<!-- Context menu -->
+<div id="ctx-menu" hidden>
+  <button id="ctx-add-fav" class="menu-item">➕ Add to Favorites</button>
+</div>
+
+<!-- Toast -->
+<div id="toast" hidden></div>
+
+<style>
+  #ctx-menu {
+    position: fixed; z-index: 9999;
+    background: #111; color: #eee;
+    border: 1px solid #333; border-radius: 8px;
+    padding: 6px; min-width: 180px;
+    box-shadow: 0 8px 28px rgba(0,0,0,.25);
+  }
+  #ctx-menu .menu-item {
+    width: 100%; text-align: left; border: 0; background: transparent; color: #eee;
+    padding: 8px 10px; border-radius: 6px; cursor: pointer; font-size: 14px;
+  }
+  #ctx-menu .menu-item:hover { background: #1e1e1e; }
+  #toast {
+    position: fixed; bottom: 20px; right: 20px; z-index: 9999;
+    background: #111; color: #eee; border: 1px solid #333; border-radius: 10px;
+    padding: 10px 14px; font-size: 14px; box-shadow: 0 8px 28px rgba(0,0,0,.25);
+  }
+  .row-hover { cursor: context-menu; }
+  .rule-td { max-width: 480px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .linklike { border: 0; background: transparent; color: #7fb3ff; cursor: pointer; }
+  .linklike:hover { text-decoration: underline; }
+  .btn {
+    border: 1px solid #2b2b2b; background:#161616; color:#eee; 
+    border-radius: 10px; padding: 6px 10px; cursor: pointer;
+  }
+  .btn:hover { background:#1e1e1e; }
+</style>
+
+<script>
+(function attachResultsBehaviors(){
+  const tbl = document.getElementById('results-table');
+  const menu = document.getElementById('ctx-menu');
+  const addBtn = document.getElementById('ctx-add-fav');
+  const toast = document.getElementById('toast');
+  const archiveBtn = document.getElementById('btn-archive');
+
+  let ctxPayload = null; // {ticker, direction, rule}
+
+  function showMenu(x, y) {
+    menu.style.left = x + 'px';
+    menu.style.top = y + 'px';
+    menu.hidden = false;
+  }
+  function hideMenu() { menu.hidden = true; }
+
+  function showToast(msg, ok=true) {
+    toast.textContent = msg;
+    toast.style.borderColor = ok ? '#2e7d32' : '#8b0000';
+    toast.style.background = ok ? '#0f3311' : '#2b0f0f';
+    toast.hidden = false;
+    setTimeout(() => { toast.hidden = true; }, 1800);
+  }
+
+  // --- Right-click handler on table rows (event delegation) ---
+  document.addEventListener('contextmenu', function(e) {
+    const tr = e.target?.closest('tr.row-hover');
+    if (!tr || !tbl?.contains(tr)) return;
+    e.preventDefault();
+    ctxPayload = {
+      ticker: tr.dataset.tkr || '',
+      direction: (tr.dataset.dir || 'UP').toUpperCase(),
+      rule: tr.dataset.rule || ''
+    };
+    showMenu(e.clientX, e.clientY);
+  });
+
+  // Click elsewhere closes menu
+  document.addEventListener('click', hideMenu);
+  window.addEventListener('blur', hideMenu);
+  window.addEventListener('resize', hideMenu);
+  window.addEventListener('scroll', hideMenu);
+
+  // --- Add to favorites -> POST /favorites/add ---
+  addBtn.addEventListener('click', async function(ev) {
+    ev.stopPropagation();
+    hideMenu();
+    if (!ctxPayload || !ctxPayload.ticker || !ctxPayload.rule) {
+      showToast('Missing ticker or rule', false);
+      return;
+    }
+    try {
+      const res = await fetch('/favorites/add', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(ctxPayload)
+      });
+      const data = await res.json();
+      if (data && data.ok) {
+        showToast(`Added ${ctxPayload.ticker} to Favorites`);
+      } else {
+        showToast(data?.error || 'Failed to add favorite', false);
+      }
+    } catch (err) {
+      showToast('Network error adding favorite', false);
+    }
+  });
+
+  // --- Save to Archive -> POST /archive/save (unchanged) ---
+  archiveBtn?.addEventListener('click', async function() {
+    try {
+      const form = document.getElementById('scan-form');
+      const params = {};
+      if (form) {
+        const fd = new FormData(form);
+        for (const [k, v] of fd.entries()) params[k] = v;
+      }
+      const rows = [...document.querySelectorAll('#results-table tbody tr.row-hover')].map(tr => {
+        const tds = tr.querySelectorAll('td');
+        return {
+          ticker: tr.dataset.tkr,
+          direction: (tr.dataset.dir || 'UP'),
+          avg_roi_pct: parseFloat(tds[2].textContent || '0'),
+          hit_pct: parseFloat(tds[3].textContent || '0'),
+          support: parseInt(tds[4].textContent || '0', 10),
+          avg_dd_pct: parseFloat(tds[5].textContent || '0'),
+          stability: parseFloat(tds[6].textContent || '0'),
+          rule: tr.dataset.rule || ''
+        };
+      });
+      if (rows.length === 0) { showToast('No rows to archive', false); return; }
+
+      const payload = { params, rows };
+      const res = await fetch('/archive/save', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      if (data?.ok) {
+        showToast('Saved to Archive');
+        if (data.run_id) setTimeout(() => { window.location.href = `/results/${data.run_id}`; }, 750);
+      } else {
+        showToast(data?.error || 'Failed to save', false);
+      }
+    } catch (e) {
+      showToast('Network error saving archive', false);
+    }
+  });
+
+  // --- Client-side sorting ---
+  function cmpNum(a,b){ return a-b; }
+  function cmpStr(a,b){ return a.localeCompare(b); }
+
+  function sortBy(key) {
+    const rows = Array.from(tbl.querySelectorAll('tbody tr'));
+    const dir = sortBy._toggle[key] = !(sortBy._toggle[key]); // toggle asc/desc
+    const get = (tr) => {
+      switch (key) {
+        case 'ticker': return tr.dataset.tkr || '';
+        case 'direction': return tr.dataset.dir || '';
+        case 'avg_roi_pct': return parseFloat(tr.dataset.roi || '0');
+        case 'hit_pct': return parseFloat(tr.dataset.hit || '0');
+        case 'support': return parseInt(tr.dataset.supp || '0',10);
+        case 'avg_dd_pct': return parseFloat(tr.dataset.dd || '0');
+        case 'stability': return parseFloat(tr.dataset.stab || '0');
+        default: return '';
+      }
+    };
+    const isNum = ['avg_roi_pct','hit_pct','support','avg_dd_pct','stability'].includes(key);
+    rows.sort((ra, rb) => {
+      const A = get(ra), B = get(rb);
+      const base = isNum ? cmpNum(A,B) : cmpStr(String(A), String(B));
+      return dir ? -base : base; // dir=true => desc
+    });
+    const tbody = tbl.querySelector('tbody');
+    rows.forEach(r => tbody.appendChild(r));
+  }
+  sortBy._toggle = {};
+
+  document.querySelectorAll('th .linklike[data-sort]').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      const key = btn.getAttribute('data-sort');
+      sortBy(key);
+    });
+  });
+
+})();
+</script>
