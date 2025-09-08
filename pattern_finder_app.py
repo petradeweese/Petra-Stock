@@ -32,7 +32,7 @@ from sklearn.tree import DecisionTreeRegressor
 from sklearn.model_selection import TimeSeriesSplit
 
 from multiprocessing import Pool, cpu_count
-from indices import SP100, TOP150  # Index lists
+from indices import SP100, TOP150, TOP250  # Index lists
 
 # Trust store for TLS (fixes CERTIFICATE_VERIFY_FAILED on macOS)
 os.environ.setdefault("SSL_CERT_FILE", certifi.where())
@@ -1131,8 +1131,11 @@ class App:
     # ---------- Scanner ----------
     def on_scan(self, which="sp"):
         try:
-            p=self._params(); self.status.set(f"Scanning {'S&P100' if which=='sp' else 'Top150'}…"); self.root.update_idletasks()
-            tickers=SP100 if which=="sp" else TOP150
+            p=self._params(); label = 'S&P100' if which=='sp' else 'Top250' if which=='top250' else 'Top150'
+            self.status.set(f"Scanning {label}…"); self.root.update_idletasks()
+            if which=="sp": tickers=SP100
+            elif which=="top250": tickers=TOP250
+            else: tickers=TOP150
             ev_dates=load_event_dates_from_csv(self.events.get())
             ev_masks={}
             for t in tickers:
