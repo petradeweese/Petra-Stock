@@ -38,6 +38,9 @@
             <th>Ticker</th>
             <th>Direction</th>
             <th>Interval</th>
+            <th>ROI%</th>
+            <th>Hit%</th>
+            <th>DD%</th>
             <th>Rule</th>
           </tr>
         </thead>
@@ -48,6 +51,9 @@
             <td><strong>{{ f["ticker"] }}</strong></td>
             <td>{{ f["direction"] }}</td>
             <td>{{ f["interval"] }}</td>
+            <td>{{ '{:.2f}'.format(f['avg_roi_pct']) if f['avg_roi_pct'] is not none else '' }}</td>
+            <td>{{ '{:.1f}'.format(f['hit_pct']) if f['hit_pct'] is not none else '' }}</td>
+            <td>{{ '{:.2f}'.format(f['avg_dd_pct']) if f['avg_dd_pct'] is not none else '' }}</td>
             <td><code>{{ f["rule"] }}</code></td>
           </tr>
           {% endfor %}
