@@ -4,6 +4,11 @@
   <div class="card">
     <h1 style="margin-top:0;">Favorites</h1>
     {% if favorites and favorites|length %}
+    <div class="actions">
+      <form method="post" action="/favorites/delete-duplicates" style="margin:0;">
+        <button type="submit">Remove Duplicates</button>
+      </form>
+    </div>
     <table class="table">
       <thead>
         <tr>
@@ -31,7 +36,7 @@
           <td><code>{{ f["rule"] }}</code></td>
           <td>
             <form method="post" action="/favorites/delete/{{ f['id'] }}" style="margin:0;">
-              <button type="submit" style="background:none;border:none;color:var(--muted);cursor:pointer;">&#10005;</button>
+              <button type="submit" class="del-btn">&#10005;</button>
             </form>
           </td>
         </tr>
