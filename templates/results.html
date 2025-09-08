@@ -34,15 +34,15 @@
             data-hit="{{ '%.6f'|format(r.hit_pct) }}"
             data-supp="{{ r.support }}"
             data-dd="{{ '%.6f'|format(r.avg_dd_pct) }}"
-            data-stab="{{ '%.6f'|format(r.stability) }}"
+            data-stab="{{ '%.6f'|format(r.get('stability', 0)) }}"
             data-rule="{{ r.rule|e }}">
           <td>{{ r.ticker }}</td>
           <td>{{ r.direction }}</td>
-          <td>{{ '%.2f'|format(r.avg_roi_pct) }}</td>
+          <td>{{ '{:.0f}'.format(r.avg_roi_pct * 100 if r.avg_roi_pct is not none and r.avg_roi_pct <= 1 else r.avg_roi_pct) }}</td>
           <td>{{ '%.1f'|format(r.hit_pct) }}</td>
           <td>{{ r.support }}</td>
-          <td>{{ '%.2f'|format(r.avg_dd_pct) }}</td>
-          <td>{{ '%.2f'|format(r.stability) }}</td>
+          <td>{{ '{:.0f}'.format(r.avg_dd_pct * 100 if r.avg_dd_pct is not none and r.avg_dd_pct <= 1 else r.avg_dd_pct) }}</td>
+          <td>{{ '{:.2f}'.format(r.get('stability', 0)) }}</td>
           <td class="rule-td" title="{{ r.rule }}">{{ r.rule }}</td>
         </tr>
         {% endfor %}
@@ -152,11 +152,11 @@
         return {
           ticker: tr.dataset.tkr,
           direction: (tr.dataset.dir || 'UP'),
-          avg_roi_pct: parseFloat(tds[2].textContent || '0'),
-          hit_pct: parseFloat(tds[3].textContent || '0'),
-          support: parseInt(tds[4].textContent || '0', 10),
-          avg_dd_pct: parseFloat(tds[5].textContent || '0'),
-          stability: parseFloat(tds[6].textContent || '0'),
+          avg_roi_pct: parseFloat(tr.dataset.roi || '0'),
+          hit_pct: parseFloat(tr.dataset.hit || '0'),
+          support: parseInt(tr.dataset.supp || tds[4].textContent || '0', 10),
+          avg_dd_pct: parseFloat(tr.dataset.dd || '0'),
+          stability: parseFloat(tr.dataset.stab || '0'),
           rule: tr.dataset.rule || ''
         };
       });
