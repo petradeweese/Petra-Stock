@@ -32,34 +32,10 @@ from sklearn.tree import DecisionTreeRegressor
 from sklearn.model_selection import TimeSeriesSplit
 
 from multiprocessing import Pool, cpu_count
+from indices import SP100, TOP150  # Index lists
 
 # Trust store for TLS (fixes CERTIFICATE_VERIFY_FAILED on macOS)
 os.environ.setdefault("SSL_CERT_FILE", certifi.where())
-
-# -----------------------------
-# Index lists (edit any time)
-# -----------------------------
-SP100 = [
-    "AAPL","ABBV","ABT","ACN","ADBE","AMD","AMGN","AMT","AMZN","AVGO","AXP","BA","BAC","BK",
-    "BLK","BMY","BRK-B","C","CAT","CHTR","CL","CMCSA","COF","COP","COST","CRM","CSCO","CVS",
-    "CVX","DHR","DIS","DOW","DUK","EMR","EXC","F","FDX","GE","GILD","GM","GOOGL","GS","HD",
-    "HON","IBM","INTC","JNJ","JPM","KHC","KO","LIN","LLY","LMT","LOW","MA","MCD","MDLZ",
-    "META","MET","MMM","MO","MRK","MS","MSFT","NEE","NFLX","NKE","NVDA","ORCL","PEP","PFE",
-    "PG","PM","PYPL","QCOM","RTX","SBUX","SCHW","SO","SPGI","T","TGT","TMO","TMUS","TXN",
-    "UNH","UNP","UPS","USB","V","VZ","WBA","WFC","WELL","WMT","XOM"
-]
-
-TOP150 = [
-    "SPY","QQQ","AAPL","MSFT","NVDA","AMZN","TSLA","META","GOOGL","AMD","NFLX","AVGO","CRM","ADBE",
-    "PYPL","INTC","ORCL","CSCO","QCOM","TXN","MU","SMCI","PLTR","SNOW","NOW","TEAM","JPM","BAC","GS",
-    "MS","WFC","C","V","MA","AXP","KO","PEP","PG","PM","T","VZ","HD","LOW","COST","WMT","DIS","CMCSA",
-    "TGT","MCD","SBUX","ABNB","UBER","NKE","DE","CAT","BA","GE","GM","F","XOM","CVX","SLB","COP","OXY",
-    "PFE","MRK","LLY","ABBV","BMY","UNH","TMO","ISRG","MDT","CVS","CI","HUM","VRTX","REGN","PANW","FTNT",
-    "CRWD","ZS","OKTA","DDOG","NET","CHTR","TMUS","NOC","LMT","RTX","HON","MMM","DELL","HPQ","IBM","INTU",
-    "ADP","WDAY","ORLY","AZO","DAL","UAL","LUV","CCL","RCL","CMG","DPZ","YUM","FCX","NUE","APD","LIN",
-    "DOW","CF","MOS","FSLR","ENPH","SEDG","BLK","SCHW","MSCI","SPGI","ICE","CME","COIN","SOFI","IYR","O",
-    "AMT","PLD","EQIX","BABA","JD","PDD","NIO","XPEV","LI","ROKU","RBLX","RIVN","LCID"
-]
 
 # -----------------------------
 # Files & Cache

@@ -18,6 +18,7 @@ from fastapi.templating import Jinja2Templates
 # Market hours / calendar (XNYS)
 import pandas as pd
 import pandas_market_calendars as mcal
+from indices import SP100, TOP150  # Index lists
 
 # Ensure required directories exist before mounting StaticFiles
 os.makedirs("templates", exist_ok=True)
@@ -201,27 +202,6 @@ def set_last_run(boundary_iso: str):
 # -----------------------------
 # Universe helpers
 # -----------------------------
-SP100 = [
-    "AAPL","ABBV","ABT","ACN","ADBE","AMD","AMGN","AMT","AMZN","AVGO","AXP","BA","BAC","BK",
-    "BLK","BMY","BRK-B","C","CAT","CHTR","CL","CMCSA","COF","COP","COST","CRM","CSCO","CVS",
-    "CVX","DHR","DIS","DOW","DUK","EMR","EXC","F","FDX","GE","GILD","GM","GOOGL","GS","HD",
-    "HON","IBM","INTC","JNJ","JPM","KHC","KO","LIN","LLY","LMT","LOW","MA","MCD","MDLZ",
-    "META","MET","MMM","MO","MRK","MS","MSFT","NEE","NFLX","NKE","NVDA","ORCL","PEP","PFE",
-    "PG","PM","PYPL","QCOM","RTX","SBUX","SCHW","SO","SPGI","T","TGT","TMO","TMUS","TXN",
-    "UNH","UNP","UPS","USB","V","VZ","WBA","WFC","WELL","WMT","XOM"
-]
-
-TOP150 = [
-    "SPY","QQQ","AAPL","MSFT","NVDA","AMZN","TSLA","META","GOOGL","AMD","NFLX","AVGO","CRM","ADBE",
-    "PYPL","INTC","ORCL","CSCO","QCOM","TXN","MU","SMCI","PLTR","SNOW","NOW","TEAM","JPM","BAC","GS",
-    "MS","WFC","C","V","MA","AXP","KO","PEP","PG","PM","T","VZ","HD","LOW","COST","WMT","DIS","CMCSA",
-    "TGT","MCD","SBUX","ABNB","UBER","NKE","DE","CAT","BA","GE","GM","F","XOM","CVX","SLB","COP","OXY",
-    "PFE","MRK","LLY","ABBV","BMY","UNH","TMO","ISRG","MDT","CVS","CI","HUM","VRTX","REGN","PANW","FTNT",
-    "CRWD","ZS","OKTA","DDOG","NET","CHTR","TMUS","NOC","LMT","RTX","HON","MMM","DELL","HPQ","IBM","INTU",
-    "ADP","WDAY","ORLY","AZO","DAL","UAL","LUV","CCL","RCL","CMG","DPZ","YUM","FCX","NUE","APD","LIN",
-    "DOW","CF","MOS","FSLR","ENPH","SEDG","BLK","SCHW","MSCI","SPGI","ICE","CME","COIN","SOFI","IYR","O",
-    "AMT","PLD","EQIX","BABA","JD","PDD","NIO","XPEV","LI","ROKU","RBLX","RIVN","LCID"
-]
 
 def ticker_universe(scan_type: str, explicit_ticker: Optional[str]) -> List[str]:
     if scan_type == "scan150":
