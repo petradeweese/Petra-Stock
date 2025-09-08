@@ -63,6 +63,7 @@ def _install_real_engine_adapter():
             supp = get("support", "n", "count", default=0)
             tt = get("avg_tt", default=0.0)
             stab = get("stability", default=0.0)
+            sharpe = get("sharpe", "sharpe_ratio", default=0.0)
             rule = get("rule", "rule_str", default="")
             direct = get("direction", default=params.get("direction", "UP"))
             tkr = get("ticker", default=params.get("ticker", "?"))
@@ -83,6 +84,7 @@ def _install_real_engine_adapter():
                 "avg_tt": fnum(tt),
                 "avg_dd_pct": float(dd_pct),
                 "stability": fnum(stab),
+                "sharpe": fnum(sharpe),
                 "rule": str(rule or ""),
             }
 
@@ -207,8 +209,8 @@ def _desktop_like_single(ticker: str, params: dict) -> dict:
         if df.empty:
             return {}
         r = df.sort_values(
-            ["avg_roi", "hit_rate", "support", "stability"],
-            ascending=[False, False, False, False],
+            ["sharpe", "avg_roi", "hit_rate", "support", "stability"],
+            ascending=[False, False, False, False, False],
         ).iloc[0]
         return {
             "ticker": ticker,
@@ -219,6 +221,7 @@ def _desktop_like_single(ticker: str, params: dict) -> dict:
             "avg_tt": float(r["avg_tt"]) if pd.notna(r["avg_tt"]) else 0.0,
             "avg_dd_pct": float(r["avg_dd"]) * 100.0,
             "stability": float(r.get("stability", 0.0)),
+            "sharpe": float(r.get("sharpe", 0.0)),
             "rule": str(r["rule"]),
         }
     except Exception:
@@ -249,6 +252,7 @@ def compute_scan_for_ticker(ticker: str, params: Dict[str, Any]) -> Dict[str, An
         return sorted(
             picks,
             key=lambda r: (
+                r.get("sharpe", 0.0),
                 r.get("avg_roi_pct", 0.0),
                 r.get("hit_pct", 0.0),
                 r.get("support", 0),

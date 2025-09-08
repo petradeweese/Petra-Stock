@@ -477,10 +477,14 @@ def analyze_roi_mode(ticker, interval, direction,
             if not lst: continue
             supp=len(lst); hits=sum(x["hit"] for x in lst)
             hit_rate=hits/supp; avg_tt=float(np.nanmean([x["tt"] for x in lst]))
-            avg_dd=float(np.mean([x["dd"] for x in lst])); avg_roi=float(np.mean([x["roi"] for x in lst]))
+            avg_dd=float(np.mean([x["dd"] for x in lst]))
+            roi_vals=[x["roi"] for x in lst]; avg_roi=float(np.mean(roi_vals))
+            roi_std=float(np.std(roi_vals)) if len(roi_vals) > 1 else 0.0
+            sharpe=avg_roi/roi_std if roi_std > 1e-9 else 0.0
             rows.append({"node_id":int(nid),"support":supp,"hit_rate":hit_rate,
-                         "avg_tt":avg_tt,"avg_dd":avg_dd,"avg_roi":avg_roi,"rule":_fmt_rule(paths.get(nid,[]))})
-        return pd.DataFrame(rows).sort_values(["avg_roi","hit_rate","support"], ascending=[False,False,False]).reset_index(drop=True)
+                         "avg_tt":avg_tt,"avg_dd":avg_dd,"avg_roi":avg_roi,
+                         "sharpe":sharpe,"rule":_fmt_rule(paths.get(nid,[]))})
+        return pd.DataFrame(rows).sort_values(["sharpe","avg_roi","hit_rate","support"], ascending=[False,False,False,False]).reset_index(drop=True)
 
     df_te = _eval_slice(X_te, G_te)
 
@@ -495,10 +499,10 @@ def analyze_roi_mode(ticker, interval, direction,
     stability = _wf_score(3)
 
     def _filter(df):
-        if df is None or df.empty: 
-            return pd.DataFrame(columns=["direction","node_id","support","hit_rate","avg_tt","avg_dd","avg_roi","rule","stability","diag"])
+        if df is None or df.empty:
+            return pd.DataFrame(columns=["direction","node_id","support","hit_rate","avg_tt","avg_dd","avg_roi","sharpe","rule","stability","diag"])
         df = df[df["support"]>=min_support].copy()
-        if df.empty: 
+        if df.empty:
             df["diag"]=diag; return df
         df.insert(0,"direction",direction)
         df["stability"]=stability; df["diag"]=diag
@@ -535,7 +539,8 @@ def _scan_worker(args):
         return {"ticker":tkr,"direction":r["direction"],"avg_roi_pct":r["avg_roi"]*100.0,
                 "hit_pct":r["hit_rate"]*100.0,"support":int(r["support"]),
                 "avg_tt":r["avg_tt"],"avg_dd_pct":r["avg_dd"]*100.0,
-                "stability":r["stability"],"rule":r["rule"]}
+                "stability":r["stability"],"sharpe":r.get("sharpe",0.0),
+                "rule":r["rule"]}
     except Exception:
         return None
 
@@ -547,9 +552,9 @@ def scan_parallel(tickers, cfg, max_workers=None):
         for res in pool.imap_unordered(_scan_worker, args):
             if res is not None: out.append(res)
     if not out:
-        return pd.DataFrame(columns=["ticker","direction","avg_roi_pct","hit_pct","support","avg_tt","avg_dd_pct","stability","rule"])
-    return pd.DataFrame(out).sort_values(["avg_roi_pct","hit_pct","support","stability"],
-                                         ascending=[False,False,False,False]).reset_index(drop=True)
+        return pd.DataFrame(columns=["ticker","direction","avg_roi_pct","hit_pct","support","avg_tt","avg_dd_pct","stability","sharpe","rule"])
+    return pd.DataFrame(out).sort_values(["sharpe","avg_roi_pct","hit_pct","support","stability"],
+                                         ascending=[False,False,False,False,False]).reset_index(drop=True)
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 def scan_parallel_threaded(tickers, cfg, max_workers=None):
@@ -570,10 +575,10 @@ def scan_parallel_threaded(tickers, cfg, max_workers=None):
             except Exception:
                 pass
     if not out:
-        return pd.DataFrame(columns=["ticker","direction","avg_roi_pct","hit_pct","support","avg_tt","avg_dd_pct","stability","rule"])
+        return pd.DataFrame(columns=["ticker","direction","avg_roi_pct","hit_pct","support","avg_tt","avg_dd_pct","stability","sharpe","rule"])
     return pd.DataFrame(out).sort_values(
-        ["avg_roi_pct","hit_pct","support","stability"],
-        ascending=[False, False, False, False]
+        ["sharpe","avg_roi_pct","hit_pct","support","stability"],
+        ascending=[False, False, False, False, False]
     ).reset_index(drop=True)
 
 # -----------------------------
@@ -1145,7 +1150,7 @@ class App:
                          slippage_bps=p["slippage_bps"],vega_scale=p["vega_scale"],
                          scan_min_hit=float(self.scan_min_hit.get()),scan_max_dd=float(self.scan_max_dd.get())*100.0)
                 out_all.append(scan_parallel(tickers,cfg))
-            out=pd.concat(out_all,axis=0).sort_values(["avg_roi_pct","hit_pct","support","stability"],ascending=[False,False,False,False]).reset_index(drop=True) if out_all else pd.DataFrame()
+            out=pd.concat(out_all,axis=0).sort_values(["sharpe","avg_roi_pct","hit_pct","support","stability"],ascending=[False,False,False,False,False]).reset_index(drop=True) if out_all else pd.DataFrame()
             tv=self.scan_sp if which=="sp" else self.scan_top
             for r in tv.get_children(): tv.delete(r)
             if out is not None and not out.empty:
