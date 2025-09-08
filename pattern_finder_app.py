@@ -77,7 +77,7 @@ def _download_prices(ticker: str, interval: str, lookback_years: float) -> pd.Da
             sym = ticker if (ticker is not None and ticker in set(lvl0)) else lvl0[0]
             try:
                 df = df.xs(sym, axis=1, level=0, drop_level=True)
-            except Exception:
+            except KeyError:
                 df.columns = [c[-1] if isinstance(c, tuple) else c for c in df.columns]
         df = df.rename(columns={c: c.title() for c in df.columns})
         keep = [c for c in ["Open","High","Low","Close","Adj Close","Volume"] if c in df.columns]
@@ -134,7 +134,7 @@ def _download_market_refs(interval: str, lookback_years: float):
             sym = ticker if (ticker is not None and ticker in set(lvl0)) else lvl0[0]
             try:
                 df = df.xs(sym, axis=1, level=0, drop_level=True)
-            except Exception:
+            except KeyError:
                 df.columns = [c[-1] if isinstance(c, tuple) else c for c in df.columns]
         df = df.rename(columns={c: c.title() for c in df.columns})
         if getattr(df.index, "tz", None) is not None:
@@ -303,7 +303,7 @@ def load_event_dates_from_csv(path: str) -> set:
         df = pd.read_csv(path)
         col = "date" if "date" in df.columns else df.columns[0]
         return set(pd.to_datetime(df[col]).dt.date)
-    except Exception:
+    except (OSError, pd.errors.ParserError, KeyError, ValueError):
         return set()
 
 def build_event_mask(index: pd.DatetimeIndex, dates: set) -> pd.Series:
@@ -536,7 +536,7 @@ def _scan_worker(args):
                 "hit_pct":r["hit_rate"]*100.0,"support":int(r["support"]),
                 "avg_tt":r["avg_tt"],"avg_dd_pct":r["avg_dd"]*100.0,
                 "stability":r["stability"],"rule":r["rule"]}
-    except Exception:
+    except (RuntimeError, ValueError):
         return None
 
 def scan_parallel(tickers, cfg, max_workers=None):

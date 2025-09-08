@@ -6,6 +6,7 @@ import math
 import time
 import asyncio
 import sqlite3
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, List, Optional, Tuple, Callable
 from threading import Lock
@@ -19,6 +20,9 @@ from fastapi.templating import Jinja2Templates
 import pandas as pd
 import pandas_market_calendars as mcal
 from indices import SP100, TOP150  # Index lists
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Ensure required directories exist before mounting StaticFiles
 os.makedirs("templates", exist_ok=True)
@@ -256,7 +260,7 @@ def _install_real_engine_adapter():
             fn = getattr(mod, "analyze_roi_mode")
             mode = "single"
         else:
-            print("[adapter] pattern_finder_app found, but no known scan function.")
+            logger.warning("[adapter] pattern_finder_app found, but no known scan function")
             _real_scan_single = None
             return
 
@@ -270,8 +274,10 @@ def _install_real_engine_adapter():
                 return default
 
             def fnum(x):
-                try: return float(x)
-                except: return 0.0
+                try:
+                    return float(x)
+                except (TypeError, ValueError):
+                    return 0.0
 
             def to_pct(x):
                 x = fnum(x)
@@ -318,15 +324,15 @@ def _install_real_engine_adapter():
                         if isinstance(df, pd.DataFrame) and not df.empty:
                             row = df.iloc[0].to_dict()
                             return _row_to_dict(row, params)
-                    except Exception:
-                        pass
+                    except (ImportError, AttributeError):
+                        logger.debug("Pandas import failed or invalid DataFrame for %s", ticker, exc_info=True)
                     if isinstance(df, list) and df:
                         return _row_to_dict(df[0], params)
                     if isinstance(df, dict) and df:
                         return _row_to_dict(df, params)
                     return {}
-                except Exception as e:
-                    print(f"[adapter] scan_* error for {ticker}: {e!r}")
+                except (RuntimeError, ValueError) as e:
+                    logger.error("[adapter] scan_* error for %s with params %s", ticker, params, exc_info=True)
                     return {}
         else:
             def wrapper(ticker: str, params: Dict[str, Any]) -> Dict[str, Any]:
@@ -369,14 +375,14 @@ def _install_real_engine_adapter():
                         "rule": row.get("rule", ""),
                     }
                     return _row_to_dict(mapped, params)
-                except Exception as e:
-                    print(f"[adapter] analyze_roi_mode error for {ticker}: {e!r}")
+                except (RuntimeError, ValueError) as e:
+                    logger.error("[adapter] analyze_roi_mode error for %s with params %s", ticker, params, exc_info=True)
                     return {}
 
         _real_scan_single = wrapper
-        print(f"[adapter] Using REAL engine from pattern_finder_app ({mode}).")
-    except Exception as e:
-        print("[adapter] pattern_finder_app not available or failed to import:", repr(e))
+        logger.info("[adapter] Using REAL engine from pattern_finder_app (%s)", mode)
+    except (ImportError, AttributeError) as e:
+        logger.warning("[adapter] pattern_finder_app not available or failed to import: %s", e, exc_info=True)
         _real_scan_single = None
 
 _install_real_engine_adapter()
@@ -385,7 +391,7 @@ _install_real_engine_adapter()
 try:
     import pattern_finder_app as _pfa
     import pandas as pd
-except Exception:
+except ImportError:
     _pfa = None
 
 def _desktop_like_single(ticker: str, params: dict) -> dict:
@@ -438,15 +444,15 @@ def _desktop_like_single(ticker: str, params: dict) -> dict:
             "stability": float(r.get("stability", 0.0)),
             "rule": str(r["rule"]),
         }
-    except Exception as e:
-        print(f"[adapter-single] {ticker} failed: {e!r}")
+    except (ValueError, RuntimeError) as e:
+        logger.error("[adapter-single] %s failed with params %s", ticker, params, exc_info=True)
         return {}
 
 # -----------------------------
 # Scheduler (15m during market hours, throttled)
 # -----------------------------
 async def favorites_loop():
-    print("[scheduler] started")
+    logger.info("[scheduler] started")
     while True:
         try:
             ts = now_et()
@@ -490,7 +496,7 @@ async def favorites_loop():
 
             await asyncio.sleep(60)
         except Exception as e:
-            print("[scheduler] error:", repr(e))
+            logger.error("[scheduler] error at %s", ts.isoformat() if 'ts' in locals() else 'unknown time', exc_info=True)
             await asyncio.sleep(60)
 
 @app.on_event("startup")
@@ -609,7 +615,7 @@ async def archive_save(request: Request, db=Depends(get_db)):
             )
         db.connection.commit()
         return {"ok": True, "run_id": run_id}
-    except Exception as e:
+    except sqlite3.Error as e:
         return JSONResponse({"ok": False, "error": repr(e)}, status_code=500)
 
 @app.get("/settings", response_class=HTMLResponse)
@@ -675,8 +681,8 @@ async def scanner_run(request: Request):
     # Optional filters (match desktop defaults)
     try:
         scan_min_hit = float(params.get("scan_min_hit", 0.0))
-        scan_max_dd  = float(params.get("scan_max_dd", 100.0))
-    except Exception:
+        scan_max_dd = float(params.get("scan_max_dd", 100.0))
+    except (TypeError, ValueError):
         scan_min_hit, scan_max_dd = 0.0, 100.0
 
     rows = [
@@ -758,7 +764,7 @@ def compute_scan_for_ticker(ticker: str, params: Dict[str, Any]) -> Dict[str, An
     """
     try:
         dirn = str(params.get("direction", "UP")).upper()
-    except Exception:
+    except (AttributeError, TypeError, ValueError):
         dirn = "UP"
 
     if dirn == "BOTH":
@@ -829,7 +835,7 @@ def _coerce_scan_params(form: dict) -> dict:
             return default
         try:
             return cast(v)
-        except Exception:
+        except (TypeError, ValueError):
             return default
 
     return {
