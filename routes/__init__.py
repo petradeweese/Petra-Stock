@@ -111,7 +111,28 @@ def results_from_archive(request: Request, run_id: int, db=Depends(get_db)):
 @router.get("/favorites", response_class=HTMLResponse)
 def favorites_page(request: Request, db=Depends(get_db)):
     db.execute("SELECT * FROM favorites ORDER BY id DESC")
-    favs = db.fetchall()
+    favs = [dict(r) for r in db.fetchall()]
+    for f in favs:
+        db.execute(
+            """
+            SELECT rr.avg_roi_pct, rr.hit_pct, rr.avg_dd_pct
+            FROM run_results rr
+            JOIN runs r ON rr.run_id = r.id
+            WHERE rr.ticker=? AND rr.rule=?
+            ORDER BY r.id DESC
+            LIMIT 1
+            """,
+            (f["ticker"], f["rule"]),
+        )
+        row = db.fetchone()
+        if row:
+            f["avg_roi_pct"] = row["avg_roi_pct"]
+            f["hit_pct"] = row["hit_pct"]
+            f["avg_dd_pct"] = row["avg_dd_pct"]
+        else:
+            f["avg_roi_pct"] = None
+            f["hit_pct"] = None
+            f["avg_dd_pct"] = None
     return templates.TemplateResponse(request, "favorites.html", {"favorites": favs})
 
 
