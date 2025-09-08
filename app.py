@@ -1,3 +1,4 @@
+import logging
 import os
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
@@ -9,11 +10,20 @@ from utils import now_et, market_is_open
 from scanner import compute_scan_for_ticker
 
 
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+
 def create_app() -> FastAPI:
     os.makedirs("templates", exist_ok=True)
     os.makedirs("static", exist_ok=True)
 
-    init_db()
+    logger.info("Initializing database")
+    try:
+        init_db()
+    except Exception:
+        logger.exception("Failed to initialize database")
+        raise
 
     app = FastAPI()
     app.mount("/static", StaticFiles(directory="static"), name="static")

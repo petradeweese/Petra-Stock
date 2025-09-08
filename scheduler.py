@@ -1,13 +1,16 @@
 import asyncio
+import logging
 import sqlite3
 from datetime import datetime
 from typing import Callable, Dict, Any
 
 from db import DB_PATH, get_settings, set_last_run
 
+logger = logging.getLogger(__name__)
+
 
 async def favorites_loop(market_is_open: Callable[[datetime], bool], now_et: Callable[[], datetime], compute_scan_for_ticker: Callable[[str, Dict[str, Any]], Dict[str, Any]]):
-    print("[scheduler] started")
+    logger.info("scheduler started")
     while True:
         try:
             ts = now_et()
@@ -48,7 +51,7 @@ async def favorites_loop(market_is_open: Callable[[datetime], bool], now_et: Cal
                         set_last_run(boundary.isoformat(), db)
             await asyncio.sleep(60)
         except Exception as e:
-            print("[scheduler] error:", repr(e))
+            logger.error("scheduler error: %r", e)
             await asyncio.sleep(60)
 
 

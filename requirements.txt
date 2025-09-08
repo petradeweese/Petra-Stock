@@ -9,3 +9,4 @@ scikit-learn
 Jinja2
 certifi
 python-multipart
+pytest

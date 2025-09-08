@@ -1,7 +1,9 @@
+import logging
 from typing import Dict, Any, Optional, Callable
 
 # Adapter to the original ROI engine
 _real_scan_single: Optional[Callable[[str, Dict[str, Any]], Dict[str, Any]]] = None
+logger = logging.getLogger(__name__)
 
 
 def _install_real_engine_adapter():
@@ -29,7 +31,7 @@ def _install_real_engine_adapter():
             fn = getattr(mod, "analyze_roi_mode")
             mode = "single"
         else:
-            print("[adapter] pattern_finder_app found, but no known scan function.")
+            logger.warning("pattern_finder_app found, but no known scan function.")
             _real_scan_single = None
             return
 
@@ -101,7 +103,7 @@ def _install_real_engine_adapter():
                         return _row_to_dict(df, params)
                     return {}
                 except Exception as e:
-                    print(f"[adapter] scan_* error for {ticker}: {e!r}")
+                    logger.error("scan_* error for %s: %r", ticker, e)
                     return {}
         else:
             def wrapper(ticker: str, params: Dict[str, Any]) -> Dict[str, Any]:
@@ -148,13 +150,13 @@ def _install_real_engine_adapter():
                     }
                     return _row_to_dict(mapped, params)
                 except Exception as e:
-                    print(f"[adapter] analyze_roi_mode error for {ticker}: {e!r}")
+                    logger.error("analyze_roi_mode error for %s: %r", ticker, e)
                     return {}
 
         _real_scan_single = wrapper
-        print(f"[adapter] Using REAL engine from pattern_finder_app ({mode}).")
+        logger.info("Using REAL engine from pattern_finder_app (%s).", mode)
     except Exception as e:
-        print("[adapter] pattern_finder_app not available or failed to import:", repr(e))
+        logger.warning("pattern_finder_app not available or failed to import: %r", e)
         _real_scan_single = None
 
 
@@ -171,6 +173,7 @@ except Exception:
 def _desktop_like_single(ticker: str, params: dict) -> dict:
     """Match pattern_finder_app._scan_worker for a SINGLE ticker+direction."""
     if _pfa is None:
+        logger.warning("pattern_finder_app is not available")
         return {}
     try:
         px = _pfa._download_prices(ticker, params["interval"], params["lookback_years"])
@@ -219,6 +222,7 @@ def _desktop_like_single(ticker: str, params: dict) -> dict:
             "rule": str(r["rule"]),
         }
     except Exception:
+        logger.exception("scan computation failed for %s", ticker)
         return {}
 
 
