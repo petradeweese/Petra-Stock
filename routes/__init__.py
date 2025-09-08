@@ -116,6 +116,7 @@ def favorites_page(request: Request, db=Depends(get_db)):
     db.execute("SELECT * FROM favorites ORDER BY id DESC")
     favs = [dict(r) for r in db.fetchall()]
     for f in favs:
+        # Try to pull the latest archived metrics for this favorite
         db.execute(
             """
             SELECT rr.avg_roi_pct, rr.hit_pct, rr.avg_dd_pct
@@ -128,15 +129,53 @@ def favorites_page(request: Request, db=Depends(get_db)):
             (f["ticker"], f["rule"]),
         )
         row = db.fetchone()
-        if row:
+        if row and row["avg_roi_pct"] is not None:
             f["avg_roi_pct"] = row["avg_roi_pct"]
             f["hit_pct"] = row["hit_pct"]
             f["avg_dd_pct"] = row["avg_dd_pct"]
+            continue
+
+        # Fall back to recomputing on the fly if no archived data exists
+        params = {
+            "interval": f.get("interval", "15m"),
+            "direction": f.get("direction", "UP"),
+            "target_pct": f.get("target_pct", 1.0),
+            "stop_pct": f.get("stop_pct", 0.5),
+            "window_value": f.get("window_value", 4.0),
+            "window_unit": f.get("window_unit", "Hours"),
+            "lookback_years": f.get("lookback_years", 2.0),
+            "max_tt_bars": f.get("max_tt_bars", 12),
+            "min_support": f.get("min_support", 20),
+            "delta_assumed": f.get("delta", 0.4),
+            "theta_per_day_pct": f.get("theta_day", 0.2),
+            "atrz_gate": f.get("atrz", 0.10),
+            "slope_gate_pct": f.get("slope", 0.02),
+            "use_regime": f.get("use_regime", 0),
+            "regime_trend_only": f.get("trend_only", 0),
+            "vix_z_max": f.get("vix_z_max", 3.0),
+            "slippage_bps": f.get("slippage_bps", 7.0),
+            "vega_scale": f.get("vega_scale", 0.03),
+            # Ensure no additional filtering is applied
+            "scan_min_hit": 0.0,
+            "scan_max_dd": 100.0,
+        }
+        row = compute_scan_for_ticker(f["ticker"], params)
+        if row:
+            f["avg_roi_pct"] = row.get("avg_roi_pct")
+            f["hit_pct"] = row.get("hit_pct")
+            f["avg_dd_pct"] = row.get("avg_dd_pct")
         else:
             f["avg_roi_pct"] = None
             f["hit_pct"] = None
             f["avg_dd_pct"] = None
     return templates.TemplateResponse(request, "favorites.html", {"favorites": favs})
+
+
+@router.post("/favorites/delete/{fav_id}")
+def favorites_delete(fav_id: int, db=Depends(get_db)):
+    db.execute("DELETE FROM favorites WHERE id=?", (fav_id,))
+    db.connection.commit()
+    return RedirectResponse(url="/favorites", status_code=302)
 
 
 @router.post("/favorites/add")
