@@ -91,7 +91,13 @@ SCHEMA = [
 def init_db():
     conn = None
     try:
-        conn = sqlite3.connect(DB_PATH)
+        # Allow connections to be accessed across threads.
+        # FastAPI runs dependency context managers in a threadpool which may
+        # differ from the thread handling the request. SQLite by default
+        # restricts connections to the creating thread, so we disable that
+        # safeguard here. Each request still gets its own connection, so
+        # concurrent access is safe for this application.
+        conn = sqlite3.connect(DB_PATH, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
         for stmt in SCHEMA:
@@ -106,7 +112,10 @@ def init_db():
 
 
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
+    # Create a new connection for each request and allow it to be used from
+    # the request-handling thread even though the connection is created in the
+    # dependency threadpool.
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
