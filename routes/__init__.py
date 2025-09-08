@@ -108,9 +108,15 @@ def results_from_archive(request: Request, run_id: int, db=Depends(get_db)):
         stp = params.get("stop_pct")
         parts = []
         if tgt is not None:
-            parts.append(f"Target,{tgt:g}%")
+            try:
+                parts.append(f"Target,{float(tgt):g}%")
+            except (ValueError, TypeError):
+                parts.append(f"Target,{tgt}%")
         if stp is not None:
-            parts.append(f"Stop,{stp:g}%")
+            try:
+                parts.append(f"Stop,{float(stp):g}%")
+            except (ValueError, TypeError):
+                parts.append(f"Stop,{stp}%")
         rule_summary = "-".join(parts)
 
         dt = datetime.fromisoformat(run["started_at"])
@@ -308,9 +314,15 @@ def archive_page(request: Request, db=Depends(get_db)):
         stp = params.get("stop_pct")
         parts = []
         if tgt is not None:
-            parts.append(f"Target,{tgt:g}%")
+            try:
+                parts.append(f"Target,{float(tgt):g}%")
+            except (ValueError, TypeError):
+                parts.append(f"Target,{tgt}%")
         if stp is not None:
-            parts.append(f"Stop,{stp:g}%")
+            try:
+                parts.append(f"Stop,{float(stp):g}%")
+            except (ValueError, TypeError):
+                parts.append(f"Stop,{stp}%")
         rule_summary = "-".join(parts)
         try:
             dt = datetime.fromisoformat(r["started_at"])
