@@ -2,6 +2,7 @@ import logging
 import os
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from db import init_db
 from routes import router
@@ -26,6 +27,7 @@ def create_app() -> FastAPI:
         raise
 
     app = FastAPI()
+    app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
     app.mount("/static", StaticFiles(directory="static"), name="static")
 
     app.include_router(router)
