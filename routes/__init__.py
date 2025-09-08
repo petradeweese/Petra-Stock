@@ -1,18 +1,25 @@
 import json
 from datetime import datetime
 from typing import Dict, Any
+import logging
+import sqlite3
+import smtplib
+import ssl
+from email.message import EmailMessage
 
+import certifi
 from fastapi import APIRouter, Request, Form, Depends
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 
 from indices import SP100, TOP150
-from db import get_db, get_settings
+from db import DB_PATH, get_db, get_settings
 from scanner import compute_scan_for_ticker
 from utils import now_et
 
 router = APIRouter()
 templates = Jinja2Templates(directory="templates")
+logger = logging.getLogger(__name__)
 
 
 def _sort_rows(rows, sort_key):
@@ -28,6 +35,41 @@ def _sort_rows(rows, sort_key):
         return rows
     reverse = sort_key != 'ticker'
     return sorted(rows, key=keyfn, reverse=reverse)
+
+
+def _send_email(st: sqlite3.Row, subject: str, body: str) -> None:
+    """Send an email using settings stored in the database.
+
+    This helper mirrors the logic used by the desktop application: the
+    configured SMTP user/password are expected to work with Gmail.  The
+    function silently returns if mandatory settings are missing so the
+    scanner can proceed without failing.
+    """
+
+    user = (st["smtp_user"] or "").strip()
+    pwd = (st["smtp_pass"] or "").replace(" ", "").strip()
+    recips = [r.strip() for r in (st["recipients"] or "").split(",") if r.strip()]
+    if not user or not pwd or not recips:
+        return
+
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = user
+    msg["To"] = ", ".join(recips)
+    msg.set_content(body)
+
+    ctx = ssl.create_default_context(cafile=certifi.where())
+
+    try:
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=ctx, timeout=20) as server:
+            server.login(user, pwd)
+            server.send_message(msg)
+    except ssl.SSLError:
+        with smtplib.SMTP("smtp.gmail.com", 587, timeout=20) as server:
+            server.ehlo()
+            server.starttls(context=ctx)
+            server.login(user, pwd)
+            server.send_message(msg)
 
 
 @router.get("/", response_class=HTMLResponse)
@@ -244,6 +286,26 @@ async def scanner_run(request: Request):
         "ran_at": datetime.now().strftime("%-I:%M:%S %p"),
         "note": f"{scan_type} • {params.get('interval')} • {params.get('direction')} • window {params.get('window_value')} {params.get('window_unit')}"
     }
+
+    if params.get("email_checkbox") == "on" and rows:
+        try:
+            with sqlite3.connect(DB_PATH) as conn:
+                conn.row_factory = sqlite3.Row
+                st = get_settings(conn.cursor())
+            lines = [
+                f"PatternFinder Scan Results — {now_et().strftime('%Y-%m-%d %H:%M')}",
+                ctx["note"],
+                "",
+            ]
+            for r in rows:
+                lines.append(
+                    f"{r.get('ticker')} {r.get('direction')} | ROI {r.get('avg_roi_pct',0):.2f}% | Hit {r.get('hit_pct',0):.2f}% | Support {r.get('support',0)} | Rule {r.get('rule','')}"
+                )
+            body = "\n".join(lines)
+            _send_email(st, "PatternFinder: Scan Results", body)
+        except Exception as e:
+            logger.error("scan email failed: %s", e)
+
     return templates.TemplateResponse("results.html", ctx)
 
 
