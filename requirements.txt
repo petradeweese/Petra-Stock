@@ -1,7 +1,6 @@
 fastapi
 uvicorn
 pandas
-pandas_market_calendars
 numpy
 yfinance
 ta
