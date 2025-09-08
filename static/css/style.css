@@ -198,5 +198,25 @@ button, .btn {
   box-shadow:0 8px 40px rgba(0,0,0,.4);
 }
 
+#progress-bar {
+  width:200px;
+  height:16px;
+  background:#1a2337;
+  border-radius:8px;
+  overflow:hidden;
+}
+
+#progress-fill {
+  height:100%;
+  width:0%;
+  background:var(--accent);
+  transition:width .1s linear;
+}
+
+#progress-text {
+  margin-top:.5rem;
+  text-align:center;
+}
+
 #scan-overlay.htmx-request { display:grid !important; }
 .htmx-request #scan-results { opacity:.4; filter:grayscale(30%); }

@@ -135,5 +135,10 @@
   </div>
 {% endblock %}
 {% block extra_body %}
-  <div id="scan-overlay"><div class="box">⏳ Running scan…</div></div>
+  <div id="scan-overlay">
+    <div class="box">
+      <div id="progress-bar"><div id="progress-fill"></div></div>
+      <div id="progress-text">0%</div>
+    </div>
+  </div>
 {% endblock %}

@@ -2,10 +2,38 @@
   const overlay = document.getElementById('scan-overlay');
   const menu = document.getElementById('ctx-menu');
   const toast = document.getElementById('toast');
+  const progressFill = document.getElementById('progress-fill');
+  const progressText = document.getElementById('progress-text');
   let ctxRow = null; // current row element
+  let progressTimer = null;
 
-  function showOverlay(){ overlay.style.display = 'grid'; }
-  function hideOverlay(){ overlay.style.display = 'none'; }
+  function startProgress(){
+    let pct = 0;
+    progressFill.style.width = '0%';
+    progressText.textContent = '0%';
+    clearInterval(progressTimer);
+    progressTimer = setInterval(()=>{
+      pct = Math.min(pct + 1, 100);
+      progressFill.style.width = pct + '%';
+      progressText.textContent = pct + '%';
+      if (pct >= 100) clearInterval(progressTimer);
+    },50);
+  }
+
+  function stopProgress(){
+    clearInterval(progressTimer);
+    progressFill.style.width = '100%';
+    progressText.textContent = '100%';
+  }
+
+  function showOverlay(){
+    overlay.style.display = 'grid';
+    startProgress();
+  }
+  function hideOverlay(){
+    overlay.style.display = 'none';
+    stopProgress();
+  }
 
   function showMenu(x,y, tr){
     ctxRow = tr;
