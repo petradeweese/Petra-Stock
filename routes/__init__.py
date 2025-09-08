@@ -12,7 +12,7 @@ from fastapi import APIRouter, Request, Form, Depends
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 
-from indices import SP100, TOP150
+from indices import SP100, TOP150, TOP250
 from db import DB_PATH, get_db, get_settings
 from scanner import compute_scan_for_ticker
 from utils import now_et
@@ -298,6 +298,8 @@ async def scanner_run(request: Request):
         tickers = [single_ticker]
     elif scan_type.lower() in ("sp100", "sp_100", "sp100_scan"):
         tickers = SP100
+    elif scan_type.lower() in ("top250", "scan250", "options250"):
+        tickers = TOP250
     else:
         # default Top 150
         tickers = TOP150
