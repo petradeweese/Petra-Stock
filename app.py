@@ -797,7 +797,7 @@ def compute_scan_for_ticker(ticker: str, params: Dict[str, Any]) -> Dict[str, An
 # --- Parity route: run fixed TOP150 scan (matches desktop screenshot) ---
 
 @app.post("/scanner/parity")
-def scanner_parity(request: Request, sort: str | None = None):
+def scanner_parity(request: Request):
     PARAMS = dict(
         interval="15m", direction="BOTH",
         target_pct=1.5, stop_pct=0.7,
@@ -810,6 +810,7 @@ def scanner_parity(request: Request, sort: str | None = None):
         scan_min_hit=55.0,     # GUI-style thresholds
         scan_max_dd=1.0
     )
+    sort_key = request.query_params.get("sort")
     rows = []
     for t in TOP150:
         r = compute_scan_for_ticker(t, PARAMS) or {}
@@ -824,7 +825,7 @@ def scanner_parity(request: Request, sort: str | None = None):
         "results.html",
         {
             "request": request,
-            "rows": _sort_rows(rows, sort),
+            "rows": _sort_rows(rows, sort_key),
             "ran_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
             "note": f"TOP150 parity run • kept {len(rows)}",
         },
