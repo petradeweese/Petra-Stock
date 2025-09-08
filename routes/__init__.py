@@ -179,6 +179,20 @@ def favorites_delete(fav_id: int, db=Depends(get_db)):
     return RedirectResponse(url="/favorites", status_code=302)
 
 
+@router.post("/favorites/delete-duplicates")
+def favorites_delete_duplicates(db=Depends(get_db)):
+    db.execute(
+        """
+        DELETE FROM favorites
+        WHERE id NOT IN (
+            SELECT MIN(id) FROM favorites GROUP BY ticker, direction, interval, rule
+        )
+        """
+    )
+    db.connection.commit()
+    return RedirectResponse(url="/favorites", status_code=302)
+
+
 @router.post("/favorites/add")
 async def favorites_add(request: Request, db=Depends(get_db)):
     payload = await request.json()
