@@ -9,7 +9,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, List, Optional, Tuple, Callable
 
-from fastapi import FastAPI, Request, Form
+from fastapi import FastAPI, Request, Form, Depends
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -130,12 +130,27 @@ SCHEMA = [
     "CREATE INDEX IF NOT EXISTS idx_run_results_run ON run_results(run_id);",
 ]
 
-conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-conn.row_factory = sqlite3.Row
-cur = conn.cursor()
-for stmt in SCHEMA:
-    cur.executescript(stmt)
-conn.commit()
+
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+    for stmt in SCHEMA:
+        cur.executescript(stmt)
+    conn.commit()
+    conn.close()
+
+
+init_db()
+
+
+def get_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        yield conn.cursor()
+    finally:
+        conn.close()
 
 # -----------------------------
 # Calendar / TZ helpers
@@ -181,18 +196,17 @@ CACHE = TTLCache(ttl_seconds=120)
 # -----------------------------
 # Settings helpers
 # -----------------------------
-def get_settings() -> sqlite3.Row:
-    c = conn.cursor()
-    c.execute("SELECT * FROM settings WHERE id=1")
-    return c.fetchone()
+def get_settings(db: sqlite3.Cursor) -> sqlite3.Row:
+    db.execute("SELECT * FROM settings WHERE id=1")
+    return db.fetchone()
 
-def set_last_run(boundary_iso: str):
-    c = conn.cursor()
-    c.execute(
+
+def set_last_run(boundary_iso: str, db: sqlite3.Cursor):
+    db.execute(
         "UPDATE settings SET last_boundary=?, last_run_at=? WHERE id=1",
         (boundary_iso, now_et().isoformat())
     )
-    conn.commit()
+    db.connection.commit()
 
 # -----------------------------
 # Universe helpers
@@ -455,39 +469,40 @@ async def favorites_loop():
             if market_is_open(ts):
                 boundary = ts.replace(second=0, microsecond=0)
                 boundary = boundary.replace(minute=(boundary.minute - boundary.minute % 15))
+                with sqlite3.connect(DB_PATH) as conn:
+                    conn.row_factory = sqlite3.Row
+                    db = conn.cursor()
+                    st = get_settings(db)
+                    throttle = int(st["throttle_minutes"] or 60)
+                    last_boundary = st["last_boundary"] or ""
+                    last_run_at = st["last_run_at"] or ""
 
-                st = get_settings()
-                throttle = int(st["throttle_minutes"] or 60)
-                last_boundary = st["last_boundary"] or ""
-                last_run_at = st["last_run_at"] or ""
+                    should_run = (boundary.isoformat() != last_boundary)
+                    if last_run_at:
+                        last_dt = datetime.fromisoformat(last_run_at)
+                        if (ts - last_dt).total_seconds() < throttle * 60:
+                            should_run = False
 
-                should_run = (boundary.isoformat() != last_boundary)
-                if last_run_at:
-                    last_dt = datetime.fromisoformat(last_run_at)
-                    if (ts - last_dt).total_seconds() < throttle * 60:
-                        should_run = False
+                    if should_run:
+                        db.execute("SELECT ticker, direction, interval, rule FROM favorites ORDER BY id DESC")
+                        favs = [dict(r) for r in db.fetchall()]
 
-                if should_run:
-                    c = conn.cursor()
-                    c.execute("SELECT ticker, direction, interval, rule FROM favorites ORDER BY id DESC")
-                    favs = [dict(r) for r in c.fetchall()]
+                        params = dict(
+                            interval="15m",
+                            direction="BOTH",
+                            scan_min_hit=50.0,
+                            atrz_gate=0.10,
+                            slope_gate_pct=0.02,
+                        )
+                        hits = []
+                        for f in favs:
+                            row = compute_scan_for_ticker(f["ticker"], params)
+                            if row and row.get("hit_pct", 0) >= 50 and row.get("avg_roi_pct", 0) > 0:
+                                hits.append(row)
 
-                    params = dict(
-                        interval="15m",
-                        direction="BOTH",
-                        scan_min_hit=50.0,
-                        atrz_gate=0.10,
-                        slope_gate_pct=0.02,
-                    )
-                    hits = []
-                    for f in favs:
-                        row = compute_scan_for_ticker(f["ticker"], params)
-                        if row and row.get("hit_pct", 0) >= 50 and row.get("avg_roi_pct", 0) > 0:
-                            hits.append(row)
-
-                    # TODO: email YES hits in a readable format
-                    # TODO: archive favorites 15m scan results only if there are YES hits
-                    set_last_run(boundary.isoformat())
+                        # TODO: email YES hits in a readable format
+                        # TODO: archive favorites 15m scan results only if there are YES hits
+                        set_last_run(boundary.isoformat(), db)
 
             await asyncio.sleep(60)
         except Exception as e:
@@ -510,19 +525,18 @@ def scanner_page(request: Request):
     return templates.TemplateResponse(request, "index.html", {})
 
 @app.get("/results/{run_id}", response_class=HTMLResponse)
-def results_from_archive(request: Request, run_id: int):
-    c = conn.cursor()
-    c.execute("SELECT * FROM runs WHERE id=?", (run_id,))
-    run = c.fetchone()
+def results_from_archive(request: Request, run_id: int, db=Depends(get_db)):
+    db.execute("SELECT * FROM runs WHERE id=?", (run_id,))
+    run = db.fetchone()
     if not run:
         return HTMLResponse("Run not found", status_code=404)
 
-    c.execute(
+    db.execute(
         """SELECT ticker, direction, avg_roi_pct, hit_pct, support, avg_tt, avg_dd_pct, stability, rule
            FROM run_results WHERE run_id=?""",
         (run_id,),
     )
-    rows = [dict(r) for r in c.fetchall()]
+    rows = [dict(r) for r in db.fetchall()]
     rows.sort(key=lambda r: (r["avg_roi_pct"], r["hit_pct"], r["support"], r["stability"]), reverse=True)
 
     return templates.TemplateResponse(request, "results.html", {
@@ -534,14 +548,13 @@ def results_from_archive(request: Request, run_id: int):
     )
 
 @app.get("/favorites", response_class=HTMLResponse)
-def favorites_page(request: Request):
-    c = conn.cursor()
-    c.execute("SELECT * FROM favorites ORDER BY id DESC")
-    favs = c.fetchall()
+def favorites_page(request: Request, db=Depends(get_db)):
+    db.execute("SELECT * FROM favorites ORDER BY id DESC")
+    favs = db.fetchall()
     return templates.TemplateResponse(request, "favorites.html", {"favorites": favs})
 
 @app.post("/favorites/add")
-async def favorites_add(request: Request):
+async def favorites_add(request: Request, db=Depends(get_db)):
     payload = await request.json()
     t = (payload.get("ticker") or "").strip().upper()
     rule = payload.get("rule") or ""
@@ -550,23 +563,21 @@ async def favorites_add(request: Request):
     if not t or not rule:
         return JSONResponse({"ok": False, "error": "missing ticker or rule"}, status_code=400)
 
-    c = conn.cursor()
-    c.execute(
+    db.execute(
         "INSERT INTO favorites(ticker, direction, interval, rule) VALUES (?, ?, '15m', ?)",
         (t, direction, rule),
     )
-    conn.commit()
+    db.connection.commit()
     return {"ok": True}
 
 @app.get("/archive", response_class=HTMLResponse)
-def archive_page(request: Request):
-    c = conn.cursor()
-    c.execute("SELECT id, started_at, scan_type, universe, finished_at, hit_count FROM runs ORDER BY id DESC LIMIT 200")
-    runs = c.fetchall()
+def archive_page(request: Request, db=Depends(get_db)):
+    db.execute("SELECT id, started_at, scan_type, universe, finished_at, hit_count FROM runs ORDER BY id DESC LIMIT 200")
+    runs = db.fetchall()
     return templates.TemplateResponse(request, "archive.html", {"runs": runs})
 
 @app.post("/archive/save")
-async def archive_save(request: Request):
+async def archive_save(request: Request, db=Depends(get_db)):
     """
     Accepts JSON: { params: {...}, rows: [ {ticker, direction, avg_roi_pct, hit_pct, support, avg_dd_pct, stability, rule}, ... ] }
     Writes a run to `runs` and details to `run_results`. Returns {ok: True, run_id}.
@@ -583,18 +594,17 @@ async def archive_save(request: Request):
         scan_type = str(params.get("scan_type") or "scan150")
         universe = ",".join({r.get("ticker","") for r in rows if r.get("ticker")})
 
-        c = conn.cursor()
-        c.execute(
+        db.execute(
             """
             INSERT INTO runs(started_at, scan_type, params_json, universe, finished_at, hit_count)
             VALUES (?, ?, ?, ?, ?, ?)
             """,
             (started, scan_type, json.dumps(params), universe, finished, len(rows)),
         )
-        run_id = c.lastrowid
+        run_id = db.lastrowid
 
         for r in rows:
-            c.execute(
+            db.execute(
                 """
                 INSERT INTO run_results
                   (run_id, ticker, direction, avg_roi_pct, hit_pct, support, avg_tt, avg_dd_pct, stability, rule)
@@ -613,14 +623,14 @@ async def archive_save(request: Request):
                     r.get("rule") or "",
                 ),
             )
-        conn.commit()
+        db.connection.commit()
         return {"ok": True, "run_id": run_id}
     except Exception as e:
         return JSONResponse({"ok": False, "error": repr(e)}, status_code=500)
 
 @app.get("/settings", response_class=HTMLResponse)
-def settings_page(request: Request):
-    st = get_settings()
+def settings_page(request: Request, db=Depends(get_db)):
+    st = get_settings(db)
     return templates.TemplateResponse(request, "settings.html", {"st": st})
 
 @app.post("/settings/save")
@@ -631,9 +641,9 @@ def settings_save(
     recipients: str = Form(""),
     scheduler_enabled: int = Form(1),
     throttle_minutes: int = Form(60),
+    db=Depends(get_db),
 ):
-    c = conn.cursor()
-    c.execute(
+    db.execute(
         """
         UPDATE settings
            SET smtp_user=?, smtp_pass=?, recipients=?, scheduler_enabled=?, throttle_minutes=?
@@ -641,7 +651,7 @@ def settings_save(
         """,
         (smtp_user.strip(), smtp_pass.strip(), recipients.strip(), int(scheduler_enabled), int(throttle_minutes)),
     )
-    conn.commit()
+    db.connection.commit()
     return RedirectResponse(url="/settings", status_code=302)
 
 # -----------------------------
@@ -717,7 +727,7 @@ async def scanner_run(request: Request):
     return templates.TemplateResponse("results.html", ctx)
 
 @app.post("/runs/archive")
-async def archive_run(request: Request):
+async def archive_run(request: Request, db=Depends(get_db)):
     """
     Body: JSON with {"scan_type": "...", "params": {...}, "rows": [...], "universe": [...]}
     Saves a run + run_results. Only saves rows that passed filters (what UI showed).
@@ -729,15 +739,14 @@ async def archive_run(request: Request):
     universe = payload.get("universe", [])
 
     started_at = now_et().isoformat()
-    c = conn.cursor()
-    c.execute(
+    db.execute(
         "INSERT INTO runs(started_at, scan_type, params_json, universe, finished_at, hit_count) VALUES (?, ?, ?, ?, ?, ?)",
         (started_at, scan_type, json.dumps(params), ",".join(universe), now_et().isoformat(), len(rows)),
     )
-    run_id = c.lastrowid
+    run_id = db.lastrowid
 
     for r in rows:
-        c.execute(
+        db.execute(
             """INSERT INTO run_results(run_id, ticker, direction, avg_roi_pct, hit_pct, support, avg_tt, avg_dd_pct, stability, rule)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
@@ -753,7 +762,7 @@ async def archive_run(request: Request):
                 r.get("rule", ""),
             ),
         )
-    conn.commit()
+    db.connection.commit()
     return {"ok": True, "run_id": run_id}
 
 
