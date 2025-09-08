@@ -86,11 +86,11 @@
           return {
             ticker: tr.dataset.tkr,
             direction: tr.dataset.dir || 'UP',
-            avg_roi_pct: parseFloat(tds[2].textContent || '0'),
-            hit_pct: parseFloat(tds[3].textContent || '0'),
-            support: parseInt(tds[4].textContent || '0', 10),
-            avg_dd_pct: parseFloat(tds[5].textContent || '0'),
-            stability: parseFloat(tds[6].textContent || '0'),
+            avg_roi_pct: parseFloat(tr.dataset.roi || '0'),
+            hit_pct: parseFloat(tr.dataset.hit || '0'),
+            support: parseInt(tr.dataset.supp || tds[4].textContent || '0', 10),
+            avg_dd_pct: parseFloat(tr.dataset.dd || '0'),
+            stability: parseFloat(tr.dataset.stab || '0'),
             rule: tr.dataset.rule || ''
           };
         });
