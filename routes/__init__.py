@@ -100,6 +100,7 @@ def results_from_archive(request: Request, run_id: int, db=Depends(get_db)):
     return templates.TemplateResponse(
         "results.html",
         {
+            "request": request,
             "rows": rows,
             "scan_type": run["scan_type"],
             "universe_count": len((run["universe"] or "").split(",")) if run["universe"] else 0,
