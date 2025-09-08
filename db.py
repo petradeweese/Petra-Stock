@@ -1,7 +1,10 @@
+import logging
 import sqlite3
 from typing import Dict, Any, List, Optional
 
 from utils import now_et
+
+logger = logging.getLogger(__name__)
 
 DB_PATH = "patternfinder.db"
 
@@ -86,20 +89,33 @@ SCHEMA = [
 
 
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    cur = conn.cursor()
-    for stmt in SCHEMA:
-        cur.executescript(stmt)
-    conn.commit()
-    conn.close()
+    conn = None
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        for stmt in SCHEMA:
+            cur.executescript(stmt)
+        conn.commit()
+    except sqlite3.Error:
+        logger.exception("Failed to initialize database")
+        raise
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def get_db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
     try:
-        yield conn.cursor()
+        yield cursor
+        conn.commit()
+    except sqlite3.Error:
+        conn.rollback()
+        logger.exception("Database operation failed")
+        raise
     finally:
         conn.close()
 
