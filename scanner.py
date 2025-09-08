@@ -75,6 +75,8 @@ def _install_real_engine_adapter():
             if roi_pct is None or hit_pct is None:
                 return {}
 
+            stab_pct = to_pct(stab)
+
             return {
                 "ticker": str(tkr),
                 "direction": str(direct).upper(),
@@ -83,7 +85,7 @@ def _install_real_engine_adapter():
                 "support": int(supp or 0),
                 "avg_tt": fnum(tt),
                 "avg_dd_pct": float(dd_pct),
-                "stability": fnum(stab),
+                "stability": fnum(stab_pct),
                 "sharpe": fnum(sharpe),
                 "rule": str(rule or ""),
             }
@@ -212,6 +214,8 @@ def _desktop_like_single(ticker: str, params: dict) -> dict:
             ["sharpe", "avg_roi", "hit_rate", "support", "stability"],
             ascending=[False, False, False, False, False],
         ).iloc[0]
+        stab = float(r.get("stability", 0.0))
+        stab_pct = stab * 100.0 if abs(stab) <= 1.0 else stab
         return {
             "ticker": ticker,
             "direction": r.get("direction", params["direction"]),
@@ -220,7 +224,7 @@ def _desktop_like_single(ticker: str, params: dict) -> dict:
             "support": int(r["support"]),
             "avg_tt": float(r["avg_tt"]) if pd.notna(r["avg_tt"]) else 0.0,
             "avg_dd_pct": float(r["avg_dd"]) * 100.0,
-            "stability": float(r.get("stability", 0.0)),
+            "stability": stab_pct,
             "sharpe": float(r.get("sharpe", 0.0)),
             "rule": str(r["rule"]),
         }
