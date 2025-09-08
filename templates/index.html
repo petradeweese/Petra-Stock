@@ -2,7 +2,7 @@
 {% block title %}Pattern Finder — Scanner{% endblock %}
 {% block head_extra %}
   <script src="https://unpkg.com/htmx.org@1.9.9/dist/htmx.min.js" defer></script>
-  <script src="/static/js/scanner.js" defer></script>
+  <script src="{{ url_for('static', path='js/scanner.js') }}" defer></script>
 {% endblock %}
 {% block content %}
   <div class="card">
