@@ -18,6 +18,10 @@ from fastapi.templating import Jinja2Templates
 import pandas as pd
 import pandas_market_calendars as mcal
 
+# Ensure required directories exist before mounting StaticFiles
+os.makedirs("templates", exist_ok=True)
+os.makedirs("static", exist_ok=True)
+
 # -----------------------------
 # App & Templating
 # -----------------------------
@@ -43,8 +47,6 @@ def _sort_rows(rows, sort_key):
 # Paths & DB
 # -----------------------------
 DB_PATH = "patternfinder.db"
-os.makedirs("templates", exist_ok=True)
-os.makedirs("static", exist_ok=True)
 
 # -----------------------------
 # DB Schema (+ migrations)
