@@ -76,12 +76,12 @@ def _send_email(st: sqlite3.Row, subject: str, body: str, html_body: Optional[st
 
 @router.get("/", response_class=HTMLResponse)
 def home(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+    return templates.TemplateResponse("index.html", {"request": request, "active_tab": "scanner"})
 
 
 @router.get("/scanner", response_class=HTMLResponse)
 def scanner_page(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+    return templates.TemplateResponse("index.html", {"request": request, "active_tab": "scanner"})
 
 
 @router.get("/results/{run_id}", response_class=HTMLResponse)
@@ -100,13 +100,14 @@ def results_from_archive(request: Request, run_id: int, db=Depends(get_db)):
     rows.sort(key=lambda r: (r["avg_roi_pct"], r["hit_pct"], r["support"], r["stability"]), reverse=True)
 
     return templates.TemplateResponse(
-        "results.html",
+        "results_page.html",
         {
             "request": request,
             "rows": rows,
             "scan_type": run["scan_type"],
             "universe_count": len((run["universe"] or "").split(",")) if run["universe"] else 0,
             "run_id": run_id,
+            "active_tab": "archive",
         },
     )
 
@@ -168,7 +169,7 @@ def favorites_page(request: Request, db=Depends(get_db)):
             f["avg_roi_pct"] = None
             f["hit_pct"] = None
             f["avg_dd_pct"] = None
-    return templates.TemplateResponse(request, "favorites.html", {"favorites": favs})
+    return templates.TemplateResponse("favorites.html", {"request": request, "favorites": favs, "active_tab": "favorites"})
 
 
 @router.post("/favorites/delete/{fav_id}")
@@ -200,7 +201,7 @@ async def favorites_add(request: Request, db=Depends(get_db)):
 def archive_page(request: Request, db=Depends(get_db)):
     db.execute("SELECT id, started_at, scan_type, universe, finished_at, hit_count FROM runs ORDER BY id DESC LIMIT 200")
     runs = db.fetchall()
-    return templates.TemplateResponse(request, "archive.html", {"runs": runs})
+    return templates.TemplateResponse("archive.html", {"request": request, "runs": runs, "active_tab": "archive"})
 
 
 @router.post("/archive/save")
@@ -259,7 +260,7 @@ async def archive_save(request: Request, db=Depends(get_db)):
 @router.get("/settings", response_class=HTMLResponse)
 def settings_page(request: Request, db=Depends(get_db)):
     st = get_settings(db)
-    return templates.TemplateResponse(request, "settings.html", {"st": st})
+    return templates.TemplateResponse("settings.html", {"request": request, "st": st, "active_tab": "settings"})
 
 
 @router.post("/settings/save")

@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>{% block title %}Pattern Finder{% endblock %}</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="{{ url_for('static', path='css/style.css') }}">
+  {% block head_extra %}{% endblock %}
+</head>
+<body>
+  <div class="wrap">
+    <nav class="tabs">
+      <a class="tab {% if active_tab=='scanner' %}active{% endif %}" href="/scanner">Scanner</a>
+      <a class="tab {% if active_tab=='favorites' %}active{% endif %}" href="/favorites">Favorites</a>
+      <a class="tab {% if active_tab=='archive' %}active{% endif %}" href="/archive">Archive</a>
+      <a class="tab {% if active_tab=='settings' %}active{% endif %}" href="/settings">Settings</a>
+    </nav>
+    {% block content %}{% endblock %}
+  </div>
+  {% block extra_body %}{% endblock %}
+  <div id="ctx-menu" hidden>
+    <button id="ctx-add-fav" class="menu-item">➕ Add to Favorites</button>
+  </div>
+  <div id="toast" hidden></div>
+</body>
+</html>

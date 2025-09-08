@@ -1,64 +1,35 @@
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <title>Pattern Finder — Archive</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <style>
-    :root { --card:#0e1116; --ink:#e8eefc; --muted:#99a3b3; }
-    html { font-size: clamp(16px, 1.2vw + 0.5rem, 22px); }
-    body { margin:0; background:#0b0e14; color:var(--ink); font-family: system-ui,-apple-system,Segoe UI,Roboto,Inter,sans-serif; }
-    .wrap { max-width: 1400px; margin:0 auto; padding: clamp(16px, 2vw, 28px); }
-    .tabs { display:flex; gap:.75rem; flex-wrap:wrap; margin-bottom:1rem; }
-    .tab { text-decoration:none; color:var(--ink); padding:.6rem .9rem; border-radius:.8rem; background:#111726; border:1px solid #1a2337; }
-    .tab.active { background:linear-gradient(180deg,#16243b,#122033); border-color:#2a3a5d; box-shadow:0 6px 20px #000 inset,0 1px 0 #2a3a5d; }
-    .card { background: var(--card); border:1px solid #1a2337; border-radius:1rem; padding:1rem; box-shadow: 0 20px 60px rgba(0,0,0,.35); }
-    table { width:100%; border-collapse:collapse; }
-    th, td { padding:.75rem .8rem; border-bottom:1px solid #1a2337; vertical-align: top; }
-    th { text-align:left; color:#b9c7de; }
-    a.btn { text-decoration:none; color:var(--ink); background:#1a2337; padding:.35rem .6rem; border-radius:.6rem; border:1px solid #2a3a5d; font-size:.9rem; }
-  </style>
-</head>
-<body>
-  <div class="wrap">
-    <nav class="tabs">
-      <a class="tab" href="/scanner">Scanner</a>
-      <a class="tab" href="/favorites">Favorites</a>
-      <a class="tab active" href="/archive">Archive</a>
-      <a class="tab" href="/settings">Settings</a>
-    </nav>
-
-    <div class="card">
-      <h1 style="margin-top:0;">Archive</h1>
-      {% if runs and runs|length %}
-      <table>
-        <thead>
-          <tr>
-            <th>ID</th>
-            <th>Started</th>
-            <th>Scan Type</th>
-            <th>Universe</th>
-            <th>Hits</th>
-            <th>Open</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for r in runs %}
-          <tr>
-            <td>{{ r["id"] }}</td>
-            <td>{{ r["started_at"] }}</td>
-            <td>{{ r["scan_type"] }}</td>
-            <td>{{ (r["universe"] or "").split(",") | length }}</td>
-            <td>{{ r["hit_count"] }}</td>
-            <td><a class="btn" href="/results/{{ r['id'] }}">View Results</a></td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-      {% else %}
-      <p>No archived runs yet.</p>
-      {% endif %}
-    </div>
+{% extends 'base.html' %}
+{% block title %}Pattern Finder — Archive{% endblock %}
+{% block content %}
+  <div class="card">
+    <h1 style="margin-top:0;">Archive</h1>
+    {% if runs and runs|length %}
+    <table class="table">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Started</th>
+          <th>Scan Type</th>
+          <th>Universe</th>
+          <th>Hits</th>
+          <th>Open</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in runs %}
+        <tr>
+          <td>{{ r["id"] }}</td>
+          <td>{{ r["started_at"] }}</td>
+          <td>{{ r["scan_type"] }}</td>
+          <td>{{ (r["universe"] or "").split(",") | length }}</td>
+          <td>{{ r["hit_count"] }}</td>
+          <td><a class="btn" href="/results/{{ r['id'] }}">View Results</a></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p>No archived runs yet.</p>
+    {% endif %}
   </div>
-</body>
-</html>
+{% endblock %}
