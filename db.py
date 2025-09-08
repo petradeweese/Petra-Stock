@@ -55,6 +55,19 @@ SCHEMA = [
         ref_avg_dd REAL
     );
     """,
+    # Forward test results
+    """
+    CREATE TABLE IF NOT EXISTS forward_tests (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        fav_id INTEGER NOT NULL,
+        ran_at TEXT,
+        avg_roi_pct REAL,
+        hit_pct REAL,
+        avg_dd_pct REAL,
+        FOREIGN KEY(fav_id) REFERENCES favorites(id)
+    );
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_forward_tests_fav ON forward_tests(fav_id);",
     # Runs (archive)
     """
     CREATE TABLE IF NOT EXISTS runs (
