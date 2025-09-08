@@ -8,6 +8,7 @@ import asyncio
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, List, Optional, Tuple, Callable
+from threading import Lock
 
 from fastapi import FastAPI, Request, Form
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
@@ -162,19 +163,22 @@ class TTLCache:
     def __init__(self, ttl_seconds: int = 120):
         self.ttl = ttl_seconds
         self._store: Dict[str, Tuple[float, Any]] = {}
+        self._lock = Lock()
 
     def get(self, key: str) -> Optional[Any]:
-        hit = self._store.get(key)
-        if not hit:
-            return None
-        ts, val = hit
-        if time.time() - ts > self.ttl:
-            self._store.pop(key, None)
-            return None
-        return val
+        with self._lock:
+            hit = self._store.get(key)
+            if not hit:
+                return None
+            ts, val = hit
+            if time.time() - ts > self.ttl:
+                self._store.pop(key, None)
+                return None
+            return val
 
     def set(self, key: str, val: Any):
-        self._store[key] = (time.time(), val)
+        with self._lock:
+            self._store[key] = (time.time(), val)
 
 CACHE = TTLCache(ttl_seconds=120)
 
