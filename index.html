@@ -52,8 +52,8 @@
       box-shadow: 0 8px 40px rgba(0,0,0,.4);
     }
   
-  /* Show spinner while HTMX request is active */
-  #scan-spinner.htmx-request { display:block !important; }
+  /* Show spinner overlay while HTMX request is active */
+  #scan-overlay.htmx-request { display:grid !important; }
   /* optional: dim the results area while loading */
   .htmx-request #scan-results { opacity:.4; filter:grayscale(30%); }
 
