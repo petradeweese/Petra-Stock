@@ -15,7 +15,7 @@ from fastapi.templating import Jinja2Templates
 from indices import SP100, TOP150, TOP250
 from db import DB_PATH, get_db, get_settings
 from scanner import compute_scan_for_ticker
-from utils import now_et
+from utils import now_et, TZ
 
 router = APIRouter()
 templates = Jinja2Templates(directory="templates")
@@ -99,6 +99,29 @@ def results_from_archive(request: Request, run_id: int, db=Depends(get_db)):
     rows = [dict(r) for r in db.fetchall()]
     rows.sort(key=lambda r: (r["avg_roi_pct"], r["hit_pct"], r["support"], r["stability"]), reverse=True)
 
+    params = {}
+    rule_summary = ""
+    ran_at = ""
+    try:
+        params = json.loads(run["params_json"] or "{}")
+        tgt = params.get("target_pct")
+        stp = params.get("stop_pct")
+        parts = []
+        if tgt is not None:
+            parts.append(f"Target,{tgt:g}%")
+        if stp is not None:
+            parts.append(f"Stop,{stp:g}%")
+        rule_summary = "-".join(parts)
+
+        dt = datetime.fromisoformat(run["started_at"])
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=TZ)
+        else:
+            dt = dt.astimezone(TZ)
+        ran_at = dt.strftime("%m/%-d/%y,%-I:%M%p")
+    except Exception:
+        pass
+
     return templates.TemplateResponse(
         "results_page.html",
         {
@@ -108,6 +131,8 @@ def results_from_archive(request: Request, run_id: int, db=Depends(get_db)):
             "universe_count": len((run["universe"] or "").split(",")) if run["universe"] else 0,
             "run_id": run_id,
             "active_tab": "archive",
+            "ran_at": ran_at,
+            "rule_summary": rule_summary,
         },
     )
 
@@ -213,8 +238,32 @@ async def favorites_add(request: Request, db=Depends(get_db)):
 
 @router.get("/archive", response_class=HTMLResponse)
 def archive_page(request: Request, db=Depends(get_db)):
-    db.execute("SELECT id, started_at, scan_type, universe, finished_at, hit_count FROM runs ORDER BY id DESC LIMIT 200")
-    runs = db.fetchall()
+    db.execute(
+        "SELECT id, started_at, scan_type, params_json, universe, finished_at, hit_count FROM runs ORDER BY id DESC LIMIT 200"
+    )
+    runs = [dict(r) for r in db.fetchall()]
+    for r in runs:
+        try:
+            params = json.loads(r.get("params_json") or "{}")
+        except Exception:
+            params = {}
+        tgt = params.get("target_pct")
+        stp = params.get("stop_pct")
+        parts = []
+        if tgt is not None:
+            parts.append(f"Target,{tgt:g}%")
+        if stp is not None:
+            parts.append(f"Stop,{stp:g}%")
+        rule_summary = "-".join(parts)
+        try:
+            dt = datetime.fromisoformat(r["started_at"])
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=TZ)
+            else:
+                dt = dt.astimezone(TZ)
+            r["started_display"] = f"{dt.strftime('%m/%-d/%y,%-I:%M%p')}-{rule_summary}" if rule_summary else dt.strftime('%m/%-d/%y,%-I:%M%p')
+        except Exception:
+            r["started_display"] = r["started_at"]
     return templates.TemplateResponse("archive.html", {"request": request, "runs": runs, "active_tab": "archive"})
 
 
@@ -231,7 +280,7 @@ async def archive_save(request: Request, db=Depends(get_db)):
         if not rows:
             return JSONResponse({"ok": False, "error": "no rows"}, status_code=400)
 
-        started = datetime.now().isoformat()
+        started = now_et().isoformat()
         finished = started
         scan_type = str(params.get("scan_type") or "scan150")
         universe = ",".join({r.get("ticker","") for r in rows if r.get("ticker")})
