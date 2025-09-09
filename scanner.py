@@ -3,6 +3,7 @@ from typing import Dict, Any, Optional, Callable, List, Tuple
 
 import pandas as pd
 from services.data_fetcher import fetch_prices
+from services.price_utils import DataUnavailableError
 
 # Adapter to the original ROI engine
 _real_scan_single: Optional[Callable[[str, Dict[str, Any]], Dict[str, Any]]] = None
@@ -109,6 +110,8 @@ def _install_real_engine_adapter():
                     if isinstance(df, dict) and df:
                         return _row_to_dict(df, params)
                     return {}
+                except DataUnavailableError:
+                    raise
                 except Exception as e:
                     logger.error("scan_* error for %s: %r", ticker, e)
                     return {}
@@ -156,6 +159,8 @@ def _install_real_engine_adapter():
                         "rule": row.get("rule", ""),
                     }
                     return _row_to_dict(mapped, params)
+                except DataUnavailableError:
+                    raise
                 except Exception as e:
                     logger.error("analyze_roi_mode error for %s: %r", ticker, e)
                     return {}
@@ -193,7 +198,9 @@ if _pfa is not None:
         df = _PRICE_DATA.get(key)
         if df is not None and not df.empty:
             return df.copy()
-        data = fetch_prices([ticker], interval, lookback_years).get(ticker, pd.DataFrame())
+        data = fetch_prices([ticker], interval, lookback_years).get(ticker)
+        if data is None:
+            data = pd.DataFrame()
         _PRICE_DATA[key] = data
         return data.copy()
 
@@ -293,8 +300,11 @@ def compute_scan_for_ticker(ticker: str, params: Dict[str, Any]) -> Dict[str, An
         a["direction"] = "UP"
         b = dict(params)
         b["direction"] = "DOWN"
-        ra = _desktop_like_single(ticker, a)
-        rb = _desktop_like_single(ticker, b)
+        try:
+            ra = _desktop_like_single(ticker, a)
+            rb = _desktop_like_single(ticker, b)
+        except DataUnavailableError:
+            raise
         picks = [r for r in (ra, rb) if isinstance(r, dict) and r]
         if not picks:
             return {}

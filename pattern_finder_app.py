@@ -32,6 +32,8 @@ import numpy as np
 import yfinance as yf
 import httpx
 
+from services.price_utils import normalize_price_df, DataUnavailableError
+
 from email.message import EmailMessage
 from datetime import datetime, timedelta
 
@@ -467,6 +469,9 @@ def analyze_roi_mode(ticker, interval, direction,
                      ccp_grid=(0.0,0.0005), depth_grid=(4,5,6)):
 
     raw = _download_prices(ticker, interval, lookback_years)
+    raw = normalize_price_df(raw)
+    if raw is None:
+        raise DataUnavailableError(f"{ticker} no_close_or_empty")
     prices = raw["Close"].copy()
     X = build_features(raw, interval)
     regime = build_regime_features(X.index, interval, lookback_years)

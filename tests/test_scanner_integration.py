@@ -36,7 +36,7 @@ def test_scanner_progress_and_results(monkeypatch):
                 "stability": 0.0,
                 "rule": "r1",
             })
-        return rows
+        return rows, 0
 
     monkeypatch.setattr(routes, "_perform_scan", fake_perform_scan)
 

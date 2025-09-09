@@ -23,6 +23,7 @@ from indices import SP100, TOP150, TOP250
 from db import DB_PATH, get_db, get_settings
 from scanner import compute_scan_for_ticker, preload_prices
 from services.data_fetcher import fetch_prices
+from services.price_utils import DataUnavailableError
 from utils import now_et, TZ
 import pandas as pd
 
@@ -182,6 +183,7 @@ def _perform_scan(
     if progress_cb:
         progress_cb(0, total, "preloading")
     rows: list[dict] = []
+    skipped_missing_data = 0
     ex = _get_scan_executor()
     future_to_ticker = {ex.submit(compute_scan_for_ticker, t, params): t for t in tickers}
     step = max(1, int(progress_every))
@@ -192,6 +194,9 @@ def _perform_scan(
             r = fut.result()
             if r:
                 rows.append(r)
+        except DataUnavailableError:
+            skipped_missing_data += 1
+            logger.info("skip=%s reason=no_close_or_empty", ticker)
         except Exception as e:
             logger.error("scan failed for %s: %s", ticker, e)
         done += 1
@@ -231,15 +236,21 @@ def _perform_scan(
     scan_tickers.inc(len(tickers))
     if duration > 0:
         logger.info(
-            "scan completed: %d tickers in %.2fs (%.2f tickers/sec)",
+            "scan completed: %d tickers in %.2fs (%.2f tickers/sec) skipped_missing_data=%d",
             len(tickers),
             duration,
             len(tickers) / duration,
+            skipped_missing_data,
         )
     else:
-        logger.info("scan completed: %d tickers in %.2fs", len(tickers), duration)
+        logger.info(
+            "scan completed: %d tickers in %.2fs skipped_missing_data=%d",
+            len(tickers),
+            duration,
+            skipped_missing_data,
+        )
 
-    return rows
+    return rows, skipped_missing_data
 
 
 def _sort_rows(rows, sort_key):
@@ -605,11 +616,12 @@ async def scanner_run(request: Request):
             logger.info("task %s progress %d/%d", task_id, done, total)
 
         try:
-            rows = _perform_scan(tickers, params, sort_key, progress_cb=prog)
+            rows, skipped = _perform_scan(tickers, params, sort_key, progress_cb=prog)
             ctx = {
                 "rows": rows,
                 "ran_at": now_et().strftime("%I:%M:%S %p").lstrip("0"),
-                "note": f"{scan_type} • {params.get('interval')} • {params.get('direction')} • window {params.get('window_value')} {params.get('window_unit')}"
+                "note": f"{scan_type} • {params.get('interval')} • {params.get('direction')} • window {params.get('window_value')} {params.get('window_unit')}",
+                "skipped_missing_data": skipped,
             }
             _task_update(task_id, state="done", percent=100.0, done=len(tickers), ctx=ctx)
             logger.info("task %s saved results", task_id)

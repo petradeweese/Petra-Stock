@@ -1,15 +1,17 @@
 {% set safe_rows = rows or [] %}
+{% set skip_md = skipped_missing_data or 0 %}
 <div class="card">
   <div class="card-header" style="display:flex;align-items:center;gap:.75rem;flex-wrap:wrap;">
     <strong>Results</strong>
     {% if ran_at %}<span class="muted"> at {{ ran_at }} </span>{% endif %}
     {% if note %}<span class="muted"> • {{ note }}</span>{% endif %}
+    {% if skip_md %}<span class="muted"> • skipped {{ skip_md }} missing data</span>{% endif %}
     <span style="flex:1 1 auto"></span>
     <button id="btn-archive" class="btn" title="Save this run and rows to Archive">💾 Save to Archive</button>
   </div>
 
   {% if safe_rows|length == 0 %}
-    <div class="card-body"><div class="muted">No results.</div></div>
+    <div class="card-body"><div class="muted">{% if skip_md > 0 %}All tickers were skipped due to missing data.{% else %}No results.{% endif %}</div></div>
   {% else %}
   <div class="card-body" style="overflow:auto;">
     <table class="table" id="results-table">
