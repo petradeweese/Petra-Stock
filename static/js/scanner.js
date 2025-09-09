@@ -162,6 +162,7 @@
     }
   });
   document.body.addEventListener('htmx:responseError', stopProgress);
+  // Prefill the scan form from ?config= JSON encoded query string
   function prefillFromConfig(){
     const qs = new URLSearchParams(window.location.search);
     const cfg = qs.get('config');

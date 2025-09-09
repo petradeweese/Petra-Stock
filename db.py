@@ -150,6 +150,7 @@ def init_db():
             cur.execute(
                 "ALTER TABLE runs ADD COLUMN settings_json TEXT DEFAULT '{}' NOT NULL"
             )
+        # Migration: ensure forward test table contains latest columns
         migrate_forward_tests(conn)
         conn.commit()
     except sqlite3.Error:
