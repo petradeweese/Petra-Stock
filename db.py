@@ -89,8 +89,7 @@ SCHEMA = [
         params_json TEXT,
         universe TEXT,
         finished_at TEXT,
-        hit_count INTEGER DEFAULT 0,
-        settings_json TEXT DEFAULT '{}'
+        hit_count INTEGER DEFAULT 0
     );
     """,
     # Run results (archive)

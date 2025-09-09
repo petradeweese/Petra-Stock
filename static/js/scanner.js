@@ -49,9 +49,9 @@
       ticker: tr.dataset.tkr || '',
       direction: (tr.dataset.dir || 'UP').toUpperCase(),
       rule: tr.dataset.rule || '',
-      interval: document.querySelector('select[name="interval"]')?.value || '15m',
-      ref_avg_dd: parseFloat(tr.dataset.dd || '0')
+      interval: document.querySelector('select[name="interval"]')?.value || '15m'
     };
+    payload.ref_avg_dd = parseFloat(tr.dataset.dd || '0');
     if(!payload.ticker || !payload.rule){
       showToast('Missing ticker or rule', false);
       return;
@@ -176,9 +176,7 @@
       });
     }catch(e){/*ignore*/}
   }
-  document.addEventListener('DOMContentLoaded', function(){
-    bindResultsDelegates();
-    prefillFromConfig();
-  });
+  document.addEventListener('DOMContentLoaded', bindResultsDelegates);
+  document.addEventListener('DOMContentLoaded', prefillFromConfig);
 })();
 
