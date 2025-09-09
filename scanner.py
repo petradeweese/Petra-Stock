@@ -1,6 +1,8 @@
 import logging
-from functools import lru_cache
-from typing import Dict, Any, Optional, Callable
+from typing import Dict, Any, Optional, Callable, List
+
+import pandas as pd
+from services.data_fetcher import fetch_prices
 
 # Adapter to the original ROI engine
 _real_scan_single: Optional[Callable[[str, Dict[str, Any]], Dict[str, Any]]] = None
@@ -165,17 +167,34 @@ def _install_real_engine_adapter():
         _real_scan_single = None
 
 
+_PRICE_DATA: Dict[str, pd.DataFrame] = {}
+
+
+def preload_prices(tickers: List[str], interval: str, lookback_years: float) -> None:
+    """Preload price data for a batch of tickers."""
+    try:
+        _PRICE_DATA.update(fetch_prices(tickers, interval, lookback_years))
+    except Exception as e:  # pragma: no cover - network failures
+        logger.error("prefetch failed: %r", e)
+
+
 _install_real_engine_adapter()
 
 try:
     import pattern_finder_app as _pfa
-    import pandas as pd
 except Exception:
     _pfa = None
-    import pandas as pd  # ensure pd is available for type hints
 
 if _pfa is not None:
-    _pfa._download_prices = lru_cache(maxsize=64)(_pfa._download_prices)
+    def _price_lookup(ticker: str, interval: str, lookback_years: float) -> pd.DataFrame:
+        df = _PRICE_DATA.get(ticker)
+        if df is not None and not df.empty:
+            return df.copy()
+        data = fetch_prices([ticker], interval, lookback_years).get(ticker, pd.DataFrame())
+        _PRICE_DATA[ticker] = data
+        return data.copy()
+
+    _pfa._download_prices = _price_lookup
 
 
 def _desktop_like_single(ticker: str, params: dict) -> dict:

@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Callable, Dict, Any
 
 from db import DB_PATH, get_settings, set_last_run
+from scanner import preload_prices
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,7 @@ async def favorites_loop(market_is_open: Callable[[datetime], bool], now_et: Cal
                             atrz_gate=0.10,
                             slope_gate_pct=0.02,
                         )
+                        preload_prices([f["ticker"] for f in favs], params.get("interval", "15m"), params.get("lookback_years", 2.0))
                         hits = []
                         for f in favs:
                             row = compute_scan_for_ticker(f["ticker"], params)

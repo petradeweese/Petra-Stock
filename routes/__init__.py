@@ -17,7 +17,7 @@ from fastapi.templating import Jinja2Templates
 
 from indices import SP100, TOP150, TOP250
 from db import DB_PATH, get_db, get_settings
-from scanner import compute_scan_for_ticker
+from scanner import compute_scan_for_ticker, preload_prices
 from utils import now_et, TZ
 
 router = APIRouter()
@@ -488,6 +488,7 @@ async def scanner_run(request: Request):
 
     # Run the scan using a global executor.  Reusing the pool avoids the
     # overhead of spawning fresh workers for every request.
+    preload_prices(tickers, params.get("interval", "15m"), params.get("lookback_years", 2.0))
     rows = []
     ex = _get_scan_executor()
     future_to_ticker = {ex.submit(compute_scan_for_ticker, t, params): t for t in tickers}
