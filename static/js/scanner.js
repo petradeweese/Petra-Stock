@@ -6,7 +6,7 @@
   const progressStatus = document.getElementById('progress-status');
   const overlay = document.getElementById('scan-overlay');
   let ctxRow = null; // current row element
-  let evtSource = null;
+  let pollTimer = null;
   let stillTimer = null;
 
   function startProgress(){
@@ -19,7 +19,7 @@
 
   function stopProgress(){
     overlay.style.display = 'none';
-    if(evtSource){ evtSource.close(); evtSource = null; }
+    if(pollTimer){ clearTimeout(pollTimer); pollTimer = null; }
     if(stillTimer) clearInterval(stillTimer);
   }
 
@@ -154,31 +154,45 @@
         return;
       }
 
-      evtSource = new EventSource(`/scanner/progress?task_id=${taskId}`);
       let last = Date.now();
       stillTimer = setInterval(()=>{
         if(Date.now()-last > 10000) progressStatus.textContent = 'still running...';
       }, 5000);
-      evtSource.onmessage = async function(ev){
-        last = Date.now();
-        const data = JSON.parse(ev.data || '{}');
-        progressFill.style.width = (data.pct || 0) + '%';
-        progressText.textContent = Math.floor(data.pct || 0) + '%';
-        progressStatus.textContent = data.message || '';
-        if(data.phase === 'complete'){
-          evtSource.close();
-          const html = await fetch(`/scanner/results/${taskId}`).then(r=>r.text());
-          const target = document.getElementById('scan-results');
-          if(target) target.innerHTML = html;
-          bindResultsDelegates();
-          stopProgress();
-        }else if(data.phase === 'error'){
-          evtSource.close();
+
+      const poll = async function(){
+        try{
+          const res = await fetch(`/scanner/progress/${taskId}`);
+          const data = await res.json();
+          last = Date.now();
+          progressFill.style.width = (data.percent || 0) + '%';
+          progressText.textContent = Math.floor(data.percent || 0) + '%';
+          if(data.state === 'running'){
+            pollTimer = setTimeout(poll, 1000);
+          }else if(data.state === 'done'){
+            progressFill.style.width = '100%';
+            progressText.textContent = '100%';
+            try{
+              const html = await fetch(`/scanner/results/${taskId}`).then(r=>{
+                if(!r.ok) throw new Error('');
+                return r.text();
+              });
+              const target = document.getElementById('scan-results');
+              if(target) target.innerHTML = html;
+              bindResultsDelegates();
+            }catch(e){
+              showToast('Failed to load results', false);
+            }
+            stopProgress();
+          }else{
+            stopProgress();
+            showToast('Scan failed', false);
+          }
+        }catch(e){
           stopProgress();
           showToast('Scan failed', false);
         }
       };
-      evtSource.onerror = function(){ progressStatus.textContent = 'connection lost'; };
+      poll();
     });
   }
 

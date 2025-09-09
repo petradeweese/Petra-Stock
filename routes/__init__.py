@@ -16,7 +16,7 @@ import asyncio
 import certifi
 import time
 from fastapi import APIRouter, Request, Form, Depends, Response
-from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from prometheus_client import Counter, Histogram, CONTENT_TYPE_LATEST, generate_latest
 
@@ -683,13 +683,13 @@ async def scanner_run(request: Request):
         sort_key = ""
 
     task_id = uuid4().hex
+    logger.info("task %s started", task_id)
     with _scan_lock:
         _scan_tasks[task_id] = {
             "total": len(tickers),
             "done": 0,
-            "phase": "starting",
-            "pct": 0.0,
-            "message": "starting",
+            "percent": 0.0,
+            "state": "running",
         }
 
     def _task():
@@ -698,7 +698,7 @@ async def scanner_run(request: Request):
             with _scan_lock:
                 task = _scan_tasks.get(task_id)
                 if task:
-                    task.update({"done": done, "total": total, "pct": pct, "message": msg, "phase": "scanning"})
+                    task.update({"done": done, "total": total, "percent": pct, "state": "running"})
             logger.info("task %s progress %d/%d", task_id, done, total)
 
         try:
@@ -709,38 +709,41 @@ async def scanner_run(request: Request):
                 "note": f"{scan_type} • {params.get('interval')} • {params.get('direction')} • window {params.get('window_value')} {params.get('window_unit')}"
             }
             with _scan_lock:
-                _scan_tasks[task_id].update({"phase": "complete", "pct": 100.0, "done": len(tickers), "ctx": ctx})
+                _scan_tasks[task_id].update({"state": "done", "percent": 100.0, "done": len(tickers), "ctx": ctx})
+            logger.info("task %s saved results", task_id)
         except Exception as e:
             logger.error("scan task %s failed: %s", task_id, e)
             with _scan_lock:
-                _scan_tasks[task_id].update({"phase": "error", "message": str(e)})
+                _scan_tasks[task_id].update({"state": "failed", "message": str(e)})
 
     Thread(target=_task, daemon=True).start()
     return JSONResponse({"task_id": task_id})
 
 
-@router.get("/scanner/progress")
+@router.get("/scanner/progress/{task_id}")
 async def scanner_progress(task_id: str):
-    async def event_gen():
-        while True:
-            with _scan_lock:
-                task = _scan_tasks.get(task_id)
-                data = task.copy() if task else {"phase": "unknown"}
-            yield f"data: {json.dumps({k: data.get(k) for k in ('pct','done','total','phase','message')})}\n\n"
-            if not task or data.get("phase") in ("complete", "error", "unknown"):
-                break
-            await asyncio.sleep(1)
-    return StreamingResponse(event_gen(), media_type="text/event-stream")
+    with _scan_lock:
+        task = _scan_tasks.get(task_id)
+    if not task:
+        return JSONResponse({"done": 0, "total": 0, "percent": 0.0, "state": "failed"}, status_code=404)
+    data = {
+        "done": task.get("done", 0),
+        "total": task.get("total", 0),
+        "percent": task.get("percent", 0.0),
+        "state": task.get("state", "running"),
+    }
+    return JSONResponse(data)
 
 
 @router.get("/scanner/results/{task_id}", response_class=HTMLResponse)
 async def scanner_results(request: Request, task_id: str):
     with _scan_lock:
         task = _scan_tasks.get(task_id)
-    if not task or task.get("phase") != "complete":
+    if not task or task.get("state") != "done":
         return HTMLResponse("Not ready", status_code=404)
     ctx = task.get("ctx", {}).copy()
     ctx["request"] = request
+    logger.info("task %s rendered", task_id)
     return templates.TemplateResponse("results.html", ctx)
 
 @router.post("/runs/archive")
