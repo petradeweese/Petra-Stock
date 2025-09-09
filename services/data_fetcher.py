@@ -53,6 +53,17 @@ INTRADAY_CAPS = {
 
 _MEM_CACHE: Dict[Tuple[str, str, str], pd.DataFrame] = {}
 
+# --- Yahoo Finance rate limiting -------------------------------------------------
+# Yahoo Finance will return HTTP 429 if too many requests are made in a short
+# period.  We install a token-bucket rate limiter for the Yahoo host so that all
+# callers share a single request budget.  Defaults can be tuned via env vars.
+YF_RPS = float(os.getenv("YF_MAX_RPS", "2"))
+YF_BURST = int(os.getenv("YF_MAX_BURST", "2"))
+try:
+    http_client.set_rate_limit("query1.finance.yahoo.com", YF_RPS, YF_BURST)
+except Exception:  # pragma: no cover - best effort
+    pass
+
 
 def _period_for(interval: str, lookback_years: float) -> str:
     if interval in INTRADAY_CAPS:
@@ -104,49 +115,54 @@ def _normalize_ohlcv(records: List[dict]) -> pd.DataFrame:
             "adjclose": "Adj Close",
         }
     )
-    return df.dropna(how="all")
+    df = df.dropna(how="all")
+    # Ensure all expected OHLCV columns exist so downstream code does not fail
+    df = df.reindex(columns=["Open", "High", "Low", "Close", "Adj Close", "Volume"], fill_value=None)
+    return df
 
 
-async def _download_one(ticker: str, period: str, interval: str) -> Tuple[str, pd.DataFrame]:
+async def _download_batch(batch: List[str], period: str, interval: str) -> Dict[str, pd.DataFrame]:
+    """Download a batch of tickers using Yahoo's multi-symbol spark endpoint."""
+    symbols = ",".join(batch)
     url = (
-        f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval={interval}&range={period}"
-        "&includePrePost=false&events=div%2Csplit"
+        "https://query1.finance.yahoo.com/v8/finance/spark"
+        f"?symbols={symbols}&interval={interval}&range={period}&includePrePost=false&events=div%2Csplit"
     )
     try:
         data = await http_client.get_json(url)
     except Exception as e:  # pragma: no cover - network failure
-        logger.error("download error %s: %r", ticker, e)
-        return ticker, pd.DataFrame()
-    result = (data or {}).get("chart", {}).get("result", [])
-    if not result:
-        return ticker, pd.DataFrame()
-    r0 = result[0]
-    ts = r0.get("timestamp", [])
-    quote = r0.get("indicators", {}).get("quote", [{}])[0]
-    adj_raw = r0.get("indicators", {}).get("adjclose", [{}])[0]
-    adj_list = adj_raw.get("adjclose", []) if isinstance(adj_raw, dict) else adj_raw
-    records = []
-    for i, t in enumerate(ts):
-        records.append(
-            {
-                "timestamp": t,
-                "open": quote.get("open", [None])[i] if i < len(quote.get("open", [])) else None,
-                "high": quote.get("high", [None])[i] if i < len(quote.get("high", [])) else None,
-                "low": quote.get("low", [None])[i] if i < len(quote.get("low", [])) else None,
-                "close": quote.get("close", [None])[i] if i < len(quote.get("close", [])) else None,
-                "volume": quote.get("volume", [None])[i] if i < len(quote.get("volume", [])) else None,
-                "adjclose": adj_list[i] if i < len(adj_list) else None,
-            }
-        )
-    df = _normalize_ohlcv(records)
-    return ticker, _ensure_utc(df)
+        logger.error("download error %s: %r", symbols, e)
+        return {t: pd.DataFrame() for t in batch}
 
+    results: Dict[str, pd.DataFrame] = {t: pd.DataFrame() for t in batch}
+    spark_res = (data or {}).get("spark", {}).get("result", [])
+    for item in spark_res:
+        ticker = item.get("symbol")
+        resp_list = item.get("response", [])
+        if not ticker or not resp_list:
+            continue
+        r0 = resp_list[0]
+        ts = r0.get("timestamp", [])
+        quote = r0.get("indicators", {}).get("quote", [{}])[0]
+        adj_raw = r0.get("indicators", {}).get("adjclose", [{}])[0]
+        adj_list = adj_raw.get("adjclose", []) if isinstance(adj_raw, dict) else adj_raw
+        records = []
+        for i, t in enumerate(ts):
+            records.append(
+                {
+                    "timestamp": t,
+                    "open": quote.get("open", [None])[i] if i < len(quote.get("open", [])) else None,
+                    "high": quote.get("high", [None])[i] if i < len(quote.get("high", [])) else None,
+                    "low": quote.get("low", [None])[i] if i < len(quote.get("low", [])) else None,
+                    "close": quote.get("close", [None])[i] if i < len(quote.get("close", [])) else None,
+                    "volume": quote.get("volume", [None])[i] if i < len(quote.get("volume", [])) else None,
+                    "adjclose": adj_list[i] if i < len(adj_list) else None,
+                }
+            )
+        df = _normalize_ohlcv(records)
+        results[ticker] = _ensure_utc(df)
 
-async def _download_batch(batch: List[str], period: str, interval: str) -> Dict[str, pd.DataFrame]:
-    tasks = [_download_one(t, period, interval) for t in batch]
-    results = await asyncio.gather(*tasks)
-    out: Dict[str, pd.DataFrame] = {t: df for t, df in results}
-    return out
+    return results
 
 
 def fetch_prices(tickers: List[str], interval: str, lookback_years: float) -> Dict[str, pd.DataFrame]:
