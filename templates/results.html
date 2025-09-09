@@ -52,6 +52,10 @@
   {% endif %}
 </div>
 
+{% if elapsed_sec %}
+<div class="muted" style="margin-top:0.5rem;">Completed in {{ '%.1f'|format(elapsed_sec) }}s</div>
+{% endif %}
+
 
 <script>
 (function attachResultsBehaviors(){

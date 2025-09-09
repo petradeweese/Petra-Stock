@@ -1,14 +1,14 @@
-import atexit
 import json
 import os
+import time
 from datetime import datetime
-from typing import Dict, Any, Optional, Union
+from typing import Dict, Any, Optional, List
 import logging
 import sqlite3
 import smtplib
 import ssl
 from email.message import EmailMessage
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 
 import certifi
 from fastapi import APIRouter, Request, Form, Depends
@@ -23,43 +23,6 @@ from utils import now_et, TZ
 router = APIRouter()
 templates = Jinja2Templates(directory="templates")
 logger = logging.getLogger(__name__)
-
-
-_scan_executor: Optional[Union[ThreadPoolExecutor, ProcessPoolExecutor]] = None
-
-
-def _shutdown_executor() -> None:
-    global _scan_executor
-    if _scan_executor:
-        _scan_executor.shutdown()
-        _scan_executor = None
-
-
-def _get_scan_executor() -> Union[ThreadPoolExecutor, ProcessPoolExecutor]:
-    """Return a global executor reused across requests.
-
-    The scanner is CPU intensive, so by default we use a small
-    ``ProcessPoolExecutor`` to take advantage of multiple cores.  If the scan
-    function can't be pickled (e.g. during tests when monkeypatching with a
-    local function), we automatically fall back to a thread pool so the call
-    still succeeds.
-    """
-
-    global _scan_executor
-    if _scan_executor is None:
-        max_workers = max(1, int(os.getenv("SCAN_WORKERS", "3")))
-        exec_type = os.getenv("SCAN_EXECUTOR", "process").lower()
-        Executor = ProcessPoolExecutor if exec_type == "process" else ThreadPoolExecutor
-        if Executor is ProcessPoolExecutor:
-            import pickle
-
-            try:  # pragma: no cover - only fails in tests
-                pickle.dumps(compute_scan_for_ticker)
-            except Exception:
-                Executor = ThreadPoolExecutor
-        _scan_executor = Executor(max_workers=max_workers)
-        atexit.register(_shutdown_executor)
-    return _scan_executor
 
 def _sort_rows(rows, sort_key):
     if not rows or not sort_key:
@@ -486,22 +449,41 @@ async def scanner_run(request: Request):
     if sort_key not in ("ticker", "roi", "hit"):
         sort_key = ""
 
-    # Run the scan using a global executor.  Reusing the pool avoids the
-    # overhead of spawning fresh workers for every request.
+    t0 = time.time()
     preload_prices(tickers, params.get("interval", "15m"), params.get("lookback_years", 2.0))
-    rows = []
-    ex = _get_scan_executor()
-    future_to_ticker = {ex.submit(compute_scan_for_ticker, t, params): t for t in tickers}
-    for fut in as_completed(future_to_ticker):
-        ticker = future_to_ticker[fut]
-        try:
-            r = fut.result()
-            if r:
-                rows.append(r)
-        except Exception as e:
-            # Individual scan failure should not abort the whole run.
-            logger.error("scan failed for %s: %s", ticker, e)
+    fetch_ms = int((time.time() - t0) * 1000)
 
+    rows: List[Dict[str, Any]] = []
+    failed = 0
+
+    max_workers = min(3, os.cpu_count() or 1)
+    try:
+        import pickle
+        pickle.dumps(compute_scan_for_ticker)
+        Executor = ProcessPoolExecutor
+    except Exception:
+        Executor = ThreadPoolExecutor
+
+    compute_start = time.time()
+    batch_size = max(20, min(40, max(1, len(tickers) // 4)))
+    with Executor(max_workers=max_workers) as ex:
+        for i in range(0, len(tickers), batch_size):
+            batch = tickers[i : i + batch_size]
+            future_to_ticker = {ex.submit(compute_scan_for_ticker, t, params): t for t in batch}
+            for fut in as_completed(future_to_ticker):
+                ticker = future_to_ticker[fut]
+                try:
+                    r = fut.result()
+                    if r:
+                        rows.append(r)
+                    else:
+                        failed += 1
+                except Exception as e:
+                    logger.error("scan failed for %s: %s", ticker, e)
+                    failed += 1
+    compute_ms = int((time.time() - compute_start) * 1000)
+
+    merge_start = time.time()
     # Optional filters (match desktop defaults)
     try:
         scan_min_hit = float(params.get("scan_min_hit", 0.0))
@@ -531,12 +513,24 @@ async def scanner_run(request: Request):
             ),
             reverse=True,
         )
+    merge_ms = int((time.time() - merge_start) * 1000)
+    elapsed_ms = int((time.time() - t0) * 1000)
+    logger.info(
+        "fetch_batch_ms=%d compute_ms=%d merge_ms=%d tickers_total=%d tickers_failed=%d total_ms=%d",
+        fetch_ms,
+        compute_ms,
+        merge_ms,
+        len(tickers),
+        failed,
+        elapsed_ms,
+    )
 
     ctx = {
         "request": request,
         "rows": rows,
         "ran_at": datetime.now().strftime("%I:%M:%S %p").lstrip("0"),
-        "note": f"{scan_type} • {params.get('interval')} • {params.get('direction')} • window {params.get('window_value')} {params.get('window_unit')}"
+        "note": f"{scan_type} • {params.get('interval')} • {params.get('direction')} • window {params.get('window_value')} {params.get('window_unit')}",
+        "elapsed_sec": elapsed_ms / 1000.0,
     }
 
     if params.get("email_checkbox") == "on" and rows:

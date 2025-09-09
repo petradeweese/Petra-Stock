@@ -189,10 +189,10 @@ if _pfa is not None:
     def _price_lookup(ticker: str, interval: str, lookback_years: float) -> pd.DataFrame:
         df = _PRICE_DATA.get(ticker)
         if df is not None and not df.empty:
-            return df.copy()
+            return df
         data = fetch_prices([ticker], interval, lookback_years).get(ticker, pd.DataFrame())
         _PRICE_DATA[ticker] = data
-        return data.copy()
+        return data
 
     _pfa._download_prices = _price_lookup
 
