@@ -108,7 +108,8 @@
     ctxPayload = {
       ticker: tr.dataset.tkr || '',
       direction: (tr.dataset.dir || 'UP').toUpperCase(),
-      rule: tr.dataset.rule || ''
+      rule: tr.dataset.rule || '',
+      ref_avg_dd: parseFloat(tr.dataset.dd || '0')
     };
     showMenu(e.clientX, e.clientY);
   });
@@ -126,7 +127,8 @@
     const payload = {
       ticker: tr.dataset.tkr || '',
       direction: (tr.dataset.dir || 'UP').toUpperCase(),
-      rule: tr.dataset.rule || ''
+      rule: tr.dataset.rule || '',
+      ref_avg_dd: parseFloat(tr.dataset.dd || '0')
     };
     addFavorite(payload);
   });

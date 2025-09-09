@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 async def favorites_loop(market_is_open: Callable[[datetime], bool], now_et: Callable[[], datetime], compute_scan_for_ticker: Callable[[str, Dict[str, Any]], Dict[str, Any]]):
     logger.info("scheduler started")
     while True:
+        start = asyncio.get_event_loop().time()
         try:
             ts = now_et()
             if market_is_open(ts):
@@ -51,10 +52,10 @@ async def favorites_loop(market_is_open: Callable[[datetime], bool], now_et: Cal
                         # TODO: email YES hits in a readable format
                         # TODO: archive favorites 15m scan results only if there are YES hits
                         set_last_run(boundary.isoformat(), db)
-            await asyncio.sleep(60)
         except Exception as e:
             logger.error("scheduler error: %r", e)
-            await asyncio.sleep(60)
+        elapsed = asyncio.get_event_loop().time() - start
+        await asyncio.sleep(max(0, 60 - elapsed))
 
 
 def setup_scheduler(app, market_is_open, now_et, compute_scan_for_ticker):
