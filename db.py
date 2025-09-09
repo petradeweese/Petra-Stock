@@ -1,5 +1,6 @@
 import logging
 import sqlite3
+from pathlib import Path
 from typing import Dict, Any, List, Optional
 
 from utils import now_et
@@ -135,88 +136,45 @@ SCHEMA = [
 ]
 
 
-def migrate_forward_tests(conn: sqlite3.Connection) -> None:
-    """Ensure the forward_tests table has the expected columns."""
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='forward_tests'"
-    )
-    if cur.fetchone() is None:
-        return
-    cur.execute("PRAGMA table_info(forward_tests)")
-    cols = {row[1] for row in cur.fetchall()}
-
-    def rename(old: str, new: str):
-        if old in cols and new not in cols:
-            cur.execute(f"ALTER TABLE forward_tests RENAME COLUMN {old} TO {new}")
-            cols.remove(old)
-            cols.add(new)
-
-    def add(col: str, ddl: str, backfill: Optional[str] = None):
-        if col not in cols:
-            cur.execute(f"ALTER TABLE forward_tests ADD COLUMN {col} {ddl}")
-            if backfill:
-                cur.execute(backfill)
-
-    rename("roi", "roi_forward")
-    rename("hit_pct", "hit_forward")
-    rename("dd_pct", "dd_forward")
-    rename("last_run", "last_run_at")
-
-    add("status", "TEXT NOT NULL DEFAULT 'queued'", "UPDATE forward_tests SET status='queued' WHERE status IS NULL OR status='pending'")
-    cur.execute("UPDATE forward_tests SET status='ok' WHERE status='done'")
-    add("next_run_at", "TEXT")
-    add("runs_count", "INTEGER NOT NULL DEFAULT 0")
-    add("notes", "TEXT")
-    add("roi_forward", "REAL", "UPDATE forward_tests SET roi_forward=0.0 WHERE roi_forward IS NULL")
-    add("hit_forward", "REAL")
-    add("dd_forward", "REAL")
-    add("last_run_at", "TEXT")
-    add("rule", "TEXT")
-    add("ticker", "TEXT")
-    add("direction", "TEXT")
-    add("interval", "TEXT")
-    add("created_at", "TEXT", "UPDATE forward_tests SET created_at=entry_ts WHERE created_at IS NULL")
-    add("updated_at", "TEXT", "UPDATE forward_tests SET updated_at=created_at WHERE updated_at IS NULL")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_forward_tests_fav ON forward_tests(fav_id)")
-    conn.commit()
-
-
-def migrate_favorites(conn: sqlite3.Connection) -> None:
-    """Ensure favorites table has snapshot columns."""
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='favorites'"
-    )
-    if cur.fetchone() is None:
-        return
-    cur.execute("PRAGMA table_info(favorites)")
-    cols = {row[1] for row in cur.fetchall()}
-
-    def add(col: str, ddl: str):
-        if col not in cols:
-            cur.execute(f"ALTER TABLE favorites ADD COLUMN {col} {ddl}")
-
-    add("roi_snapshot", "REAL")
-    add("hit_pct_snapshot", "REAL")
-    add("dd_pct_snapshot", "REAL")
-    add("rule_snapshot", "TEXT")
-    add("settings_json_snapshot", "TEXT")
-    add("snapshot_at", "TEXT")
-    conn.commit()
-
-
-def migrate_runs(conn: sqlite3.Connection) -> None:
-    """Ensure runs table has settings_json column."""
-    cur = conn.cursor()
-    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='runs'")
-    if cur.fetchone() is None:
-        return
-    cur.execute("PRAGMA table_info(runs)")
-    cols = {row[1] for row in cur.fetchall()}
-    if "settings_json" not in cols:
-        cur.execute("ALTER TABLE runs ADD COLUMN settings_json TEXT")
-    conn.commit()
+def run_migrations() -> None:
+    """Apply pending SQL migrations from the migrations directory."""
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    try:
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute("BEGIN")
+        cur.execute(
+            "CREATE TABLE IF NOT EXISTS migrations (filename TEXT PRIMARY KEY, applied_at TEXT NOT NULL)"
+        )
+        cur.execute("SELECT filename FROM migrations")
+        applied = {row[0] for row in cur.fetchall()}
+        migrations_dir = Path("migrations")
+        for path in sorted(migrations_dir.glob("*.sql")):
+            if path.name in applied:
+                continue
+            logger.info("Applying migration %s", path.name)
+            with open(path, "r", encoding="utf-8") as f:
+                statements = [s.strip() for s in f.read().split(";") if s.strip()]
+            for stmt in statements:
+                try:
+                    cur.execute(stmt)
+                except sqlite3.OperationalError as e:
+                    msg = str(e).lower()
+                    if any(x in msg for x in ["duplicate column name", "already exists", "no such column"]):
+                        logger.debug("Skipping statement %r: %s", stmt, e)
+                    else:
+                        raise
+            cur.execute(
+                "INSERT INTO migrations (filename, applied_at) VALUES (?, ?)",
+                (path.name, now_et().isoformat()),
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        logger.exception("Failed to run migrations")
+        raise
+    finally:
+        conn.close()
 
 
 def init_db():
@@ -227,9 +185,6 @@ def init_db():
         cur = conn.cursor()
         for stmt in SCHEMA:
             cur.executescript(stmt)
-        migrate_forward_tests(conn)
-        migrate_favorites(conn)
-        migrate_runs(conn)
         conn.commit()
     except sqlite3.Error:
         logger.exception("Failed to initialize database")
