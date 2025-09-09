@@ -1,4 +1,5 @@
 import logging
+from functools import lru_cache
 from typing import Dict, Any, Optional, Callable
 
 # Adapter to the original ROI engine
@@ -173,6 +174,9 @@ except Exception:
     _pfa = None
     import pandas as pd  # ensure pd is available for type hints
 
+if _pfa is not None:
+    _pfa._download_prices = lru_cache(maxsize=64)(_pfa._download_prices)
+
 
 def _desktop_like_single(ticker: str, params: dict) -> dict:
     """Match pattern_finder_app._scan_worker for a SINGLE ticker+direction."""
@@ -180,8 +184,6 @@ def _desktop_like_single(ticker: str, params: dict) -> dict:
         logger.warning("pattern_finder_app is not available")
         return {}
     try:
-        px = _pfa._download_prices(ticker, params["interval"], params["lookback_years"])
-        ev = _pfa.build_event_mask(px.index, set())
         model, df, _ = _pfa.analyze_roi_mode(
             ticker=ticker,
             interval=params["interval"],
@@ -200,7 +202,7 @@ def _desktop_like_single(ticker: str, params: dict) -> dict:
             use_regime=params["use_regime"],
             regime_trend_only=params["regime_trend_only"],
             vix_z_max=params["vix_z_max"],
-            event_mask=ev,
+            event_mask=None,
             slippage_bps=params["slippage_bps"],
             vega_scale=params["vega_scale"],
         )
