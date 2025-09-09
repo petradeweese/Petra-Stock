@@ -1,11 +1,17 @@
+import os
+from configparser import ConfigParser
+
 from alembic import context
 from logging.config import fileConfig
 from sqlalchemy import engine_from_config, pool
 
 config = context.config
 
-if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+if config.config_file_name is not None and os.path.exists(config.config_file_name):
+    parser = ConfigParser()
+    parser.read(config.config_file_name)
+    if parser.has_section("loggers"):
+        fileConfig(config.config_file_name)
 
 target_metadata = None
 
