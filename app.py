@@ -4,6 +4,13 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.proxy_headers import ProxyHeadersMiddleware
 
+try:  # pragma: no cover - optional speed-up
+    import uvloop
+
+    uvloop.install()
+except Exception:
+    pass
+
 from db import init_db
 from routes import router
 from scheduler import setup_scheduler

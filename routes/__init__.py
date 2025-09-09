@@ -1,13 +1,14 @@
+import atexit
 import json
 import os
 from datetime import datetime
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Union
 import logging
 import sqlite3
 import smtplib
 import ssl
 from email.message import EmailMessage
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 
 import certifi
 from fastapi import APIRouter, Request, Form, Depends
@@ -23,6 +24,42 @@ router = APIRouter()
 templates = Jinja2Templates(directory="templates")
 logger = logging.getLogger(__name__)
 
+
+_scan_executor: Optional[Union[ThreadPoolExecutor, ProcessPoolExecutor]] = None
+
+
+def _shutdown_executor() -> None:
+    global _scan_executor
+    if _scan_executor:
+        _scan_executor.shutdown()
+        _scan_executor = None
+
+
+def _get_scan_executor() -> Union[ThreadPoolExecutor, ProcessPoolExecutor]:
+    """Return a global executor reused across requests.
+
+    The scanner is CPU intensive, so by default we use a small
+    ``ProcessPoolExecutor`` to take advantage of multiple cores.  If the scan
+    function can't be pickled (e.g. during tests when monkeypatching with a
+    local function), we automatically fall back to a thread pool so the call
+    still succeeds.
+    """
+
+    global _scan_executor
+    if _scan_executor is None:
+        max_workers = max(1, int(os.getenv("SCAN_WORKERS", "3")))
+        exec_type = os.getenv("SCAN_EXECUTOR", "process").lower()
+        Executor = ProcessPoolExecutor if exec_type == "process" else ThreadPoolExecutor
+        if Executor is ProcessPoolExecutor:
+            import pickle
+
+            try:  # pragma: no cover - only fails in tests
+                pickle.dumps(compute_scan_for_ticker)
+            except Exception:
+                Executor = ThreadPoolExecutor
+        _scan_executor = Executor(max_workers=max_workers)
+        atexit.register(_shutdown_executor)
+    return _scan_executor
 
 def _sort_rows(rows, sort_key):
     if not rows or not sort_key:
@@ -449,23 +486,20 @@ async def scanner_run(request: Request):
     if sort_key not in ("ticker", "roi", "hit"):
         sort_key = ""
 
-    # Run the scan
+    # Run the scan using a global executor.  Reusing the pool avoids the
+    # overhead of spawning fresh workers for every request.
     rows = []
-    max_workers = max(1, int(os.getenv("SCAN_WORKERS", "8")))
-
-    def _scan_one(ticker: str):
+    ex = _get_scan_executor()
+    future_to_ticker = {ex.submit(compute_scan_for_ticker, t, params): t for t in tickers}
+    for fut in as_completed(future_to_ticker):
+        ticker = future_to_ticker[fut]
         try:
-            return compute_scan_for_ticker(ticker, params)
-        except Exception as e:
-            logger.error("scan failed for %s: %s", ticker, e)
-            return None
-
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futures = [ex.submit(_scan_one, t) for t in tickers]
-        for fut in as_completed(futures):
             r = fut.result()
             if r:
                 rows.append(r)
+        except Exception as e:
+            # Individual scan failure should not abort the whole run.
+            logger.error("scan failed for %s: %s", ticker, e)
 
     # Optional filters (match desktop defaults)
     try:
