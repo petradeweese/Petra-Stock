@@ -14,7 +14,8 @@
           <th>ROI%</th>
           <th>Hit%</th>
           <th>DD%</th>
-          <th>Last Run</th>
+          <th>Status</th>
+          <th>Start</th>
           <th>Rule</th>
           <th></th>
         </tr>
@@ -22,17 +23,18 @@
       <tbody>
         {% for f in tests %}
         <tr>
-          <td>{{ f["id"] }}</td>
+          <td>{{ f["ft_id"] }}</td>
           <td><strong>{{ f["ticker"] }}</strong></td>
           <td>{{ f["direction"] }}</td>
           <td>{{ f["interval"] }}</td>
-          <td>{{ '{:.0f}'.format(f['avg_roi_pct']*100 if f['avg_roi_pct'] is not none and f['avg_roi_pct'] <= 1 else f['avg_roi_pct']) if f['avg_roi_pct'] is not none else '' }}</td>
-          <td>{{ '{:.1f}'.format(f['hit_pct']) if f['hit_pct'] is not none else '' }}</td>
-          <td>{{ '{:.0f}'.format(f['avg_dd_pct']*100 if f['avg_dd_pct'] is not none and f['avg_dd_pct'] <= 1 else f['avg_dd_pct']) if f['avg_dd_pct'] is not none else '' }}</td>
-          <td>{{ f["ran_at"][:16] if f["ran_at"] else '' }}</td>
+          <td>{{ '{:.1f}'.format(f['roi_pct']) if f['roi_pct'] is not none else '' }}</td>
+          <td>{{ '{:.0f}'.format(f['hit_pct']) if f['hit_pct'] is not none else '' }}</td>
+          <td>{{ '{:.1f}'.format(f['dd_pct']) if f['dd_pct'] is not none else '' }}</td>
+          <td>{{ f['status'] }}</td>
+          <td>{{ f["entry_ts"][:16] if f["entry_ts"] else '' }}</td>
           <td><code>{{ f["rule"] }}</code></td>
           <td>
-            <form method="post" action="/favorites/delete/{{ f['id'] }}" style="margin:0;">
+            <form method="post" action="/favorites/delete/{{ f['fav_id'] }}" style="margin:0;">
               <button type="submit" class="del-btn">&#10005;</button>
             </form>
           </td>

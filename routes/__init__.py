@@ -18,7 +18,9 @@ from fastapi.templating import Jinja2Templates
 from indices import SP100, TOP150, TOP250
 from db import DB_PATH, get_db, get_settings
 from scanner import compute_scan_for_ticker, preload_prices
+from services.data_fetcher import fetch_prices
 from utils import now_et, TZ
+import pandas as pd
 
 router = APIRouter()
 templates = Jinja2Templates(directory="templates")
@@ -242,60 +244,129 @@ def favorites_page(request: Request, db=Depends(get_db)):
     return templates.TemplateResponse("favorites.html", {"request": request, "favorites": favs, "active_tab": "favorites"})
 
 
+def _window_to_minutes(value: float, unit: str) -> int:
+    unit = (unit or "").lower()
+    if unit.startswith("min"):
+        return int(value)
+    if unit.startswith("hour"):
+        return int(value * 60)
+    if unit.startswith("day"):
+        return int(value * 60 * 24)
+    if unit.startswith("week"):
+        return int(value * 60 * 24 * 7)
+    return int(value * 60)
+
+
+def _create_forward_test(db: sqlite3.Cursor, fav: dict) -> None:
+    data = fetch_prices([fav["ticker"]], fav.get("interval", "15m"), fav.get("lookback_years", 1.0)).get(fav["ticker"])
+    if data is None or getattr(data, "empty", True):
+        return
+    last_bar = data.iloc[-1]
+    ts = last_bar.name
+    if hasattr(ts, "to_pydatetime"):
+        ts = ts.to_pydatetime()
+    entry_ts = ts.astimezone(TZ).isoformat()
+    entry_price = float(last_bar["Close"])
+    window_minutes = _window_to_minutes(fav.get("window_value", 4.0), fav.get("window_unit", "Hours"))
+    db.execute(
+        """INSERT INTO forward_tests
+            (fav_id, ticker, direction, interval, rule, entry_ts, entry_price,
+             target_pct, stop_pct, window_minutes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            fav["id"],
+            fav["ticker"],
+            fav.get("direction", "UP"),
+            fav.get("interval", "15m"),
+            fav.get("rule"),
+            entry_ts,
+            entry_price,
+            fav.get("target_pct", 1.0),
+            fav.get("stop_pct", 0.5),
+            window_minutes,
+        ),
+    )
+    db.connection.commit()
+
+
+def _update_forward_tests(db: sqlite3.Cursor) -> None:
+    db.execute(
+        """SELECT id, ticker, direction, interval, entry_ts, entry_price,
+                  target_pct, stop_pct, window_minutes
+               FROM forward_tests
+               WHERE status='OPEN'"""
+    )
+    rows = [dict(r) for r in db.fetchall()]
+    for row in rows:
+        data = fetch_prices([row["ticker"]], row["interval"], 1.0).get(row["ticker"])
+        if data is None or getattr(data, "empty", True):
+            continue
+        entry_ts = pd.Timestamp(row["entry_ts"])
+        after = data[data.index > entry_ts]
+        if after.empty:
+            continue
+        prices = after["Close"]
+        mult = 1.0 if row["direction"] == "UP" else -1.0
+        pct_series = (prices / row["entry_price"] - 1.0) * 100 * mult
+        roi = float(pct_series.iloc[-1])
+        mfe = float(pct_series.max())
+        mae = float(pct_series.min())
+        status = "OPEN"
+        hit_pct = None
+        if row["direction"] == "UP":
+            hit_cond = prices >= row["entry_price"] * (1 + row["target_pct"] / 100)
+            stop_cond = prices <= row["entry_price"] * (1 - row["stop_pct"] / 100)
+        else:
+            hit_cond = prices <= row["entry_price"] * (1 - row["target_pct"] / 100)
+            stop_cond = prices >= row["entry_price"] * (1 + row["stop_pct"] / 100)
+        hit_time = prices[hit_cond].index[0] if hit_cond.any() else None
+        stop_time = prices[stop_cond].index[0] if stop_cond.any() else None
+        expire_ts = entry_ts + pd.Timedelta(minutes=row["window_minutes"])
+        final_ts = after.index[-1]
+        if hit_time and (not stop_time or hit_time <= stop_time) and hit_time <= expire_ts:
+            roi = float(pct_series.loc[hit_time])
+            status = "HIT"
+            hit_pct = 100.0
+        elif stop_time and (not hit_time or stop_time < hit_time) and stop_time <= expire_ts:
+            roi = float(pct_series.loc[stop_time])
+            status = "STOP"
+            hit_pct = 0.0
+        elif final_ts >= expire_ts:
+            subset = after[after.index <= expire_ts]
+            if not subset.empty:
+                pct_subset = (subset / row["entry_price"] - 1.0) * 100 * mult
+                roi = float(pct_subset.iloc[-1])
+                mfe = float(pct_subset.max())
+                mae = float(pct_subset.min())
+            status = "EXPIRED"
+            hit_pct = 0.0
+        dd = float(max(0.0, -mae))
+        db.execute(
+            """UPDATE forward_tests
+                   SET roi_pct=?, mfe_pct=?, mae_pct=?, dd_pct=?, status=?, hit_pct=?, updated_at=?
+                   WHERE id=?""",
+            (roi, mfe, mae, dd, status, hit_pct, now_et().isoformat(), row["id"]),
+        )
+    db.connection.commit()
+
+
 @router.get("/forward", response_class=HTMLResponse)
 def forward_page(request: Request, db=Depends(get_db)):
     db.execute("SELECT * FROM favorites ORDER BY id DESC")
     favs = [dict(r) for r in db.fetchall()]
-    tests = []
     for f in favs:
-        params = {
-            "interval": f.get("interval", "15m"),
-            "direction": f.get("direction", "UP"),
-            "target_pct": f.get("target_pct", 1.0),
-            "stop_pct": f.get("stop_pct", 0.5),
-            "window_value": f.get("window_value", 4.0),
-            "window_unit": f.get("window_unit", "Hours"),
-            "lookback_years": f.get("lookback_years", 2.0),
-            "max_tt_bars": f.get("max_tt_bars", 12),
-            "min_support": f.get("min_support", 20),
-            "delta_assumed": f.get("delta", 0.4),
-            "theta_per_day_pct": f.get("theta_day", 0.2),
-            "atrz_gate": f.get("atrz", 0.10),
-            "slope_gate_pct": f.get("slope", 0.02),
-            "use_regime": f.get("use_regime", 0),
-            "regime_trend_only": f.get("trend_only", 0),
-            "vix_z_max": f.get("vix_z_max", 3.0),
-            "slippage_bps": f.get("slippage_bps", 7.0),
-            "vega_scale": f.get("vega_scale", 0.03),
-            "scan_min_hit": 0.0,
-            "scan_max_dd": 100.0,
-        }
-        row = compute_scan_for_ticker(f["ticker"], params)
-        ran_at = now_et().isoformat()
-        result = {
-            "id": f["id"],
-            "ticker": f["ticker"],
-            "direction": f["direction"],
-            "interval": f["interval"],
-            "rule": f["rule"],
-            "avg_roi_pct": row.get("avg_roi_pct") if row else None,
-            "hit_pct": row.get("hit_pct") if row else None,
-            "avg_dd_pct": row.get("avg_dd_pct") if row else None,
-            "ran_at": ran_at,
-        }
-        tests.append(result)
-        if row:
-            db.execute(
-                "INSERT INTO forward_tests(fav_id, ran_at, avg_roi_pct, hit_pct, avg_dd_pct) VALUES (?, ?, ?, ?, ?)",
-                (
-                    f["id"],
-                    ran_at,
-                    row.get("avg_roi_pct"),
-                    row.get("hit_pct"),
-                    row.get("avg_dd_pct"),
-                ),
-            )
-    db.connection.commit()
+        db.execute("SELECT status FROM forward_tests WHERE fav_id=? ORDER BY id DESC LIMIT 1", (f["id"],))
+        row = db.fetchone()
+        if row is None or row["status"] != "OPEN":
+            _create_forward_test(db, f)
+    _update_forward_tests(db)
+    db.execute(
+        """SELECT ft.id AS ft_id, ft.fav_id, ft.ticker, ft.direction, ft.interval,
+                  ft.roi_pct, ft.hit_pct, ft.dd_pct, ft.status, ft.entry_ts, ft.rule
+               FROM forward_tests ft
+               ORDER BY ft.id DESC"""
+    )
+    tests = [dict(r) for r in db.fetchall()]
     return templates.TemplateResponse("forward.html", {"request": request, "tests": tests, "active_tab": "forward"})
 
 
