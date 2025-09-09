@@ -535,7 +535,7 @@ async def scanner_run(request: Request):
     ctx = {
         "request": request,
         "rows": rows,
-        "ran_at": datetime.now().strftime("%I:%M:%S %p").lstrip("0"),
+        "ran_at": now_et().strftime("%I:%M:%S %p").lstrip("0"),
         "note": f"{scan_type} • {params.get('interval')} • {params.get('direction')} • window {params.get('window_value')} {params.get('window_unit')}"
     }
 
@@ -695,7 +695,7 @@ def scanner_parity(request: Request):
         {
             "request": request,
             "rows": _sort_rows(rows, sort_key),
-            "ran_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "ran_at": now_et().strftime("%Y-%m-%d %H:%M"),
             "note": f"TOP150 parity run • kept {len(rows)}",
         },
     )

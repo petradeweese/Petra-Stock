@@ -34,6 +34,8 @@ import httpx
 
 from email.message import EmailMessage
 from datetime import datetime, timedelta
+
+from utils import now_et
 import smtplib, ssl, certifi
 
 from ta.momentum import RSIIndicator
@@ -1484,7 +1486,7 @@ class App:
 
     def _compose_alert_email(self, rows):
         lines = []
-        hdr = f"PatternFinder Alerts — {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+        hdr = f"PatternFinder Alerts — {now_et().strftime('%Y-%m-%d %H:%M')}"
         lines.append(hdr)
         lines.append("="*len(hdr))
         any_yes = False
@@ -1540,7 +1542,7 @@ class App:
 
             # Dedupe: don't email same (ticker,interval,dir) more than once per day
             sent = self._load_sent_map()
-            today = datetime.now().strftime("%Y-%m-%d")
+            today = now_et().strftime("%Y-%m-%d")
             already = set(sent.get(today, []))
             filtered = []
             for r in rows:
@@ -1572,7 +1574,7 @@ class App:
             hh, mm = [int(x) for x in hhmm.split(":")]
         except:
             hh, mm = 9, 28
-        now = datetime.now()
+        now = now_et()
         target = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
         if target <= now:
             target += timedelta(days=1)
