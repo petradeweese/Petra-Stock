@@ -12,7 +12,7 @@
 # - Alerts tab: SMTP settings, Send Test Email, Run Now, Start/Stop daily scheduler (Mon–Fri)
 # - Diagnostics: shows gated bar count so you can tune filters
 
-import os, json, math, warnings, threading, itertools
+import os, json, math, warnings, threading, itertools, time, random
 import platform
 warnings.filterwarnings("ignore")
 
@@ -30,6 +30,7 @@ except Exception:  # ModuleNotFoundError on headless servers
 import pandas as pd
 import numpy as np
 import yfinance as yf
+import httpx
 
 from email.message import EmailMessage
 from datetime import datetime, timedelta
@@ -54,9 +55,34 @@ FAV_FILE = "favorites.json"
 ALERTS_FILE = "alerts_config.json"    # SMTP + recipients + schedule
 ALERTS_SENT_FILE = "alerts_sent.json" # daily dedupe (e.g. {"2025-09-06": ["ENPH_15m_UP", ...]})
 
-_CACHE = {}
-def _cget(key): return _CACHE.get(key)
-def _cset(key, val): _CACHE[key] = val
+# Cache results for 10 minutes to avoid re-downloading the same series.
+_CACHE: dict = {}
+_CACHE_TTL = 600  # seconds
+
+
+def _cget(key):
+    entry = _CACHE.get(key)
+    if not entry:
+        return None
+    ts, val = entry
+    if time.time() - ts > _CACHE_TTL:
+        _CACHE.pop(key, None)
+        return None
+    return val
+
+
+def _cset(key, val) -> None:
+    _CACHE[key] = (time.time(), val)
+
+
+# Shared HTTPX client for price downloads.  Using a single client enables
+# connection pooling, HTTP/2 and higher concurrency when fetching data for
+# many tickers.
+_HTTP = httpx.Client(
+    http2=True,
+    timeout=10.0,
+    limits=httpx.Limits(max_connections=32, max_keepalive_connections=32),
+)
 
 # -----------------------------
 # Utilities
@@ -76,25 +102,22 @@ def _bars_for_window(window_val: float, window_unit: str, interval: str) -> int:
     return max(1, int(math.ceil(total/mbar)))
 
 def _download_prices(ticker: str, interval: str, lookback_years: float) -> pd.DataFrame:
-    import pandas as pd
-    import yfinance as yf
-
-    def _normalize_ohlcv(df, ticker=None):
-        if df is None or df.empty:
+    def _normalize_ohlcv(records):
+        if not records:
             return pd.DataFrame()
-        if isinstance(df.columns, pd.MultiIndex):
-            lvl0 = df.columns.get_level_values(0)
-            sym = ticker if (ticker is not None and ticker in set(lvl0)) else lvl0[0]
-            try:
-                df = df.xs(sym, axis=1, level=0, drop_level=True)
-            except Exception:
-                df.columns = [c[-1] if isinstance(c, tuple) else c for c in df.columns]
-        df = df.rename(columns={c: c.title() for c in df.columns})
-        keep = [c for c in ["Open","High","Low","Close","Adj Close","Volume"] if c in df.columns]
-        df = df[keep].copy().dropna(how="all")
-        if getattr(df.index, "tz", None) is not None:
-            df.index = df.index.tz_localize(None)
-        return df
+        df = pd.DataFrame(records)
+        df.index = pd.to_datetime(df["timestamp"], unit="s")
+        df = df.drop(columns=["timestamp"])  # already converted to index
+        df = df.rename(columns={
+            "open": "Open",
+            "high": "High",
+            "low": "Low",
+            "close": "Close",
+            "volume": "Volume",
+        })
+        if "adjclose" in df.columns:
+            df = df.rename(columns={"adjclose": "Adj Close"})
+        return df.dropna(how="all")
 
     key = ("PX", ticker, interval, round(lookback_years, 2))
     cached = _cget(key)
@@ -109,11 +132,50 @@ def _download_prices(ticker: str, interval: str, lookback_years: float) -> pd.Da
         period = f"{min(int(round(lookback_years*365)), 1825)}d"
         yf_int = "1d"
 
-    df = yf.download(
-        ticker, period=period, interval=yf_int,
-        group_by=None, auto_adjust=False, progress=False, threads=True
+    url = (
+        f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval={yf_int}&range={period}"
+        "&includePrePost=false&events=div%2Csplit"
     )
-    df = _normalize_ohlcv(df, ticker=ticker)
+
+    data = None
+    for attempt in range(3):
+        try:
+            resp = _HTTP.get(url)
+            resp.raise_for_status()
+            data = resp.json()
+            break
+        except Exception:  # pragma: no cover - network failure
+            if attempt == 2:
+                raise
+            time.sleep(0.5 + random.random())
+
+    result = (data or {}).get("chart", {}).get("result", [])
+    if not result:
+        raise RuntimeError(f"No usable price data for {ticker}")
+    result0 = result[0]
+    ts = result0.get("timestamp", [])
+    quote = result0.get("indicators", {}).get("quote", [{}])[0]
+    opens = quote.get("open", [])
+    highs = quote.get("high", [])
+    lows = quote.get("low", [])
+    closes = quote.get("close", [])
+    volumes = quote.get("volume", [])
+    adj_raw = result0.get("indicators", {}).get("adjclose", [{}])[0]
+    adj_list = adj_raw.get("adjclose", []) if isinstance(adj_raw, dict) else adj_raw
+
+    records = []
+    for i, t in enumerate(ts):
+        records.append({
+            "timestamp": t,
+            "open": opens[i] if i < len(opens) else None,
+            "high": highs[i] if i < len(highs) else None,
+            "low": lows[i] if i < len(lows) else None,
+            "close": closes[i] if i < len(closes) else None,
+            "volume": volumes[i] if i < len(volumes) else None,
+            "adjclose": adj_list[i] if i < len(adj_list) else None,
+        })
+
+    df = _normalize_ohlcv(records)
 
     if interval == "10m" and not df.empty and "Close" in df.columns:
         o = df["Open"].resample("10T").first()
@@ -122,7 +184,8 @@ def _download_prices(ticker: str, interval: str, lookback_years: float) -> pd.Da
         c = df["Close"].resample("10T").last()
         v = df["Volume"].resample("10T").sum() if "Volume" in df.columns else None
         df = pd.DataFrame({"Open": o, "High": h, "Low": l, "Close": c})
-        if v is not None: df["Volume"] = v
+        if v is not None:
+            df["Volume"] = v
         df = df.dropna(how="any")
 
     if df.empty or "Close" not in df.columns:
