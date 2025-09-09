@@ -2,15 +2,18 @@ import asyncio
 import os
 import random
 import time
+import logging
 from typing import Dict, Optional
 
 import httpx
 
+logger = logging.getLogger(__name__)
+
 MAX_CONCURRENCY = int(os.getenv("HTTP_MAX_CONCURRENCY", "10"))
 # Allow more retries by default so transient rate limits have a chance to recover.
-# We keep the default high enough so that an exponential backoff starting at one
-# second can grow to ~64s: 1,2,4,8,16,32,64.
-MAX_RETRIES = int(os.getenv("HTTP_MAX_RETRIES", "7"))
+# Waits are capped at 64s but a high retry count lets the backoff continue for
+# several minutes when needed.
+MAX_RETRIES = int(os.getenv("HTTP_MAX_RETRIES", "10"))
 
 _client: Optional[httpx.AsyncClient] = None
 _semaphore = asyncio.Semaphore(MAX_CONCURRENCY)
@@ -92,6 +95,7 @@ async def request(method: str, url: str, **kwargs) -> httpx.Response:
             # exponential backoff starting at one second and doubling each retry
             # up to a maximum of 64 seconds: 1, 2, 4, 8, 16, 32, 64.
             wait = retry_after if retry_after is not None else min(64, 2 ** retries)
+            logger.warning("rate_limited host=%s wait=%.2fs", host, wait)
         else:
             # For other errors use an exponential backoff with a bit of jitter so
             # concurrent callers do not stampede.
