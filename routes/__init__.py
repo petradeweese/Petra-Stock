@@ -564,9 +564,8 @@ def archive_page(request: Request, db=Depends(get_db)):
         try:
             dt = datetime.fromisoformat(r["started_at"])
             if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=TZ)
-            else:
-                dt = dt.astimezone(TZ)
+                dt = dt.replace(tzinfo=timezone.utc)
+            dt = dt.astimezone(TZ)
             fmt = dt.strftime("%m/%d/%y,%I:%M%p").replace("/0", "/").replace(",0", ",")
             r["started_display"] = f"{fmt}-{rule_summary}" if rule_summary else fmt
         except Exception:
