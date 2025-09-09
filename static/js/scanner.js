@@ -43,12 +43,28 @@
 
   async function addFavoriteFromRow(tr){
     if(!tr){ showToast('No row selected', false); return; }
-    const payload = {
+    const form = document.getElementById('scan-form');
+    const params = {};
+    if(form){
+      const fd = new FormData(form);
+      for(const [k,v] of fd.entries()) params[k]=v;
+    }
+    const payload = Object.assign({}, params, {
       ticker: tr.dataset.tkr || '',
       direction: (tr.dataset.dir || 'UP').toUpperCase(),
       rule: tr.dataset.rule || '',
-      interval: document.querySelector('select[name="interval"]')?.value || '15m'
-    };
+      roi_snapshot: parseFloat(tr.dataset.roi || '0'),
+      hit_snapshot: parseFloat(tr.dataset.hit || '0'),
+      dd_snapshot: parseFloat(tr.dataset.dd || '0')
+    });
+    // Map form param names to DB column names
+    if(params.delta_assumed !== undefined) payload.delta = params.delta_assumed;
+    if(params.theta_per_day_pct !== undefined) payload.theta_day = params.theta_per_day_pct;
+    if(params.atrz_gate !== undefined) payload.atrz = params.atrz_gate;
+    if(params.slope_gate_pct !== undefined) payload.slope = params.slope_gate_pct;
+    if(params.regime_trend_only !== undefined) payload.trend_only = params.regime_trend_only;
+    payload.interval = params.interval || payload.interval || '15m';
+    payload.scan_type = params.scan_type || payload.scan_type;
     if(!payload.ticker || !payload.rule){
       showToast('Missing ticker or rule', false);
       return;

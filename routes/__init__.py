@@ -178,67 +178,27 @@ def results_from_archive(request: Request, run_id: int, db=Depends(get_db)):
             "active_tab": "archive",
             "ran_at": ran_at,
             "rule_summary": rule_summary,
+            "params": params,
         },
     )
 
 
 @router.get("/favorites", response_class=HTMLResponse)
 def favorites_page(request: Request, db=Depends(get_db)):
-    db.execute("SELECT * FROM favorites ORDER BY id DESC")
+    db.execute(
+        """
+        SELECT f.*, ft.avg_roi_pct AS forward_roi_pct, ft.hit_pct AS forward_hit_pct,
+               ft.avg_dd_pct AS forward_dd_pct, ft.ran_at AS forward_ran_at
+        FROM favorites f
+        LEFT JOIN (
+            SELECT fav_id, avg_roi_pct, hit_pct, avg_dd_pct, ran_at
+            FROM forward_tests
+            WHERE id IN (SELECT MAX(id) FROM forward_tests GROUP BY fav_id)
+        ) ft ON ft.fav_id = f.id
+        ORDER BY f.id DESC
+        """
+    )
     favs = [dict(r) for r in db.fetchall()]
-    for f in favs:
-        # Try to pull the latest archived metrics for this favorite
-        db.execute(
-            """
-            SELECT rr.avg_roi_pct, rr.hit_pct, rr.avg_dd_pct
-            FROM run_results rr
-            JOIN runs r ON rr.run_id = r.id
-            WHERE rr.ticker=? AND rr.rule=?
-            ORDER BY r.id DESC
-            LIMIT 1
-            """,
-            (f["ticker"], f["rule"]),
-        )
-        row = db.fetchone()
-        if row and row["avg_roi_pct"] is not None:
-            f["avg_roi_pct"] = row["avg_roi_pct"]
-            f["hit_pct"] = row["hit_pct"]
-            f["avg_dd_pct"] = row["avg_dd_pct"]
-            continue
-
-        # Fall back to recomputing on the fly if no archived data exists
-        params = {
-            "interval": f.get("interval", "15m"),
-            "direction": f.get("direction", "UP"),
-            "target_pct": f.get("target_pct", 1.0),
-            "stop_pct": f.get("stop_pct", 0.5),
-            "window_value": f.get("window_value", 4.0),
-            "window_unit": f.get("window_unit", "Hours"),
-            "lookback_years": f.get("lookback_years", 2.0),
-            "max_tt_bars": f.get("max_tt_bars", 12),
-            "min_support": f.get("min_support", 20),
-            "delta_assumed": f.get("delta", 0.4),
-            "theta_per_day_pct": f.get("theta_day", 0.2),
-            "atrz_gate": f.get("atrz", 0.10),
-            "slope_gate_pct": f.get("slope", 0.02),
-            "use_regime": f.get("use_regime", 0),
-            "regime_trend_only": f.get("trend_only", 0),
-            "vix_z_max": f.get("vix_z_max", 3.0),
-            "slippage_bps": f.get("slippage_bps", 7.0),
-            "vega_scale": f.get("vega_scale", 0.03),
-            # Ensure no additional filtering is applied
-            "scan_min_hit": 0.0,
-            "scan_max_dd": 100.0,
-        }
-        row = compute_scan_for_ticker(f["ticker"], params)
-        if row:
-            f["avg_roi_pct"] = row.get("avg_roi_pct")
-            f["hit_pct"] = row.get("hit_pct")
-            f["avg_dd_pct"] = row.get("avg_dd_pct")
-        else:
-            f["avg_roi_pct"] = None
-            f["hit_pct"] = None
-            f["avg_dd_pct"] = None
     return templates.TemplateResponse("favorites.html", {"request": request, "favorites": favs, "active_tab": "favorites"})
 
 
@@ -326,14 +286,76 @@ async def favorites_add(request: Request, db=Depends(get_db)):
     t = (payload.get("ticker") or "").strip().upper()
     rule = payload.get("rule") or ""
     direction = (payload.get("direction") or "UP").strip().upper()
+    interval = (payload.get("interval") or "15m").strip()
 
     if not t or not rule:
         return JSONResponse({"ok": False, "error": "missing ticker or rule"}, status_code=400)
 
-    db.execute(
-        "INSERT INTO favorites(ticker, direction, interval, rule) VALUES (?, ?, '15m', ?)",
-        (t, direction, rule),
-    )
+    def F(name, cast=float):
+        v = payload.get(name)
+        if v in (None, ""):
+            return None
+        try:
+            return cast(v)
+        except Exception:
+            return None
+
+    cols = [
+        "ticker",
+        "direction",
+        "interval",
+        "rule",
+        "scan_type",
+        "snapshot_at",
+        "roi_snapshot",
+        "hit_snapshot",
+        "dd_snapshot",
+        "target_pct",
+        "stop_pct",
+        "window_value",
+        "window_unit",
+        "lookback_years",
+        "max_tt_bars",
+        "min_support",
+        "delta",
+        "theta_day",
+        "atrz",
+        "slope",
+        "use_regime",
+        "trend_only",
+        "vix_z_max",
+        "slippage_bps",
+        "vega_scale",
+    ]
+    vals = [
+        t,
+        direction,
+        interval,
+        rule,
+        payload.get("scan_type"),
+        now_et().isoformat(),
+        F("roi_snapshot"),
+        F("hit_snapshot"),
+        F("dd_snapshot"),
+        F("target_pct"),
+        F("stop_pct"),
+        F("window_value"),
+        payload.get("window_unit"),
+        F("lookback_years"),
+        F("max_tt_bars", int),
+        F("min_support", int),
+        F("delta"),
+        F("theta_day"),
+        F("atrz"),
+        F("slope"),
+        F("use_regime", int),
+        F("trend_only", int),
+        F("vix_z_max"),
+        F("slippage_bps"),
+        F("vega_scale"),
+    ]
+    placeholders = ",".join(["?"] * len(cols))
+    db.execute(f"INSERT INTO favorites({','.join(cols)}) VALUES ({placeholders})", tuple(vals))
     db.connection.commit()
     return {"ok": True}
 
@@ -536,7 +558,8 @@ async def scanner_run(request: Request):
         "request": request,
         "rows": rows,
         "ran_at": datetime.now().strftime("%I:%M:%S %p").lstrip("0"),
-        "note": f"{scan_type} • {params.get('interval')} • {params.get('direction')} • window {params.get('window_value')} {params.get('window_unit')}"
+        "note": f"{scan_type} • {params.get('interval')} • {params.get('direction')} • window {params.get('window_value')} {params.get('window_unit')}",
+        "params": params,
     }
 
     if params.get("email_checkbox") == "on" and rows:

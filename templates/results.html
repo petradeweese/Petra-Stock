@@ -60,8 +60,9 @@
   const addBtn = document.getElementById('ctx-add-fav');
   const toast = document.getElementById('toast');
   const archiveBtn = document.getElementById('btn-archive');
+  const scanParams = {{ params|tojson }};
 
-  let ctxPayload = null; // {ticker, direction, rule}
+  let ctxPayload = null;
 
   function showMenu(x, y) {
     menu.style.left = x + 'px';
@@ -101,15 +102,27 @@
   }
 
   // --- Right-click handler on table rows (event delegation) ---
+  function buildPayload(tr){
+    const p = Object.assign({}, scanParams);
+    p.ticker = tr.dataset.tkr || '';
+    p.direction = (tr.dataset.dir || 'UP').toUpperCase();
+    p.rule = tr.dataset.rule || '';
+    p.roi_snapshot = parseFloat(tr.dataset.roi || '0');
+    p.hit_snapshot = parseFloat(tr.dataset.hit || '0');
+    p.dd_snapshot = parseFloat(tr.dataset.dd || '0');
+    if(p.delta_assumed !== undefined) p.delta = p.delta_assumed;
+    if(p.theta_per_day_pct !== undefined) p.theta_day = p.theta_per_day_pct;
+    if(p.atrz_gate !== undefined) p.atrz = p.atrz_gate;
+    if(p.slope_gate_pct !== undefined) p.slope = p.slope_gate_pct;
+    if(p.regime_trend_only !== undefined) p.trend_only = p.regime_trend_only;
+    return p;
+  }
+
   document.addEventListener('contextmenu', function(e) {
     const tr = e.target?.closest('tr.row-hover');
     if (!tr || !tbl?.contains(tr)) return;
     e.preventDefault();
-    ctxPayload = {
-      ticker: tr.dataset.tkr || '',
-      direction: (tr.dataset.dir || 'UP').toUpperCase(),
-      rule: tr.dataset.rule || ''
-    };
+    ctxPayload = buildPayload(tr);
     showMenu(e.clientX, e.clientY);
   });
 
@@ -123,12 +136,7 @@
   tbl?.addEventListener('click', function(e){
     const tr = e.target?.closest('tr.row-hover');
     if (!tr || !tbl.contains(tr)) return;
-    const payload = {
-      ticker: tr.dataset.tkr || '',
-      direction: (tr.dataset.dir || 'UP').toUpperCase(),
-      rule: tr.dataset.rule || ''
-    };
-    addFavorite(payload);
+    addFavorite(buildPayload(tr));
   });
 
   // --- Add to favorites via context menu button ---

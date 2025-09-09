@@ -3,6 +3,7 @@ import sqlite3
 from typing import Dict, Any, List, Optional
 
 from utils import now_et
+from scanner import compute_scan_for_ticker
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,11 @@ SCHEMA = [
         direction TEXT NOT NULL,
         interval TEXT NOT NULL DEFAULT '15m',
         rule TEXT NOT NULL,
+        scan_type TEXT,
+        snapshot_at TEXT,
+        roi_snapshot REAL,
+        hit_snapshot REAL,
+        dd_snapshot REAL,
         target_pct REAL DEFAULT 1.0,
         stop_pct REAL DEFAULT 0.5,
         window_value REAL DEFAULT 4.0,
@@ -115,6 +121,65 @@ def init_db():
         cur = conn.cursor()
         for stmt in SCHEMA:
             cur.executescript(stmt)
+        # --- Migrations for snapshot columns ---
+        cur.execute("PRAGMA table_info(favorites)")
+        cols = {r[1] for r in cur.fetchall()}
+        migrations = {
+            "scan_type": "TEXT",
+            "snapshot_at": "TEXT",
+            "roi_snapshot": "REAL",
+            "hit_snapshot": "REAL",
+            "dd_snapshot": "REAL",
+        }
+        for col, typ in migrations.items():
+            if col not in cols:
+                try:
+                    cur.execute(f"ALTER TABLE favorites ADD COLUMN {col} {typ}")
+                except sqlite3.OperationalError:
+                    pass
+        conn.commit()
+
+        # Backfill snapshot metrics for existing favorites only once
+        cur.execute(
+            "SELECT id, ticker, direction, interval, target_pct, stop_pct, window_value, window_unit, lookback_years, max_tt_bars, min_support, delta, theta_day, atrz, slope, use_regime, trend_only, vix_z_max, slippage_bps, vega_scale, scan_type FROM favorites WHERE roi_snapshot IS NULL"
+        )
+        rows = cur.fetchall()
+        for r in rows:
+            params = {
+                "interval": r["interval"],
+                "direction": r["direction"],
+                "target_pct": r["target_pct"],
+                "stop_pct": r["stop_pct"],
+                "window_value": r["window_value"],
+                "window_unit": r["window_unit"],
+                "lookback_years": r["lookback_years"],
+                "max_tt_bars": r["max_tt_bars"],
+                "min_support": r["min_support"],
+                "delta_assumed": r["delta"],
+                "theta_per_day_pct": r["theta_day"],
+                "atrz_gate": r["atrz"],
+                "slope_gate_pct": r["slope"],
+                "use_regime": r["use_regime"],
+                "regime_trend_only": r["trend_only"],
+                "vix_z_max": r["vix_z_max"],
+                "slippage_bps": r["slippage_bps"],
+                "vega_scale": r["vega_scale"],
+                "scan_min_hit": 0.0,
+                "scan_max_dd": 100.0,
+            }
+            row = compute_scan_for_ticker(r["ticker"], params)
+            if row:
+                cur.execute(
+                    "UPDATE favorites SET roi_snapshot=?, hit_snapshot=?, dd_snapshot=?, snapshot_at=?, scan_type=? WHERE id=?",
+                    (
+                        row.get("avg_roi_pct"),
+                        row.get("hit_pct"),
+                        row.get("avg_dd_pct"),
+                        now_et().isoformat(),
+                        r["scan_type"],
+                        r["id"],
+                    ),
+                )
         conn.commit()
     except sqlite3.Error:
         logger.exception("Failed to initialize database")

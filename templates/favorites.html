@@ -19,6 +19,8 @@
           <th>ROI%</th>
           <th>Hit%</th>
           <th>DD%</th>
+          <th>Snapshot At</th>
+          <th>Forward (latest)</th>
           <th>Rule</th>
           <th></th>
         </tr>
@@ -30,9 +32,15 @@
           <td><strong>{{ f["ticker"] }}</strong></td>
           <td>{{ f["direction"] }}</td>
           <td>{{ f["interval"] }}</td>
-          <td>{{ '{:.0f}'.format(f['avg_roi_pct']*100 if f['avg_roi_pct'] is not none and f['avg_roi_pct'] <= 1 else f['avg_roi_pct']) if f['avg_roi_pct'] is not none else '' }}</td>
-          <td>{{ '{:.1f}'.format(f['hit_pct']) if f['hit_pct'] is not none else '' }}</td>
-          <td>{{ '{:.0f}'.format(f['avg_dd_pct']*100 if f['avg_dd_pct'] is not none and f['avg_dd_pct'] <= 1 else f['avg_dd_pct']) if f['avg_dd_pct'] is not none else '' }}</td>
+          <td>{{ '{:.0f}'.format(f['roi_snapshot']*100 if f['roi_snapshot'] is not none and f['roi_snapshot'] <= 1 else f['roi_snapshot']) if f['roi_snapshot'] is not none else '' }}</td>
+          <td>{{ '{:.1f}'.format(f['hit_snapshot']) if f['hit_snapshot'] is not none else '' }}</td>
+          <td>{{ '{:.0f}'.format(f['dd_snapshot']*100 if f['dd_snapshot'] is not none and f['dd_snapshot'] <= 1 else f['dd_snapshot']) if f['dd_snapshot'] is not none else '' }}</td>
+          <td>{{ f['snapshot_at'][:16] if f['snapshot_at'] else '' }}</td>
+          <td>
+            {% if f['forward_roi_pct'] is not none %}
+            <span class="badge">Forward ROI {{ '{:.0f}'.format(f['forward_roi_pct']*100 if f['forward_roi_pct'] <= 1 else f['forward_roi_pct']) }} | Hit {{ '{:.1f}'.format(f['forward_hit_pct']) }} | DD {{ '{:.0f}'.format(f['forward_dd_pct']*100 if f['forward_dd_pct'] <= 1 else f['forward_dd_pct']) }}</span>
+            {% endif %}
+          </td>
           <td><code>{{ f["rule"] }}</code></td>
           <td>
             <form method="post" action="/favorites/delete/{{ f['id'] }}" style="margin:0;">

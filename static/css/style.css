@@ -128,6 +128,15 @@ button, .btn {
   line-height:1;
 }
 
+.badge {
+  background:#1e1e1e;
+  color:var(--muted);
+  border-radius:4px;
+  padding:2px 4px;
+  font-size:.75rem;
+  display:inline-block;
+}
+
 .linklike {
   border:0;
   background:transparent;
