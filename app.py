@@ -34,8 +34,9 @@ def create_app() -> FastAPI:
         logger.info("Running database migrations")
         init_db()
     except Exception:
-        logger.exception("Failed to initialize database")
-        raise
+        logger.exception(
+            "Failed to initialize database; continuing without migrations"
+        )
 
     app = FastAPI()
     if ProxyHeadersMiddleware is not None:

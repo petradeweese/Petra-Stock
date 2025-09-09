@@ -18,6 +18,10 @@ def upgrade(cfg, revision: str) -> None:
             spec = importlib.util.spec_from_file_location(path.stem, path)
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
+            if not hasattr(module, "revision") or not hasattr(module, "down_revision"):
+                raise AttributeError(
+                    f"Migration {path} is missing revision or down_revision"
+                )
             if hasattr(module, "upgrade"):
                 module.upgrade()
         conn.commit()
