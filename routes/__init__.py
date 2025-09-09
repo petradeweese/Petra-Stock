@@ -1,6 +1,7 @@
 import atexit
 import json
 import os
+import subprocess
 from datetime import datetime
 from typing import Dict, Any, Optional, Union
 import logging
@@ -27,6 +28,47 @@ import pandas as pd
 router = APIRouter()
 templates = Jinja2Templates(directory="templates")
 logger = logging.getLogger(__name__)
+
+SETTINGS_FIELDS = [
+    ("scan_type", "Scan Type"),
+    ("universe", "Universe"),
+    ("interval", "Interval"),
+    ("direction", "Direction"),
+    ("target_pct", "Target %"),
+    ("stop_pct", "Stop %"),
+    ("window_value", "Window Value"),
+    ("window_unit", "Window Unit"),
+    ("lookback_years", "Lookback Years"),
+    ("max_tt_bars", "Max TT Bars"),
+    ("min_support", "Min Support"),
+    ("delta_assumed", "Delta Assumed"),
+    ("theta_per_day_pct", "Theta/Day %"),
+    ("atrz_gate", "ATRz Gate"),
+    ("slope_gate_pct", "Slope Gate %"),
+    ("use_regime", "Use Regime"),
+    ("regime_trend_only", "Regime Trend Only"),
+    ("vix_z_max", "VIX z Max"),
+    ("slippage_bps", "Slippage bps"),
+    ("vega_scale", "Vega Scale"),
+    ("sort_key", "Sort Key"),
+    ("email", "Email"),
+    ("rule_text", "Rule Text"),
+    ("rule_version", "Rule Version"),
+    ("app_version", "App Version"),
+    ("commit_hash", "Commit Hash"),
+    ("timestamp", "Timestamp"),
+]
+
+
+def _get_commit_hash() -> str:
+    try:
+        return (
+            subprocess.check_output(["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL)
+            .decode()
+            .strip()
+        )
+    except Exception:
+        return ""
 
 scan_duration = Histogram("scan_duration_seconds", "Duration of /scanner/run requests")
 scan_tickers = Counter("scan_tickers_total", "Tickers processed by /scanner/run")
@@ -185,8 +227,12 @@ def results_from_archive(request: Request, run_id: int, db=Depends(get_db)):
     params = {}
     rule_summary = ""
     ran_at = ""
+    settings = {}
+    settings_json = "{}"
     try:
         params = json.loads(run["params_json"] or "{}")
+        settings = json.loads(run["settings_json"] or "{}")
+        settings_json = json.dumps(settings, sort_keys=True)
         rule_summary = _format_rule_summary(params)
 
         dt = datetime.fromisoformat(run["started_at"])
@@ -209,6 +255,9 @@ def results_from_archive(request: Request, run_id: int, db=Depends(get_db)):
             "active_tab": "archive",
             "ran_at": ran_at,
             "rule_summary": rule_summary,
+            "settings": settings,
+            "settings_json": settings_json,
+            "settings_fields": SETTINGS_FIELDS,
         },
     )
 
@@ -500,14 +549,29 @@ async def archive_save(request: Request, db=Depends(get_db)):
         started = now_et().isoformat()
         finished = started
         scan_type = str(params.get("scan_type") or "scan150")
-        universe = ",".join({r.get("ticker","") for r in rows if r.get("ticker")})
+        universe = ",".join({r.get("ticker", "") for r in rows if r.get("ticker")})
+
+        settings = dict(params)
+        settings.update(
+            {
+                "scan_type": scan_type,
+                "universe": universe,
+                "sort_key": params.get("sort_key"),
+                "email": params.get("email_checkbox"),
+                "rule_text": params.get("rule_text"),
+                "rule_version": params.get("rule_version"),
+                "app_version": os.getenv("APP_VERSION", ""),
+                "commit_hash": _get_commit_hash(),
+                "timestamp": started,
+            }
+        )
 
         db.execute(
             """
-            INSERT INTO runs(started_at, scan_type, params_json, universe, finished_at, hit_count)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO runs(started_at, scan_type, params_json, settings_json, universe, finished_at, hit_count)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (started, scan_type, json.dumps(params), universe, finished, len(rows)),
+            (started, scan_type, json.dumps(params), json.dumps(settings), universe, finished, len(rows)),
         )
         run_id = db.lastrowid
 
@@ -760,9 +824,24 @@ async def archive_run(request: Request, db=Depends(get_db)):
     universe = payload.get("universe", [])
 
     started_at = now_et().isoformat()
+    settings = dict(params)
+    settings.update(
+        {
+            "scan_type": scan_type,
+            "universe": ",".join(universe),
+            "sort_key": params.get("sort_key"),
+            "email": params.get("email_checkbox"),
+            "rule_text": params.get("rule_text"),
+            "rule_version": params.get("rule_version"),
+            "app_version": os.getenv("APP_VERSION", ""),
+            "commit_hash": _get_commit_hash(),
+            "timestamp": started_at,
+        }
+    )
+
     db.execute(
-        "INSERT INTO runs(started_at, scan_type, params_json, universe, finished_at, hit_count) VALUES (?, ?, ?, ?, ?, ?)",
-        (started_at, scan_type, json.dumps(params), ",".join(universe), now_et().isoformat(), len(rows)),
+        "INSERT INTO runs(started_at, scan_type, params_json, settings_json, universe, finished_at, hit_count) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (started_at, scan_type, json.dumps(params), json.dumps(settings), ",".join(universe), now_et().isoformat(), len(rows)),
     )
     run_id = db.lastrowid
 

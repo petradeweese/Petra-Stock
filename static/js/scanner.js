@@ -162,6 +162,23 @@
     }
   });
   document.body.addEventListener('htmx:responseError', stopProgress);
-  document.addEventListener('DOMContentLoaded', bindResultsDelegates);
+  function prefillFromConfig(){
+    const qs = new URLSearchParams(window.location.search);
+    const cfg = qs.get('config');
+    if(!cfg) return;
+    try{
+      const settings = JSON.parse(cfg);
+      const form = document.getElementById('scan-form');
+      if(!form) return;
+      Object.entries(settings).forEach(([k,v])=>{
+        const el = form.elements.namedItem(k);
+        if(el && v !== undefined && v !== null) el.value = v;
+      });
+    }catch(e){/*ignore*/}
+  }
+  document.addEventListener('DOMContentLoaded', function(){
+    bindResultsDelegates();
+    prefillFromConfig();
+  });
 })();
 

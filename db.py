@@ -89,7 +89,8 @@ SCHEMA = [
         params_json TEXT,
         universe TEXT,
         finished_at TEXT,
-        hit_count INTEGER DEFAULT 0
+        hit_count INTEGER DEFAULT 0,
+        settings_json TEXT DEFAULT '{}'
     );
     """,
     # Run results (archive)
@@ -127,6 +128,11 @@ def init_db():
         cur = conn.cursor()
         for stmt in SCHEMA:
             cur.executescript(stmt)
+        # Migration: ensure runs.settings_json exists
+        cur.execute("PRAGMA table_info(runs)")
+        cols = [row[1] for row in cur.fetchall()]
+        if "settings_json" not in cols:
+            cur.execute("ALTER TABLE runs ADD COLUMN settings_json TEXT DEFAULT '{}' NOT NULL")
         conn.commit()
     except sqlite3.Error:
         logger.exception("Failed to initialize database")

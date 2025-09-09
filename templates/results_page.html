@@ -1,10 +1,38 @@
 {% extends 'base.html' %}
 {% block title %}Pattern Finder — Results{% endblock %}
 {% block content %}
+  {% if settings %}
+  <div class="card" style="margin-bottom:1rem;" id="settings-panel">
+    <div class="card-header" style="display:flex;align-items:center;gap:.5rem;">
+      <strong>Settings used</strong>
+      <span style="flex:1 1 auto"></span>
+      <button id="btn-copy-config" class="btn" data-json='{{ settings_json|e }}' title="Copy config">📋 Copy</button>
+      <a class="btn" href="/?config={{ settings_json|urlencode }}">Re-run with these settings</a>
+    </div>
+    <div class="card-body" style="overflow:auto;">
+      <table class="table" style="font-size:0.9rem;">
+        <tbody>
+        {% for key, label in settings_fields %}
+          <tr>
+            <th style="text-align:left;">{{ label }}</th>
+            <td>{{ settings.get(key) if settings.get(key) not in [None, ''] else '—' }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {% endif %}
   {% if rule_summary %}
   <div class="card" style="margin-bottom:1rem;">
     <div class="card-body"><strong>Rules:</strong> {{ rule_summary }}</div>
   </div>
   {% endif %}
   {% include 'results.html' %}
+  <script>
+  document.getElementById('btn-copy-config')?.addEventListener('click', function(){
+    const json = this.dataset.json || '{}';
+    navigator.clipboard.writeText(json);
+  });
+  </script>
 {% endblock %}

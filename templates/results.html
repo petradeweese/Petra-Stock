@@ -62,6 +62,7 @@
   const archiveBtn = document.getElementById('btn-archive');
 
   let ctxPayload = null; // {ticker, direction, rule}
+  let lastSortKey = '';
 
   function showMenu(x, y) {
     menu.style.left = x + 'px';
@@ -165,6 +166,7 @@
       if (rows.length === 0) { showToast('No rows to archive', false); return; }
 
       const payload = { params, rows };
+      if (lastSortKey) payload.params.sort_key = lastSortKey;
       const res = await fetch('/archive/save', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
@@ -209,6 +211,7 @@
     });
     const tbody = tbl.querySelector('tbody');
     rows.forEach(r => tbody.appendChild(r));
+    lastSortKey = key;
   }
   sortBy._toggle = {};
 
