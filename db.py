@@ -55,15 +55,27 @@ SCHEMA = [
         ref_avg_dd REAL
     );
     """,
-    # Forward test results
+    # Forward test tracking
     """
     CREATE TABLE IF NOT EXISTS forward_tests (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         fav_id INTEGER NOT NULL,
-        ran_at TEXT,
-        avg_roi_pct REAL,
+        ticker TEXT NOT NULL,
+        direction TEXT NOT NULL,
+        interval TEXT NOT NULL,
+        rule TEXT,
+        entry_ts TEXT NOT NULL,
+        entry_price REAL NOT NULL,
+        target_pct REAL NOT NULL,
+        stop_pct REAL NOT NULL,
+        window_minutes INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'OPEN',
+        roi_pct REAL NOT NULL DEFAULT 0.0,
+        mfe_pct REAL NOT NULL DEFAULT 0.0,
+        mae_pct REAL NOT NULL DEFAULT 0.0,
         hit_pct REAL,
-        avg_dd_pct REAL,
+        dd_pct REAL NOT NULL DEFAULT 0.0,
+        updated_at TEXT,
         FOREIGN KEY(fav_id) REFERENCES favorites(id)
     );
     """,
