@@ -8,7 +8,9 @@ import httpx
 
 MAX_CONCURRENCY = int(os.getenv("HTTP_MAX_CONCURRENCY", "10"))
 # Allow more retries by default so transient rate limits have a chance to recover.
-MAX_RETRIES = int(os.getenv("HTTP_MAX_RETRIES", "5"))
+# We keep the default high enough so that an exponential backoff starting at one
+# second can grow to ~64s: 1,2,4,8,16,32,64.
+MAX_RETRIES = int(os.getenv("HTTP_MAX_RETRIES", "7"))
 
 _client: Optional[httpx.AsyncClient] = None
 _semaphore = asyncio.Semaphore(MAX_CONCURRENCY)
@@ -71,18 +73,31 @@ async def request(method: str, url: str, **kwargs) -> httpx.Response:
         status = resp.status_code if resp else None
         if status and status not in (429,) and status < 500:
             resp.raise_for_status()
-        retry_after = resp.headers.get("Retry-After") if resp else None
+        # Parse Retry-After header if provided.  Yahoo Finance typically returns
+        # an integer number of seconds, but we guard against bad values.
+        retry_after = None
+        if resp:
+            ra = resp.headers.get("Retry-After")
+            try:
+                retry_after = float(ra) if ra else None
+            except (TypeError, ValueError):
+                retry_after = None
         if retries >= MAX_RETRIES:
             if resp:
                 resp.raise_for_status()
             raise httpx.RequestError("max retries exceeded", request=None)
         if status == 429:
-            # Respect server-provided Retry-After header when available; otherwise
-            # fall back to an exponential backoff with a reasonable upper bound to
-            # avoid hammering the API.
-            wait = float(retry_after) if retry_after else min(60, 2 ** retries)
+            # HTTP 429 indicates we are being rate limited.  Respect the server's
+            # Retry-After header when present.  Otherwise fall back to an
+            # exponential backoff starting at one second and doubling each retry
+            # up to a maximum of 64 seconds: 1, 2, 4, 8, 16, 32, 64.
+            wait = retry_after if retry_after is not None else min(64, 2 ** retries)
         else:
-            wait = float(retry_after) if retry_after else (0.5 * (2 ** retries) + random.uniform(0, 0.5))
+            # For other errors use an exponential backoff with a bit of jitter so
+            # concurrent callers do not stampede.
+            wait = retry_after if retry_after is not None else (
+                0.5 * (2 ** retries) + random.uniform(0, 0.5)
+            )
         retries += 1
         await asyncio.sleep(wait)
 
