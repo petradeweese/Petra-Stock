@@ -55,9 +55,10 @@ _MEM_CACHE: Dict[Tuple[str, str, str], pd.DataFrame] = {}
 # --- Yahoo Finance rate limiting -------------------------------------------------
 # Yahoo Finance will return HTTP 429 if too many requests are made in a short
 # period.  We install a token-bucket rate limiter for the Yahoo host so that all
-# callers share a single request budget.  Defaults can be tuned via env vars.
-YF_RPS = float(os.getenv("YF_MAX_RPS", "2"))
-YF_BURST = int(os.getenv("YF_MAX_BURST", "2"))
+# callers share a single request budget.  Defaults are intentionally conservative
+# so the scanner favors reliability over speed; they can be tuned via env vars.
+YF_RPS = float(os.getenv("YF_MAX_RPS", "1"))
+YF_BURST = int(os.getenv("YF_MAX_BURST", "1"))
 try:
     http_client.set_rate_limit("query1.finance.yahoo.com", YF_RPS, YF_BURST)
 except Exception:  # pragma: no cover - best effort
