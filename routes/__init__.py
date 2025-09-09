@@ -10,8 +10,7 @@ import ssl
 from email.message import EmailMessage
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 from uuid import uuid4
-from threading import Thread, Lock
-import asyncio
+from threading import Thread
 
 import certifi
 import time
@@ -46,8 +45,91 @@ def metrics() -> Response:
 
 
 _scan_executor: Optional[Union[ThreadPoolExecutor, ProcessPoolExecutor]] = None
-_scan_tasks: Dict[str, Dict[str, Any]] = {}
-_scan_lock = Lock()
+
+
+_TASK_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS scan_tasks (
+    id TEXT PRIMARY KEY,
+    total INTEGER,
+    done INTEGER,
+    percent REAL,
+    state TEXT,
+    message TEXT,
+    ctx TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+"""
+
+
+def _get_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.execute(_TASK_TABLE_SQL)
+    conn.commit()
+    return conn
+
+
+def _task_create(task_id: str, total: int) -> None:
+    conn = _get_conn()
+    try:
+        conn.execute(
+            "INSERT INTO scan_tasks (id, total, done, percent, state) VALUES (?, ?, 0, 0.0, 'running')",
+            (task_id, total),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _task_update(task_id: str, **fields: Any) -> None:
+    if not fields:
+        return
+    conn = _get_conn()
+    try:
+        cols = []
+        vals: list[Any] = []
+        for k, v in fields.items():
+            cols.append(f"{k}=?")
+            if k == "ctx" and v is not None:
+                vals.append(json.dumps(v))
+            else:
+                vals.append(v)
+        vals.append(task_id)
+        conn.execute(f"UPDATE scan_tasks SET {', '.join(cols)} WHERE id=?", vals)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _task_get(task_id: str) -> Optional[Dict[str, Any]]:
+    conn = _get_conn()
+    try:
+        cur = conn.execute(
+            "SELECT total, done, percent, state, message, ctx FROM scan_tasks WHERE id=?",
+            (task_id,),
+        )
+        row = cur.fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    total, done, percent, state, message, ctx_json = row
+    return {
+        "total": total,
+        "done": done,
+        "percent": percent,
+        "state": state,
+        "message": message,
+        "ctx": json.loads(ctx_json) if ctx_json else None,
+    }
+
+
+def _task_delete(task_id: str) -> None:
+    conn = _get_conn()
+    try:
+        conn.execute("DELETE FROM scan_tasks WHERE id=?", (task_id,))
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _shutdown_executor() -> None:
@@ -684,21 +766,12 @@ async def scanner_run(request: Request):
 
     task_id = uuid4().hex
     logger.info("task %s started", task_id)
-    with _scan_lock:
-        _scan_tasks[task_id] = {
-            "total": len(tickers),
-            "done": 0,
-            "percent": 0.0,
-            "state": "running",
-        }
+    _task_create(task_id, len(tickers))
 
     def _task():
         def prog(done: int, total: int, msg: str) -> None:
             pct = 0.0 if total == 0 else (done / total) * 100.0
-            with _scan_lock:
-                task = _scan_tasks.get(task_id)
-                if task:
-                    task.update({"done": done, "total": total, "percent": pct, "state": "running"})
+            _task_update(task_id, done=done, total=total, percent=pct, state="running")
             logger.info("task %s progress %d/%d", task_id, done, total)
 
         try:
@@ -708,13 +781,11 @@ async def scanner_run(request: Request):
                 "ran_at": now_et().strftime("%I:%M:%S %p").lstrip("0"),
                 "note": f"{scan_type} • {params.get('interval')} • {params.get('direction')} • window {params.get('window_value')} {params.get('window_unit')}"
             }
-            with _scan_lock:
-                _scan_tasks[task_id].update({"state": "done", "percent": 100.0, "done": len(tickers), "ctx": ctx})
+            _task_update(task_id, state="done", percent=100.0, done=len(tickers), ctx=ctx)
             logger.info("task %s saved results", task_id)
         except Exception as e:
             logger.error("scan task %s failed: %s", task_id, e)
-            with _scan_lock:
-                _scan_tasks[task_id].update({"state": "failed", "message": str(e)})
+            _task_update(task_id, state="failed", message=str(e))
 
     Thread(target=_task, daemon=True).start()
     return JSONResponse({"task_id": task_id})
@@ -722,8 +793,7 @@ async def scanner_run(request: Request):
 
 @router.get("/scanner/progress/{task_id}")
 async def scanner_progress(task_id: str):
-    with _scan_lock:
-        task = _scan_tasks.get(task_id)
+    task = _task_get(task_id)
     if not task:
         return JSONResponse({"done": 0, "total": 0, "percent": 0.0, "state": "failed"}, status_code=404)
     data = {
@@ -737,14 +807,15 @@ async def scanner_progress(task_id: str):
 
 @router.get("/scanner/results/{task_id}", response_class=HTMLResponse)
 async def scanner_results(request: Request, task_id: str):
-    with _scan_lock:
-        task = _scan_tasks.get(task_id)
+    task = _task_get(task_id)
     if not task or task.get("state") != "done":
         return HTMLResponse("Not ready", status_code=404)
-    ctx = task.get("ctx", {}).copy()
+    ctx = (task.get("ctx") or {}).copy()
     ctx["request"] = request
     logger.info("task %s rendered", task_id)
-    return templates.TemplateResponse("results.html", ctx, headers={"Cache-Control": "no-store"})
+    response = templates.TemplateResponse("results.html", ctx, headers={"Cache-Control": "no-store"})
+    _task_delete(task_id)
+    return response
 
 @router.post("/runs/archive")
 async def archive_run(request: Request, db=Depends(get_db)):
