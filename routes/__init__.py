@@ -615,6 +615,18 @@ async def scanner_run(request: Request):
             _task_update(task_id, done=done, total=total, percent=pct, state="running")
             logger.info("task %s progress %d/%d", task_id, done, total)
 
+        # Surface rate limit waits to the task table so the UI can show a
+        # friendly "waiting" message during backoff.
+        from services import http_client
+
+        def wait_cb(wait: float) -> None:
+            if wait > 0:
+                _task_update(task_id, message=f"waiting {wait:.1f}s due to rate limit")
+            else:
+                _task_update(task_id, message="")
+
+        http_client.set_wait_callback(wait_cb)
+
         try:
             rows, skipped = _perform_scan(tickers, params, sort_key, progress_cb=prog)
             ctx = {
@@ -628,6 +640,8 @@ async def scanner_run(request: Request):
         except Exception as e:
             logger.error("scan task %s failed: %s", task_id, e)
             _task_update(task_id, state="failed", message=str(e))
+        finally:
+            http_client.set_wait_callback(None)
 
     Thread(target=_task, daemon=True).start()
     return JSONResponse({"task_id": task_id})
@@ -643,6 +657,7 @@ async def scanner_progress(task_id: str):
         "total": task.get("total", 0),
         "percent": task.get("percent", 0.0),
         "state": task.get("state", "running"),
+        "message": task.get("message", ""),
     }
     return JSONResponse(data, headers={"Cache-Control": "no-store"})
 
