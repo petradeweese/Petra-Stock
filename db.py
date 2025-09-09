@@ -113,6 +113,22 @@ SCHEMA = [
 ]
 
 
+def migrate_forward_tests(conn: sqlite3.Connection) -> None:
+    cur = conn.cursor()
+    cur.execute("PRAGMA table_info(forward_tests)")
+    cols = [row[1] for row in cur.fetchall()]
+    if "hit_pct" not in cols:
+        cur.execute("ALTER TABLE forward_tests ADD COLUMN hit_pct REAL")
+    if "dd_pct" not in cols:
+        cur.execute("ALTER TABLE forward_tests ADD COLUMN dd_pct REAL NOT NULL DEFAULT 0.0")
+    if "mfe_pct" not in cols:
+        cur.execute("ALTER TABLE forward_tests ADD COLUMN mfe_pct REAL NOT NULL DEFAULT 0.0")
+    if "mae_pct" not in cols:
+        cur.execute("ALTER TABLE forward_tests ADD COLUMN mae_pct REAL NOT NULL DEFAULT 0.0")
+    if "updated_at" not in cols:
+        cur.execute("ALTER TABLE forward_tests ADD COLUMN updated_at TEXT")
+
+
 def init_db():
     conn = None
     try:
@@ -131,7 +147,10 @@ def init_db():
         cur.execute("PRAGMA table_info(runs)")
         cols = [row[1] for row in cur.fetchall()]
         if "settings_json" not in cols:
-            cur.execute("ALTER TABLE runs ADD COLUMN settings_json TEXT DEFAULT '{}' NOT NULL")
+            cur.execute(
+                "ALTER TABLE runs ADD COLUMN settings_json TEXT DEFAULT '{}' NOT NULL"
+            )
+        migrate_forward_tests(conn)
         conn.commit()
     except sqlite3.Error:
         logger.exception("Failed to initialize database")
