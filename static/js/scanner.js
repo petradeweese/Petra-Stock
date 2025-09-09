@@ -5,22 +5,24 @@
   const progressText = document.getElementById('progress-text');
   let ctxRow = null; // current row element
   let progressTimer = null;
+  let pct = 0;
 
   function startProgress(){
-    let pct = 0;
+    pct = 0;
     progressFill.style.width = '0%';
     progressText.textContent = '0%';
-    clearInterval(progressTimer);
-    progressTimer = setInterval(()=>{
-      pct = Math.min(pct + 1, 100);
+    cancelAnimationFrame(progressTimer);
+    const step = () => {
+      pct = Math.min(pct + 0.5, 98);
       progressFill.style.width = pct + '%';
-      progressText.textContent = pct + '%';
-      if (pct >= 100) clearInterval(progressTimer);
-    },50);
+      progressText.textContent = Math.floor(pct) + '%';
+      if (pct < 98) progressTimer = requestAnimationFrame(step);
+    };
+    progressTimer = requestAnimationFrame(step);
   }
 
   function stopProgress(){
-    clearInterval(progressTimer);
+    cancelAnimationFrame(progressTimer);
     progressFill.style.width = '100%';
     progressText.textContent = '100%';
   }
