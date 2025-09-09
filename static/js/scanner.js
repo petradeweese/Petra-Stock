@@ -161,7 +161,7 @@
 
       const poll = async function(){
         try{
-          const res = await fetch(`/scanner/progress/${taskId}`);
+          const res = await fetch(`/scanner/progress/${taskId}`, {cache: 'no-store'});
           const data = await res.json();
           last = Date.now();
           progressFill.style.width = (data.percent || 0) + '%';
@@ -172,7 +172,7 @@
             progressFill.style.width = '100%';
             progressText.textContent = '100%';
             try{
-              const html = await fetch(`/scanner/results/${taskId}`).then(r=>{
+              const html = await fetch(`/scanner/results/${taskId}`, {cache: 'no-store'}).then(r=>{
                 if(!r.ok) throw new Error('');
                 return r.text();
               });

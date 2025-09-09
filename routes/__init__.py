@@ -732,7 +732,7 @@ async def scanner_progress(task_id: str):
         "percent": task.get("percent", 0.0),
         "state": task.get("state", "running"),
     }
-    return JSONResponse(data)
+    return JSONResponse(data, headers={"Cache-Control": "no-store"})
 
 
 @router.get("/scanner/results/{task_id}", response_class=HTMLResponse)
@@ -744,7 +744,7 @@ async def scanner_results(request: Request, task_id: str):
     ctx = task.get("ctx", {}).copy()
     ctx["request"] = request
     logger.info("task %s rendered", task_id)
-    return templates.TemplateResponse("results.html", ctx)
+    return templates.TemplateResponse("results.html", ctx, headers={"Cache-Control": "no-store"})
 
 @router.post("/runs/archive")
 async def archive_run(request: Request, db=Depends(get_db)):
