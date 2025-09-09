@@ -49,7 +49,8 @@
       ticker: tr.dataset.tkr || '',
       direction: (tr.dataset.dir || 'UP').toUpperCase(),
       rule: tr.dataset.rule || '',
-      interval: document.querySelector('select[name="interval"]')?.value || '15m'
+      interval: document.querySelector('select[name="interval"]')?.value || '15m',
+      ref_avg_dd: parseFloat(tr.dataset.dd || '0')
     };
     if(!payload.ticker || !payload.rule){
       showToast('Missing ticker or rule', false);

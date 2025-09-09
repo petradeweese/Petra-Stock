@@ -426,13 +426,21 @@ async def favorites_add(request: Request, db=Depends(get_db)):
     t = (payload.get("ticker") or "").strip().upper()
     rule = payload.get("rule") or ""
     direction = (payload.get("direction") or "UP").strip().upper()
+    interval = (payload.get("interval") or "15m").strip()
+    ref_dd = payload.get("ref_avg_dd")
+    try:
+        ref_dd = float(ref_dd)
+        if ref_dd > 1:
+            ref_dd /= 100.0
+    except (TypeError, ValueError):
+        ref_dd = None
 
     if not t or not rule:
         return JSONResponse({"ok": False, "error": "missing ticker or rule"}, status_code=400)
 
     db.execute(
-        "INSERT INTO favorites(ticker, direction, interval, rule) VALUES (?, ?, '15m', ?)",
-        (t, direction, rule),
+        "INSERT INTO favorites(ticker, direction, interval, rule, ref_avg_dd) VALUES (?, ?, ?, ?, ?)",
+        (t, direction, interval, rule, ref_dd),
     )
     db.connection.commit()
     return {"ok": True}
