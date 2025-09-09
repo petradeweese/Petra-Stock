@@ -13,3 +13,4 @@ httpx[http2]>=0.27.0
 uvloop
 pyarrow>=15.0.0
 prometheus-client
+alembic

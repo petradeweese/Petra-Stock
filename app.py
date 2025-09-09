@@ -11,7 +11,7 @@ try:  # pragma: no cover - optional speed-up
 except Exception:
     pass
 
-from db import init_db, run_migrations
+from db import init_db
 from routes import router
 from scheduler import setup_scheduler
 from utils import now_et, market_is_open
@@ -28,9 +28,8 @@ def create_app() -> FastAPI:
 
     logger.info("Initializing database")
     try:
-        init_db()
         logger.info("Running database migrations")
-        run_migrations()
+        init_db()
     except Exception:
         logger.exception("Failed to initialize database")
         raise
