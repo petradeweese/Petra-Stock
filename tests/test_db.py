@@ -22,7 +22,7 @@ def test_forward_tests_table_exists(tmp_path):
     db.init_db()
     conn = sqlite3.connect(db.DB_PATH)
     cur = conn.cursor()
-    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='forward_tests'")
-    row = cur.fetchone()
+    cur.execute("PRAGMA table_info(forward_tests)")
+    cols = {r[1] for r in cur.fetchall()}
     conn.close()
-    assert row is not None
+    assert "status" in cols

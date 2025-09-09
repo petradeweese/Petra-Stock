@@ -3,6 +3,9 @@
 {% block content %}
   <div class="card">
     <h1 style="margin-top:0;">Forward Test</h1>
+    {% if error %}
+    <p class="error">{{ error }}</p>
+    {% endif %}
     {% if tests and tests|length %}
     <table class="table">
       <thead>
@@ -27,11 +30,11 @@
           <td><strong>{{ f["ticker"] }}</strong></td>
           <td>{{ f["direction"] }}</td>
           <td>{{ f["interval"] }}</td>
-          <td>{{ '{:.1f}'.format(f['roi_pct']) if f['roi_pct'] is not none else '' }}</td>
+          <td>{{ '{:.1f}'.format(f['roi']) if f['roi'] is not none else '' }}</td>
           <td>{{ '{:.0f}'.format(f['hit_pct']) if f['hit_pct'] is not none else '' }}</td>
           <td>{{ '{:.1f}'.format(f['dd_pct']) if f['dd_pct'] is not none else '' }}</td>
           <td>{{ f['status'] }}</td>
-          <td>{{ f["entry_ts"][:16] if f["entry_ts"] else '' }}</td>
+          <td>{{ f["created_at"][:16] if f["created_at"] else '' }}</td>
           <td><code>{{ f["rule"] }}</code></td>
           <td>
             <form method="post" action="/favorites/delete/{{ f['fav_id'] }}" style="margin:0;">

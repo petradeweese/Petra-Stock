@@ -64,17 +64,16 @@ SCHEMA = [
         direction TEXT NOT NULL,
         interval TEXT NOT NULL,
         rule TEXT,
-        entry_ts TEXT NOT NULL,
         entry_price REAL NOT NULL,
         target_pct REAL NOT NULL,
         stop_pct REAL NOT NULL,
         window_minutes INTEGER NOT NULL,
-        status TEXT NOT NULL DEFAULT 'OPEN',
-        roi_pct REAL NOT NULL DEFAULT 0.0,
-        mfe_pct REAL NOT NULL DEFAULT 0.0,
-        mae_pct REAL NOT NULL DEFAULT 0.0,
+        status TEXT NOT NULL DEFAULT 'pending',
+        roi REAL,
         hit_pct REAL,
-        dd_pct REAL NOT NULL DEFAULT 0.0,
+        dd_pct REAL,
+        last_run TEXT,
+        created_at TEXT NOT NULL,
         updated_at TEXT,
         FOREIGN KEY(fav_id) REFERENCES favorites(id)
     );
@@ -113,20 +112,45 @@ SCHEMA = [
 ]
 
 
+def migrate_forward_tests(conn: sqlite3.Connection) -> None:
+    """Ensure the forward_tests table has the expected columns."""
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='forward_tests'"
+    )
+    if cur.fetchone() is None:
+        return
+    cur.execute("PRAGMA table_info(forward_tests)")
+    cols = {row[1] for row in cur.fetchall()}
+    def add(col: str, ddl: str, backfill: Optional[str] = None):
+        if col not in cols:
+            cur.execute(f"ALTER TABLE forward_tests ADD COLUMN {col} {ddl}")
+            if backfill:
+                cur.execute(backfill)
+    add("status", "TEXT NOT NULL DEFAULT 'pending'", "UPDATE forward_tests SET status='pending' WHERE status IS NULL OR status=''" )
+    add("roi", "REAL", "UPDATE forward_tests SET roi=roi_pct WHERE roi IS NULL")
+    add("hit_pct", "REAL")
+    add("dd_pct", "REAL")
+    add("last_run", "TEXT")
+    add("rule", "TEXT")
+    add("ticker", "TEXT")
+    add("direction", "TEXT")
+    add("interval", "TEXT")
+    add("created_at", "TEXT", "UPDATE forward_tests SET created_at=entry_ts WHERE created_at IS NULL")
+    add("updated_at", "TEXT", "UPDATE forward_tests SET updated_at=created_at WHERE updated_at IS NULL")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_forward_tests_fav ON forward_tests(fav_id)")
+    conn.commit()
+
+
 def init_db():
     conn = None
     try:
-        # Allow connections to be accessed across threads.
-        # FastAPI runs dependency context managers in a threadpool which may
-        # differ from the thread handling the request. SQLite by default
-        # restricts connections to the creating thread, so we disable that
-        # safeguard here. Each request still gets its own connection, so
-        # concurrent access is safe for this application.
         conn = sqlite3.connect(DB_PATH, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
         for stmt in SCHEMA:
             cur.executescript(stmt)
+        migrate_forward_tests(conn)
         conn.commit()
     except sqlite3.Error:
         logger.exception("Failed to initialize database")
