@@ -14,7 +14,6 @@ from services.price_utils import normalize_price_df
 
 logger = logging.getLogger(__name__)
 
-BATCH_SIZE = int(os.getenv("PF_BATCH_SIZE", "25"))
 TTL_INTRADAY = int(os.getenv("PF_TTL_INTRADAY", "300"))
 TTL_DAILY = int(os.getenv("PF_TTL_DAILY", "3600"))
 PER_TICKER_SLEEP = float(os.getenv("PF_PER_TICKER_SLEEP", "0.0"))
@@ -122,7 +121,11 @@ def _normalize_ohlcv(records: List[dict]) -> pd.DataFrame:
 
 
 async def _download_batch(batch: List[str], period: str, interval: str) -> Dict[str, pd.DataFrame]:
-    """Download a batch of tickers using Yahoo's multi-symbol spark endpoint."""
+    """Download tickers via Yahoo's multi-symbol spark endpoint.
+
+    Even though the endpoint accepts multiple symbols, the caller now
+    sends a single ticker at a time to minimize rate-limit errors.
+    """
     symbols = ",".join(batch)
     url = (
         "https://query1.finance.yahoo.com/v8/finance/spark"
@@ -200,26 +203,27 @@ def fetch_prices(tickers: List[str], interval: str, lookback_years: float) -> Di
             logger.info("cache_miss=%s", t)
             to_download.append(t)
 
-    for i in range(0, len(to_download), BATCH_SIZE):
-        batch = to_download[i : i + BATCH_SIZE]
-        fetched = asyncio.run(_download_batch(batch, period, interval))
-        for t, df in fetched.items():
-            df = normalize_price_df(df)
-            if df is None:
-                df = pd.DataFrame()
-            else:
-                df = _ensure_utc(df)
-            results[t] = df
-            key = _cache_key(t, interval, period)
-            _MEM_CACHE[key] = df
-            path = _cache_file(t, interval, period)
-            if not df.empty:
-                try:
-                    df.to_parquet(path)
-                except Exception:
-                    pass
-            if PER_TICKER_SLEEP > 0 and len(batch) == 1:
-                time.sleep(PER_TICKER_SLEEP)
+    # Fetch each ticker individually to avoid Yahoo Finance 429 errors from
+    # multi-symbol requests.
+    for t in to_download:
+        fetched = asyncio.run(_download_batch([t], period, interval))
+        df = fetched.get(t, pd.DataFrame())
+        df = normalize_price_df(df)
+        if df is None:
+            df = pd.DataFrame()
+        else:
+            df = _ensure_utc(df)
+        results[t] = df
+        key = _cache_key(t, interval, period)
+        _MEM_CACHE[key] = df
+        path = _cache_file(t, interval, period)
+        if not df.empty:
+            try:
+                df.to_parquet(path)
+            except Exception:
+                pass
+        if PER_TICKER_SLEEP > 0:
+            time.sleep(PER_TICKER_SLEEP)
 
     for t in tickers:
         results.setdefault(t, pd.DataFrame())
