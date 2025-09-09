@@ -2,18 +2,21 @@ import atexit
 import json
 import os
 from datetime import datetime
-from typing import Dict, Any, Optional, Union
+from typing import Dict, Any, Optional, Union, Callable
 import logging
 import sqlite3
 import smtplib
 import ssl
 from email.message import EmailMessage
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
+from uuid import uuid4
+from threading import Thread, Lock
+import asyncio
 
 import certifi
 import time
 from fastapi import APIRouter, Request, Form, Depends, Response
-from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from prometheus_client import Counter, Histogram, CONTENT_TYPE_LATEST, generate_latest
 
@@ -43,6 +46,8 @@ def metrics() -> Response:
 
 
 _scan_executor: Optional[Union[ThreadPoolExecutor, ProcessPoolExecutor]] = None
+_scan_tasks: Dict[str, Dict[str, Any]] = {}
+_scan_lock = Lock()
 
 
 def _shutdown_executor() -> None:
@@ -77,6 +82,77 @@ def _get_scan_executor() -> Union[ThreadPoolExecutor, ProcessPoolExecutor]:
         _scan_executor = Executor(max_workers=max_workers)
         atexit.register(_shutdown_executor)
     return _scan_executor
+
+
+def _perform_scan(
+    tickers: list[str],
+    params: dict,
+    sort_key: str,
+    progress_cb: Optional[Callable[[int, int, str], None]] = None,
+) -> list[dict]:
+    start = time.perf_counter()
+    total = len(tickers)
+    preload_prices(tickers, params.get("interval", "15m"), params.get("lookback_years", 2.0))
+    if progress_cb:
+        progress_cb(0, total, "preloading")
+    rows: list[dict] = []
+    ex = _get_scan_executor()
+    future_to_ticker = {ex.submit(compute_scan_for_ticker, t, params): t for t in tickers}
+    done = 0
+    for fut in as_completed(future_to_ticker):
+        ticker = future_to_ticker[fut]
+        try:
+            r = fut.result()
+            if r:
+                rows.append(r)
+        except Exception as e:
+            logger.error("scan failed for %s: %s", ticker, e)
+        done += 1
+        if progress_cb:
+            progress_cb(done, total, f"Scanning {done}/{total}")
+
+    try:
+        scan_min_hit = float(params.get("scan_min_hit", 0.0))
+        scan_max_dd = float(params.get("scan_max_dd", 100.0))
+    except Exception:
+        scan_min_hit, scan_max_dd = 0.0, 100.0
+
+    rows = [
+        r for r in rows
+        if (r.get("hit_pct", 0.0) >= scan_min_hit) and (r.get("avg_dd_pct", 100.0) <= scan_max_dd)
+    ]
+
+    if sort_key == "ticker":
+        rows.sort(key=lambda r: (r.get("ticker") or ""))
+    elif sort_key == "roi":
+        rows.sort(key=lambda r: (r.get("avg_roi_pct", 0.0), r.get("hit_pct", 0.0), r.get("support", 0)), reverse=True)
+    elif sort_key == "hit":
+        rows.sort(key=lambda r: (r.get("hit_pct", 0.0), r.get("avg_roi_pct", 0.0), r.get("support", 0)), reverse=True)
+    else:
+        rows.sort(
+            key=lambda r: (
+                r.get("avg_roi_pct", 0.0),
+                r.get("hit_pct", 0.0),
+                r.get("support", 0),
+                r.get("stability", 0.0),
+            ),
+            reverse=True,
+        )
+
+    duration = time.perf_counter() - start
+    scan_duration.observe(duration)
+    scan_tickers.inc(len(tickers))
+    if duration > 0:
+        logger.info(
+            "scan completed: %d tickers in %.2fs (%.2f tickers/sec)",
+            len(tickers),
+            duration,
+            len(tickers) / duration,
+        )
+    else:
+        logger.info("scan completed: %d tickers in %.2fs", len(tickers), duration)
+
+    return rows
 
 
 def _format_rule_summary(params: Dict[str, Any]) -> str:
@@ -570,13 +646,11 @@ def settings_save(
     return RedirectResponse(url="/settings", status_code=302)
 
 
-@router.post("/scanner/run", response_class=HTMLResponse)
+@router.post("/scanner/run")
 async def scanner_run(request: Request):
-    """HTMX target. Reads form, normalizes params, runs the scan, and renders results.html."""
     form = await request.form()
     params = _coerce_scan_params(form)
 
-    # Figure out ticker universe
     scan_type = params.get("scan_type", "scan150")
     single_ticker = (form.get("ticker") or "").strip().upper()
     if scan_type.lower() in ("single", "single_ticker") and single_ticker:
@@ -586,166 +660,72 @@ async def scanner_run(request: Request):
     elif scan_type.lower() in ("top250", "scan250", "options250"):
         tickers = TOP250
     else:
-        # default Top 150
         tickers = TOP150
 
-    # Support server-side sorting triggered by buttons
     sort_key = (form.get("sort") or "").strip().lower()
     if sort_key not in ("ticker", "roi", "hit"):
         sort_key = ""
 
-    # Run the scan using a global executor.  Reusing the pool avoids the
-    # overhead of spawning fresh workers for every request.
-    start = time.perf_counter()
-    preload_prices(tickers, params.get("interval", "15m"), params.get("lookback_years", 2.0))
-    rows = []
-    ex = _get_scan_executor()
-    future_to_ticker = {ex.submit(compute_scan_for_ticker, t, params): t for t in tickers}
-    for fut in as_completed(future_to_ticker):
-        ticker = future_to_ticker[fut]
+    task_id = uuid4().hex
+    with _scan_lock:
+        _scan_tasks[task_id] = {
+            "total": len(tickers),
+            "done": 0,
+            "phase": "starting",
+            "pct": 0.0,
+            "message": "starting",
+        }
+
+    def _task():
+        def prog(done: int, total: int, msg: str) -> None:
+            pct = 0.0 if total == 0 else (done / total) * 100.0
+            with _scan_lock:
+                task = _scan_tasks.get(task_id)
+                if task:
+                    task.update({"done": done, "total": total, "pct": pct, "message": msg, "phase": "scanning"})
+            logger.info("task %s progress %d/%d", task_id, done, total)
+
         try:
-            r = fut.result()
-            if r:
-                rows.append(r)
+            rows = _perform_scan(tickers, params, sort_key, progress_cb=prog)
+            ctx = {
+                "rows": rows,
+                "ran_at": now_et().strftime("%I:%M:%S %p").lstrip("0"),
+                "note": f"{scan_type} • {params.get('interval')} • {params.get('direction')} • window {params.get('window_value')} {params.get('window_unit')}"
+            }
+            with _scan_lock:
+                _scan_tasks[task_id].update({"phase": "complete", "pct": 100.0, "done": len(tickers), "ctx": ctx})
         except Exception as e:
-            # Individual scan failure should not abort the whole run.
-            logger.error("scan failed for %s: %s", ticker, e)
+            logger.error("scan task %s failed: %s", task_id, e)
+            with _scan_lock:
+                _scan_tasks[task_id].update({"phase": "error", "message": str(e)})
 
-    # Optional filters (match desktop defaults)
-    try:
-        scan_min_hit = float(params.get("scan_min_hit", 0.0))
-        scan_max_dd = float(params.get("scan_max_dd", 100.0))
-    except Exception:
-        scan_min_hit, scan_max_dd = 0.0, 100.0
+    Thread(target=_task, daemon=True).start()
+    return JSONResponse({"task_id": task_id})
 
-    rows = [
-        r for r in rows
-        if (r.get("hit_pct", 0.0) >= scan_min_hit) and (r.get("avg_dd_pct", 100.0) <= scan_max_dd)
-    ]
 
-    # Sorting
-    if sort_key == "ticker":
-        rows.sort(key=lambda r: (r.get("ticker") or ""))
-    elif sort_key == "roi":
-        rows.sort(key=lambda r: (r.get("avg_roi_pct", 0.0), r.get("hit_pct", 0.0), r.get("support", 0)), reverse=True)
-    elif sort_key == "hit":
-        rows.sort(key=lambda r: (r.get("hit_pct", 0.0), r.get("avg_roi_pct", 0.0), r.get("support", 0)), reverse=True)
-    else:
-        rows.sort(
-            key=lambda r: (
-                r.get("avg_roi_pct", 0.0),
-                r.get("hit_pct", 0.0),
-                r.get("support", 0),
-                r.get("stability", 0.0),
-            ),
-            reverse=True,
-        )
+@router.get("/scanner/progress")
+async def scanner_progress(task_id: str):
+    async def event_gen():
+        while True:
+            with _scan_lock:
+                task = _scan_tasks.get(task_id)
+                data = task.copy() if task else {"phase": "unknown"}
+            yield f"data: {json.dumps({k: data.get(k) for k in ('pct','done','total','phase','message')})}\n\n"
+            if not task or data.get("phase") in ("complete", "error", "unknown"):
+                break
+            await asyncio.sleep(1)
+    return StreamingResponse(event_gen(), media_type="text/event-stream")
 
-    duration = time.perf_counter() - start
-    scan_duration.observe(duration)
-    scan_tickers.inc(len(tickers))
-    if duration > 0:
-        logger.info(
-            "scan completed: %d tickers in %.2fs (%.2f tickers/sec)",
-            len(tickers),
-            duration,
-            len(tickers) / duration,
-        )
-    else:
-        logger.info("scan completed: %d tickers in %.2fs", len(tickers), duration)
 
-    ctx = {
-        "request": request,
-        "rows": rows,
-        "ran_at": now_et().strftime("%I:%M:%S %p").lstrip("0"),
-        "note": f"{scan_type} • {params.get('interval')} • {params.get('direction')} • window {params.get('window_value')} {params.get('window_unit')}"
-    }
-
-    if params.get("email_checkbox") == "on" and rows:
-        try:
-            with sqlite3.connect(DB_PATH) as conn:
-                conn.row_factory = sqlite3.Row
-                st = get_settings(conn.cursor())
-            # Build text and HTML bodies with a 5-column table
-            hdr = f"PatternFinder Scan Results — {now_et().strftime('%Y-%m-%d %H:%M')}"
-            lines = [hdr, "=" * len(hdr), f"Scan: {ctx['note']}", ""]
-
-            cols = [
-                ("ticker", "Ticker", "<"),
-                ("direction", "Direction", "<"),
-                ("hit_pct", "Hit%", ">"),
-                ("avg_roi_pct", "ROI %", ">"),
-                ("avg_dd_pct", "DD", ">"),
-            ]
-            widths = [len(label) for _, label, _ in cols]
-            for r in rows:
-                values = [
-                    r.get("ticker", ""),
-                    r.get("direction", ""),
-                    f"{r.get('hit_pct', 0):.2f}",
-                    f"{r.get('avg_roi_pct', 0):.2f}",
-                    f"{r.get('avg_dd_pct', 0):.2f}",
-                ]
-                for i, val in enumerate(values):
-                    widths[i] = max(widths[i], len(val))
-
-            header = "  ".join(label.ljust(width) for (_, label, _), width in zip(cols, widths))
-            lines.append(header)
-            lines.append("  ".join("-" * width for width in widths))
-
-            for r in rows:
-                values = [
-                    r.get("ticker", ""),
-                    r.get("direction", ""),
-                    f"{r.get('hit_pct', 0):.2f}",
-                    f"{r.get('avg_roi_pct', 0):.2f}",
-                    f"{r.get('avg_dd_pct', 0):.2f}",
-                ]
-                parts = []
-                for (_, _, align), width, val in zip(cols, widths, values):
-                    parts.append(val.ljust(width) if align == "<" else val.rjust(width))
-                lines.append("  ".join(parts))
-
-            lines.append("")
-            lines.append("— Sent by PatternFinder")
-            body = "\n".join(lines)
-
-            html_lines = [
-                "<html><body>",
-                f"<p><strong>{hdr}</strong></p>",
-                f"<p>Scan: {ctx['note']}</p>",
-                "<table style='border-collapse:collapse;'>",
-                "<thead><tr>",
-                "<th style='text-align:left;padding:8px;'>Ticker</th>",
-                "<th style='text-align:left;padding:8px;'>Direction</th>",
-                "<th style='text-align:right;padding:8px;'>Hit%</th>",
-                "<th style='text-align:right;padding:8px;'>ROI %</th>",
-                "<th style='text-align:right;padding:8px;'>DD</th>",
-                "</tr></thead>",
-                "<tbody>",
-            ]
-            for r in rows:
-                html_lines.append(
-                    "<tr>"
-                    f"<td style='padding:8px;border-top:1px solid #ddd;'>{r.get('ticker','')}</td>"
-                    f"<td style='padding:8px;border-top:1px solid #ddd;'>{r.get('direction','')}</td>"
-                    f"<td style='padding:8px;text-align:right;border-top:1px solid #ddd;'>{r.get('hit_pct',0):.2f}</td>"
-                    f"<td style='padding:8px;text-align:right;border-top:1px solid #ddd;'>{r.get('avg_roi_pct',0):.2f}</td>"
-                    f"<td style='padding:8px;text-align:right;border-top:1px solid #ddd;'>{r.get('avg_dd_pct',0):.2f}</td>"
-                    "</tr>"
-                )
-            html_lines.extend([
-                "</tbody></table>",
-                "<p>— Sent by PatternFinder</p>",
-                "</body></html>",
-            ])
-            html_body = "\n".join(html_lines)
-            _send_email(st, "PatternFinder: Scan Results", body, html_body=html_body)
-        except Exception as e:
-            logger.error("scan email failed: %s", e)
-
+@router.get("/scanner/results/{task_id}", response_class=HTMLResponse)
+async def scanner_results(request: Request, task_id: str):
+    with _scan_lock:
+        task = _scan_tasks.get(task_id)
+    if not task or task.get("phase") != "complete":
+        return HTMLResponse("Not ready", status_code=404)
+    ctx = task.get("ctx", {}).copy()
+    ctx["request"] = request
     return templates.TemplateResponse("results.html", ctx)
-
 
 @router.post("/runs/archive")
 async def archive_run(request: Request, db=Depends(get_db)):

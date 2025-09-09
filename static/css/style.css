@@ -218,5 +218,11 @@ button, .btn {
   text-align:center;
 }
 
+#progress-status {
+  margin-top:.25rem;
+  text-align:center;
+  font-size:.9rem;
+}
+
 #scan-overlay.htmx-request { display:grid !important; }
 .htmx-request #scan-results { opacity:.4; filter:grayscale(30%); }
