@@ -97,7 +97,8 @@ SCHEMA = [
         params_json TEXT,
         universe TEXT,
         finished_at TEXT,
-        hit_count INTEGER DEFAULT 0
+        hit_count INTEGER DEFAULT 0,
+        settings_json TEXT
     );
     """,
     # Run results (archive)
@@ -205,6 +206,19 @@ def migrate_favorites(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def migrate_runs(conn: sqlite3.Connection) -> None:
+    """Ensure runs table has settings_json column."""
+    cur = conn.cursor()
+    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='runs'")
+    if cur.fetchone() is None:
+        return
+    cur.execute("PRAGMA table_info(runs)")
+    cols = {row[1] for row in cur.fetchall()}
+    if "settings_json" not in cols:
+        cur.execute("ALTER TABLE runs ADD COLUMN settings_json TEXT")
+    conn.commit()
+
+
 def init_db():
     conn = None
     try:
@@ -215,6 +229,7 @@ def init_db():
             cur.executescript(stmt)
         migrate_forward_tests(conn)
         migrate_favorites(conn)
+        migrate_runs(conn)
         conn.commit()
     except sqlite3.Error:
         logger.exception("Failed to initialize database")
