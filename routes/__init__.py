@@ -11,9 +11,11 @@ from email.message import EmailMessage
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 
 import certifi
-from fastapi import APIRouter, Request, Form, Depends
+import time
+from fastapi import APIRouter, Request, Form, Depends, Response
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
+from prometheus_client import Counter, Histogram, CONTENT_TYPE_LATEST, generate_latest
 
 from indices import SP100, TOP150, TOP250
 from db import DB_PATH, get_db, get_settings
@@ -25,6 +27,19 @@ import pandas as pd
 router = APIRouter()
 templates = Jinja2Templates(directory="templates")
 logger = logging.getLogger(__name__)
+
+scan_duration = Histogram("scan_duration_seconds", "Duration of /scanner/run requests")
+scan_tickers = Counter("scan_tickers_total", "Tickers processed by /scanner/run")
+
+
+@router.get("/healthz")
+def healthz() -> dict:
+    return {"status": "ok"}
+
+
+@router.get("/metrics")
+def metrics() -> Response:
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 _scan_executor: Optional[Union[ThreadPoolExecutor, ProcessPoolExecutor]] = None
@@ -573,6 +588,7 @@ async def scanner_run(request: Request):
 
     # Run the scan using a global executor.  Reusing the pool avoids the
     # overhead of spawning fresh workers for every request.
+    start = time.perf_counter()
     preload_prices(tickers, params.get("interval", "15m"), params.get("lookback_years", 2.0))
     rows = []
     ex = _get_scan_executor()
@@ -616,6 +632,19 @@ async def scanner_run(request: Request):
             ),
             reverse=True,
         )
+
+    duration = time.perf_counter() - start
+    scan_duration.observe(duration)
+    scan_tickers.inc(len(tickers))
+    if duration > 0:
+        logger.info(
+            "scan completed: %d tickers in %.2fs (%.2f tickers/sec)",
+            len(tickers),
+            duration,
+            len(tickers) / duration,
+        )
+    else:
+        logger.info("scan completed: %d tickers in %.2fs", len(tickers), duration)
 
     ctx = {
         "request": request,
