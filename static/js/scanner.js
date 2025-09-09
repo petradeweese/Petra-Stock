@@ -45,12 +45,23 @@
 
   async function addFavoriteFromRow(tr){
     if(!tr){ showToast('No row selected', false); return; }
+    const form = document.getElementById('scan-form');
+    const settings = {};
+    if(form){
+      const fd = new FormData(form);
+      for(const [k,v] of fd.entries()) settings[k]=v;
+    }
     const payload = {
       ticker: tr.dataset.tkr || '',
       direction: (tr.dataset.dir || 'UP').toUpperCase(),
       rule: tr.dataset.rule || '',
       interval: document.querySelector('select[name="interval"]')?.value || '15m',
-      ref_avg_dd: parseFloat(tr.dataset.dd || '0')
+      ref_avg_dd: parseFloat(tr.dataset.dd || '0'),
+      roi_snapshot: parseFloat(tr.dataset.roi || '0'),
+      hit_pct_snapshot: parseFloat(tr.dataset.hit || '0'),
+      dd_pct_snapshot: parseFloat(tr.dataset.dd || '0'),
+      rule_snapshot: tr.dataset.rule || '',
+      settings_json_snapshot: settings
     };
     if(!payload.ticker || !payload.rule){
       showToast('Missing ticker or rule', false);

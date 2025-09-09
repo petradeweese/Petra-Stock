@@ -376,58 +376,11 @@ def favorites_page(request: Request, db=Depends(get_db)):
     db.execute("SELECT * FROM favorites ORDER BY id DESC")
     favs = [dict(r) for r in db.fetchall()]
     for f in favs:
-        # Try to pull the latest archived metrics for this favorite
-        db.execute(
-            """
-            SELECT rr.avg_roi_pct, rr.hit_pct, rr.avg_dd_pct
-            FROM run_results rr
-            JOIN runs r ON rr.run_id = r.id
-            WHERE rr.ticker=? AND rr.rule=?
-            ORDER BY r.id DESC
-            LIMIT 1
-            """,
-            (f["ticker"], f["rule"]),
-        )
-        row = db.fetchone()
-        if row and row["avg_roi_pct"] is not None:
-            f["avg_roi_pct"] = row["avg_roi_pct"]
-            f["hit_pct"] = row["hit_pct"]
-            f["avg_dd_pct"] = row["avg_dd_pct"]
-            continue
-
-        # Fall back to recomputing on the fly if no archived data exists
-        params = {
-            "interval": f.get("interval", "15m"),
-            "direction": f.get("direction", "UP"),
-            "target_pct": f.get("target_pct", 1.0),
-            "stop_pct": f.get("stop_pct", 0.5),
-            "window_value": f.get("window_value", 4.0),
-            "window_unit": f.get("window_unit", "Hours"),
-            "lookback_years": f.get("lookback_years", 2.0),
-            "max_tt_bars": f.get("max_tt_bars", 12),
-            "min_support": f.get("min_support", 20),
-            "delta_assumed": f.get("delta", 0.4),
-            "theta_per_day_pct": f.get("theta_day", 0.2),
-            "atrz_gate": f.get("atrz", 0.10),
-            "slope_gate_pct": f.get("slope", 0.02),
-            "use_regime": f.get("use_regime", 0),
-            "regime_trend_only": f.get("trend_only", 0),
-            "vix_z_max": f.get("vix_z_max", 3.0),
-            "slippage_bps": f.get("slippage_bps", 7.0),
-            "vega_scale": f.get("vega_scale", 0.03),
-            # Ensure no additional filtering is applied
-            "scan_min_hit": 0.0,
-            "scan_max_dd": 100.0,
-        }
-        row = compute_scan_for_ticker(f["ticker"], params)
-        if row:
-            f["avg_roi_pct"] = row.get("avg_roi_pct")
-            f["hit_pct"] = row.get("hit_pct")
-            f["avg_dd_pct"] = row.get("avg_dd_pct")
-        else:
-            f["avg_roi_pct"] = None
-            f["hit_pct"] = None
-            f["avg_dd_pct"] = None
+        f["avg_roi_pct"] = f.get("roi_snapshot")
+        f["hit_pct"] = f.get("hit_pct_snapshot")
+        f["avg_dd_pct"] = f.get("dd_pct_snapshot")
+        if f.get("rule_snapshot"):
+            f["rule"] = f.get("rule_snapshot")
     return templates.TemplateResponse("favorites.html", {"request": request, "favorites": favs, "active_tab": "favorites"})
 
 
@@ -459,9 +412,9 @@ def _create_forward_test(db: sqlite3.Cursor, fav: dict) -> None:
     db.execute(
         """INSERT INTO forward_tests
             (fav_id, ticker, direction, interval, rule, entry_price,
-             target_pct, stop_pct, window_minutes, status, roi, hit_pct, dd_pct,
-             last_run, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0.0, NULL, 0.0, NULL, ?, ?)""",
+             target_pct, stop_pct, window_minutes, status, roi_forward, hit_forward, dd_forward,
+             last_run_at, next_run_at, runs_count, notes, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0.0, NULL, 0.0, NULL, NULL, 0, NULL, ?, ?)""",
         (
             fav["id"],
             fav["ticker"],
@@ -484,20 +437,20 @@ def _update_forward_tests(db: sqlite3.Cursor) -> None:
         """SELECT id, ticker, direction, interval, created_at, entry_price,
                   target_pct, stop_pct, window_minutes, status
                FROM forward_tests
-               WHERE status IN ('pending','running')"""
+               WHERE status IN ('queued','running')"""
     )
     rows = [dict(r) for r in db.fetchall()]
     for row in rows:
         now_iso = now_et().isoformat()
         try:
             db.execute(
-                "UPDATE forward_tests SET status='running', last_run=?, updated_at=? WHERE id=?",
+                "UPDATE forward_tests SET status='running', last_run_at=?, updated_at=?, runs_count=runs_count+1 WHERE id=?",
                 (now_iso, now_iso, row["id"]),
             )
             data = fetch_prices([row["ticker"]], row["interval"], 1.0).get(row["ticker"])
             if data is None or getattr(data, "empty", True):
                 db.execute(
-                    "UPDATE forward_tests SET status='pending' WHERE id=?",
+                    "UPDATE forward_tests SET status='queued' WHERE id=?",
                     (row["id"],),
                 )
                 continue
@@ -505,7 +458,7 @@ def _update_forward_tests(db: sqlite3.Cursor) -> None:
             after = data[data.index > entry_ts]
             if after.empty:
                 db.execute(
-                    "UPDATE forward_tests SET status='pending' WHERE id=?",
+                    "UPDATE forward_tests SET status='queued' WHERE id=?",
                     (row["id"],),
                 )
                 continue
@@ -514,7 +467,7 @@ def _update_forward_tests(db: sqlite3.Cursor) -> None:
             pct_series = (prices / row["entry_price"] - 1.0) * 100 * mult
             roi = float(pct_series.iloc[-1])
             mae = float(pct_series.min())
-            status = "done"
+            status = "ok"
             hit_pct = None
             if row["direction"] == "UP":
                 hit_cond = prices >= row["entry_price"] * (1 + row["target_pct"] / 100)
@@ -533,18 +486,27 @@ def _update_forward_tests(db: sqlite3.Cursor) -> None:
                 roi = float(pct_series.loc[stop_time])
                 hit_pct = 0.0
             elif final_ts < expire_ts:
-                status = "pending"
+                status = "queued"
             dd = float(max(0.0, -mae))
             db.execute(
                 """UPDATE forward_tests
-                       SET roi=?, dd_pct=?, status=?, hit_pct=?, last_run=?, updated_at=?
+                       SET roi_forward=?, dd_forward=?, status=?, hit_forward=?, last_run_at=?, next_run_at=?, updated_at=?
                        WHERE id=?""",
-                (roi, dd, status, hit_pct, now_et().isoformat(), now_iso, row["id"]),
+                (
+                    roi,
+                    dd,
+                    status,
+                    hit_pct,
+                    now_et().isoformat(),
+                    now_et().isoformat(),
+                    now_iso,
+                    row["id"],
+                ),
             )
         except Exception:
             logger.exception("Forward test %s failed", row["id"])
             db.execute(
-                "UPDATE forward_tests SET status='error', last_run=?, updated_at=? WHERE id=?",
+                "UPDATE forward_tests SET status='error', last_run_at=?, updated_at=? WHERE id=?",
                 (now_iso, now_iso, row["id"]),
             )
     db.connection.commit()
@@ -558,12 +520,12 @@ def forward_page(request: Request, db=Depends(get_db)):
         for f in favs:
             db.execute("SELECT status FROM forward_tests WHERE fav_id=? ORDER BY id DESC LIMIT 1", (f["id"],))
             row = db.fetchone()
-            if row is None or row["status"] in ("done", "error"):
+            if row is None or row["status"] in ("ok", "error"):
                 _create_forward_test(db, f)
         _update_forward_tests(db)
         db.execute(
             """SELECT ft.id AS ft_id, ft.fav_id, ft.ticker, ft.direction, ft.interval,
-                      ft.roi, ft.hit_pct, ft.dd_pct, ft.status, ft.created_at, ft.rule
+                      ft.roi_forward, ft.hit_forward, ft.dd_forward, ft.status, ft.created_at, ft.rule
                    FROM forward_tests ft
                    ORDER BY ft.id DESC"""
         )
@@ -602,6 +564,11 @@ async def favorites_add(request: Request, db=Depends(get_db)):
     direction = (payload.get("direction") or "UP").strip().upper()
     interval = (payload.get("interval") or "15m").strip()
     ref_dd = payload.get("ref_avg_dd")
+    roi = payload.get("roi_snapshot")
+    hit = payload.get("hit_pct_snapshot")
+    dd = payload.get("dd_pct_snapshot")
+    rule_snap = payload.get("rule_snapshot") or rule
+    settings = payload.get("settings_json_snapshot")
     try:
         ref_dd = float(ref_dd)
         if ref_dd > 1:
@@ -612,9 +579,27 @@ async def favorites_add(request: Request, db=Depends(get_db)):
     if not t or not rule:
         return JSONResponse({"ok": False, "error": "missing ticker or rule"}, status_code=400)
 
+    if isinstance(settings, dict):
+        settings = json.dumps(settings)
     db.execute(
-        "INSERT INTO favorites(ticker, direction, interval, rule, ref_avg_dd) VALUES (?, ?, ?, ?, ?)",
-        (t, direction, interval, rule, ref_dd),
+        """INSERT INTO favorites(
+                ticker, direction, interval, rule, ref_avg_dd,
+                roi_snapshot, hit_pct_snapshot, dd_pct_snapshot,
+                rule_snapshot, settings_json_snapshot, snapshot_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            t,
+            direction,
+            interval,
+            rule,
+            ref_dd,
+            roi,
+            hit,
+            dd,
+            rule_snap,
+            settings,
+            now_et().isoformat(),
+        ),
     )
     db.connection.commit()
     return {"ok": True}

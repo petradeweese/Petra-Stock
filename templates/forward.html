@@ -30,9 +30,9 @@
           <td><strong>{{ f["ticker"] }}</strong></td>
           <td>{{ f["direction"] }}</td>
           <td>{{ f["interval"] }}</td>
-          <td>{{ '{:.1f}'.format(f['roi']) if f['roi'] is not none else '' }}</td>
-          <td>{{ '{:.0f}'.format(f['hit_pct']) if f['hit_pct'] is not none else '' }}</td>
-          <td>{{ '{:.1f}'.format(f['dd_pct']) if f['dd_pct'] is not none else '' }}</td>
+          <td>{{ '{:.1f}'.format(f['roi_forward']) if f['roi_forward'] is not none else '' }}</td>
+          <td>{{ '{:.0f}'.format(f['hit_forward']) if f['hit_forward'] is not none else '' }}</td>
+          <td>{{ '{:.1f}'.format(f['dd_forward']) if f['dd_forward'] is not none else '' }}</td>
           <td>{{ f['status'] }}</td>
           <td>{{ f["created_at"][:16] if f["created_at"] else '' }}</td>
           <td><code>{{ f["rule"] }}</code></td>
