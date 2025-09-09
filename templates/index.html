@@ -7,8 +7,7 @@
 {% block content %}
   <div class="card">
     <h1 style="margin:0 0 1rem 0">Scanner</h1>
-    <form id="scan-form" action="{{ url_for('scanner_run') }}" method="post"
-          hx-post="{{ url_for('scanner_run') }}" hx-target="#scan-results" hx-indicator="#scan-overlay">
+    <form id="scan-form" action="{{ url_for('scanner_run') }}" method="post">
       <div class="row">
         <div>
           <label>Scan Type</label>
@@ -139,6 +138,7 @@
     <div class="box">
       <div id="progress-bar"><div id="progress-fill"></div></div>
       <div id="progress-text">0%</div>
+      <div id="progress-status"></div>
     </div>
   </div>
 {% endblock %}

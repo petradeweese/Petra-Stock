@@ -3,28 +3,24 @@
   const toast = document.getElementById('toast');
   const progressFill = document.getElementById('progress-fill');
   const progressText = document.getElementById('progress-text');
+  const progressStatus = document.getElementById('progress-status');
+  const overlay = document.getElementById('scan-overlay');
   let ctxRow = null; // current row element
-  let progressTimer = null;
-  let pct = 0;
+  let evtSource = null;
+  let stillTimer = null;
 
   function startProgress(){
-    pct = 0;
     progressFill.style.width = '0%';
     progressText.textContent = '0%';
-    cancelAnimationFrame(progressTimer);
-    const step = () => {
-      pct = Math.min(pct + 0.5, 98);
-      progressFill.style.width = pct + '%';
-      progressText.textContent = Math.floor(pct) + '%';
-      if (pct < 98) progressTimer = requestAnimationFrame(step);
-    };
-    progressTimer = requestAnimationFrame(step);
+    progressStatus.textContent = '';
+    overlay.style.display = 'grid';
+    if(stillTimer) clearInterval(stillTimer);
   }
 
   function stopProgress(){
-    cancelAnimationFrame(progressTimer);
-    progressFill.style.width = '100%';
-    progressText.textContent = '100%';
+    overlay.style.display = 'none';
+    if(evtSource){ evtSource.close(); evtSource = null; }
+    if(stillTimer) clearInterval(stillTimer);
   }
 
   function showMenu(x,y, tr){
@@ -139,6 +135,53 @@
     });
   }
 
+  function runScanner(){
+    const form = document.getElementById('scan-form');
+    if(!form) return;
+    form.addEventListener('submit', async function(ev){
+      ev.preventDefault();
+      startProgress();
+      const fd = new FormData(form);
+      let taskId = '';
+      try{
+        const res = await fetch(form.action, {method:'POST', body: fd});
+        const data = await res.json();
+        taskId = data.task_id;
+        if(!taskId) throw new Error('no task');
+      }catch(e){
+        stopProgress();
+        showToast('Failed to start scan', false);
+        return;
+      }
+
+      evtSource = new EventSource(`/scanner/progress?task_id=${taskId}`);
+      let last = Date.now();
+      stillTimer = setInterval(()=>{
+        if(Date.now()-last > 10000) progressStatus.textContent = 'still running...';
+      }, 5000);
+      evtSource.onmessage = async function(ev){
+        last = Date.now();
+        const data = JSON.parse(ev.data || '{}');
+        progressFill.style.width = (data.pct || 0) + '%';
+        progressText.textContent = Math.floor(data.pct || 0) + '%';
+        progressStatus.textContent = data.message || '';
+        if(data.phase === 'complete'){
+          evtSource.close();
+          const html = await fetch(`/scanner/results/${taskId}`).then(r=>r.text());
+          const target = document.getElementById('scan-results');
+          if(target) target.innerHTML = html;
+          bindResultsDelegates();
+          stopProgress();
+        }else if(data.phase === 'error'){
+          evtSource.close();
+          stopProgress();
+          showToast('Scan failed', false);
+        }
+      };
+      evtSource.onerror = function(){ progressStatus.textContent = 'connection lost'; };
+    });
+  }
+
   // Global listeners
   document.addEventListener('click', hideMenu);
   window.addEventListener('blur', hideMenu);
@@ -151,17 +194,9 @@
     await addFavoriteFromRow(ctxRow);
   });
 
-  // HTMX hooks -> start/stop progress + (re)bind delegates
-  document.body.addEventListener('htmx:send', (evt)=>{
-    if (evt.target.closest('#scan-form')) startProgress();
+  document.addEventListener('DOMContentLoaded', function(){
+    bindResultsDelegates();
+    runScanner();
   });
-  document.body.addEventListener('htmx:afterSwap', (evt)=>{
-    if (evt.target.id === 'scan-results') {
-      bindResultsDelegates();
-      stopProgress();
-    }
-  });
-  document.body.addEventListener('htmx:responseError', stopProgress);
-  document.addEventListener('DOMContentLoaded', bindResultsDelegates);
 })();
 
