@@ -8,6 +8,7 @@
   let ctxRow = null; // current row element
   let pollTimer = null;
   let stillTimer = null;
+  let maxTimer = null;
 
   function startProgress(){
     progressFill.style.width = '0%';
@@ -15,12 +16,15 @@
     progressStatus.textContent = '';
     overlay.style.display = 'grid';
     if(stillTimer) clearInterval(stillTimer);
+    if(maxTimer) clearTimeout(maxTimer);
+    maxTimer = setTimeout(()=>{ stopProgress(); showToast('Scan timed out', false); }, 240000);
   }
 
   function stopProgress(){
     overlay.style.display = 'none';
     if(pollTimer){ clearTimeout(pollTimer); pollTimer = null; }
     if(stillTimer) clearInterval(stillTimer);
+    if(maxTimer){ clearTimeout(maxTimer); maxTimer = null; }
   }
 
   function showMenu(x,y, tr){
@@ -161,7 +165,7 @@
 
       const poll = async function(){
         try{
-          const res = await fetch(`/scanner/progress/${taskId}`, {cache: 'no-store'});
+          const res = await fetch(`/scanner/progress/${taskId}?t=${Date.now()}`, {cache: 'no-store'});
           const data = await res.json();
           last = Date.now();
           progressFill.style.width = (data.percent || 0) + '%';
@@ -172,7 +176,7 @@
             progressFill.style.width = '100%';
             progressText.textContent = '100%';
             try{
-              const html = await fetch(`/scanner/results/${taskId}`, {cache: 'no-store'}).then(r=>{
+              const html = await fetch(`/scanner/results/${taskId}?t=${Date.now()}`, {cache: 'no-store'}).then(r=>{
                 if(!r.ok) throw new Error('');
                 return r.text();
               });
