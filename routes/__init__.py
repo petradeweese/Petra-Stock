@@ -174,6 +174,7 @@ def _perform_scan(
     params: dict,
     sort_key: str,
     progress_cb: Optional[Callable[[int, int, str], None]] = None,
+    progress_every: int = 5,
 ) -> list[dict]:
     start = time.perf_counter()
     total = len(tickers)
@@ -183,6 +184,7 @@ def _perform_scan(
     rows: list[dict] = []
     ex = _get_scan_executor()
     future_to_ticker = {ex.submit(compute_scan_for_ticker, t, params): t for t in tickers}
+    step = max(1, int(progress_every))
     done = 0
     for fut in as_completed(future_to_ticker):
         ticker = future_to_ticker[fut]
@@ -193,7 +195,7 @@ def _perform_scan(
         except Exception as e:
             logger.error("scan failed for %s: %s", ticker, e)
         done += 1
-        if progress_cb:
+        if progress_cb and (done % step == 0 or done == total):
             progress_cb(done, total, f"Scanning {done}/{total}")
 
     try:
