@@ -479,11 +479,13 @@ def forward_page(request: Request, db=Depends(get_db)):
                 dt = datetime.fromisoformat(ts)
                 if dt.tzinfo is None:
                     dt = dt.replace(tzinfo=timezone.utc)
-                t["entry_ts_display"] = dt.astimezone(TZ).strftime("%Y-%m-%d %H:%M")
+                # convert to Eastern Time for display while keeping DB stored as UTC
+                t["entry_ts"] = dt.astimezone(TZ).strftime("%Y-%m-%d %H:%M")
             except Exception:
-                t["entry_ts_display"] = ts
+                # keep the original string if parsing fails
+                t["entry_ts"] = ts
         else:
-            t["entry_ts_display"] = ""
+            t["entry_ts"] = ""
     return templates.TemplateResponse("forward.html", {"request": request, "tests": tests, "active_tab": "forward"})
 
 
