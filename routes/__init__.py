@@ -297,22 +297,25 @@ def _create_forward_test(db: sqlite3.Cursor, fav: dict) -> None:
     entry_ts = ts.astimezone(TZ).isoformat()
     entry_price = float(last_bar["Close"])
     window_minutes = _window_to_minutes(fav.get("window_value", 4.0), fav.get("window_unit", "Hours"))
+    now_iso = now_et().isoformat()
     db.execute(
         """INSERT INTO forward_tests
-            (fav_id, ticker, direction, interval, rule, entry_ts, entry_price,
-             target_pct, stop_pct, window_minutes)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (fav_id, ticker, direction, interval, rule, entry_price,
+             target_pct, stop_pct, window_minutes, status, roi, hit_pct, dd_pct,
+             last_run, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0.0, NULL, 0.0, NULL, ?, ?)""",
         (
             fav["id"],
             fav["ticker"],
             fav.get("direction", "UP"),
             fav.get("interval", "15m"),
             fav.get("rule"),
-            entry_ts,
             entry_price,
             fav.get("target_pct", 1.0),
             fav.get("stop_pct", 0.5),
             window_minutes,
+            entry_ts,
+            now_iso,
         ),
     )
     db.connection.commit()
@@ -320,85 +323,98 @@ def _create_forward_test(db: sqlite3.Cursor, fav: dict) -> None:
 
 def _update_forward_tests(db: sqlite3.Cursor) -> None:
     db.execute(
-        """SELECT id, ticker, direction, interval, entry_ts, entry_price,
-                  target_pct, stop_pct, window_minutes
+        """SELECT id, ticker, direction, interval, created_at, entry_price,
+                  target_pct, stop_pct, window_minutes, status
                FROM forward_tests
-               WHERE status='OPEN'"""
+               WHERE status IN ('pending','running')"""
     )
     rows = [dict(r) for r in db.fetchall()]
     for row in rows:
-        data = fetch_prices([row["ticker"]], row["interval"], 1.0).get(row["ticker"])
-        if data is None or getattr(data, "empty", True):
-            continue
-        entry_ts = pd.Timestamp(row["entry_ts"])
-        after = data[data.index > entry_ts]
-        if after.empty:
-            continue
-        prices = after["Close"]
-        mult = 1.0 if row["direction"] == "UP" else -1.0
-        pct_series = (prices / row["entry_price"] - 1.0) * 100 * mult
-        roi = float(pct_series.iloc[-1])
-        mfe = float(pct_series.max())
-        mae = float(pct_series.min())
-        status = "OPEN"
-        hit_pct = None
-        if row["direction"] == "UP":
-            hit_cond = prices >= row["entry_price"] * (1 + row["target_pct"] / 100)
-            stop_cond = prices <= row["entry_price"] * (1 - row["stop_pct"] / 100)
-        else:
-            hit_cond = prices <= row["entry_price"] * (1 - row["target_pct"] / 100)
-            stop_cond = prices >= row["entry_price"] * (1 + row["stop_pct"] / 100)
-        hit_time = prices[hit_cond].index[0] if hit_cond.any() else None
-        stop_time = prices[stop_cond].index[0] if stop_cond.any() else None
-        expire_ts = entry_ts + pd.Timedelta(minutes=row["window_minutes"])
-        final_ts = after.index[-1]
-        if hit_time and (not stop_time or hit_time <= stop_time) and hit_time <= expire_ts:
-            roi = float(pct_series.loc[hit_time])
-            status = "HIT"
-            hit_pct = 100.0
-        elif stop_time and (not hit_time or stop_time < hit_time) and stop_time <= expire_ts:
-            roi = float(pct_series.loc[stop_time])
-            status = "STOP"
-            hit_pct = 0.0
-        elif final_ts >= expire_ts:
-            subset = after[after.index <= expire_ts]
-            if not subset.empty:
-                pct_subset = (subset / row["entry_price"] - 1.0) * 100 * mult
-                roi = float(pct_subset.iloc[-1])
-                mfe = float(pct_subset.max())
-                mae = float(pct_subset.min())
-            status = "EXPIRED"
-            hit_pct = 0.0
-        dd = float(max(0.0, -mae))
-        db.execute(
-            """UPDATE forward_tests
-                   SET roi_pct=?, mfe_pct=?, mae_pct=?, dd_pct=?, status=?, hit_pct=?, updated_at=?
-                   WHERE id=?""",
-            (roi, mfe, mae, dd, status, hit_pct, now_et().isoformat(), row["id"]),
-        )
+        now_iso = now_et().isoformat()
+        try:
+            db.execute(
+                "UPDATE forward_tests SET status='running', last_run=?, updated_at=? WHERE id=?",
+                (now_iso, now_iso, row["id"]),
+            )
+            data = fetch_prices([row["ticker"]], row["interval"], 1.0).get(row["ticker"])
+            if data is None or getattr(data, "empty", True):
+                db.execute(
+                    "UPDATE forward_tests SET status='pending' WHERE id=?",
+                    (row["id"],),
+                )
+                continue
+            entry_ts = pd.Timestamp(row["created_at"])
+            after = data[data.index > entry_ts]
+            if after.empty:
+                db.execute(
+                    "UPDATE forward_tests SET status='pending' WHERE id=?",
+                    (row["id"],),
+                )
+                continue
+            prices = after["Close"]
+            mult = 1.0 if row["direction"] == "UP" else -1.0
+            pct_series = (prices / row["entry_price"] - 1.0) * 100 * mult
+            roi = float(pct_series.iloc[-1])
+            mae = float(pct_series.min())
+            status = "done"
+            hit_pct = None
+            if row["direction"] == "UP":
+                hit_cond = prices >= row["entry_price"] * (1 + row["target_pct"] / 100)
+                stop_cond = prices <= row["entry_price"] * (1 - row["stop_pct"] / 100)
+            else:
+                hit_cond = prices <= row["entry_price"] * (1 - row["target_pct"] / 100)
+                stop_cond = prices >= row["entry_price"] * (1 + row["stop_pct"] / 100)
+            hit_time = prices[hit_cond].index[0] if hit_cond.any() else None
+            stop_time = prices[stop_cond].index[0] if stop_cond.any() else None
+            expire_ts = entry_ts + pd.Timedelta(minutes=row["window_minutes"])
+            final_ts = after.index[-1]
+            if hit_time and (not stop_time or hit_time <= stop_time) and hit_time <= expire_ts:
+                roi = float(pct_series.loc[hit_time])
+                hit_pct = 100.0
+            elif stop_time and (not hit_time or stop_time < hit_time) and stop_time <= expire_ts:
+                roi = float(pct_series.loc[stop_time])
+                hit_pct = 0.0
+            elif final_ts < expire_ts:
+                status = "pending"
+            dd = float(max(0.0, -mae))
+            db.execute(
+                """UPDATE forward_tests
+                       SET roi=?, dd_pct=?, status=?, hit_pct=?, last_run=?, updated_at=?
+                       WHERE id=?""",
+                (roi, dd, status, hit_pct, now_et().isoformat(), now_iso, row["id"]),
+            )
+        except Exception:
+            logger.exception("Forward test %s failed", row["id"])
+            db.execute(
+                "UPDATE forward_tests SET status='error', last_run=?, updated_at=? WHERE id=?",
+                (now_iso, now_iso, row["id"]),
+            )
     db.connection.commit()
 
 
 @router.get("/forward", response_class=HTMLResponse)
 def forward_page(request: Request, db=Depends(get_db)):
-    db.execute("SELECT * FROM favorites ORDER BY id DESC")
-    favs = [dict(r) for r in db.fetchall()]
-    for f in favs:
-        db.execute("SELECT status FROM forward_tests WHERE fav_id=? ORDER BY id DESC LIMIT 1", (f["id"],))
-        row = db.fetchone()
-        if row is None or row["status"] != "OPEN":
-            _create_forward_test(db, f)
-    _update_forward_tests(db)
-    db.execute(
-        """SELECT ft.id AS ft_id, ft.fav_id, ft.ticker, ft.direction, ft.interval,
-                  ft.roi_pct, ft.hit_pct, ft.dd_pct, ft.status, ft.entry_ts, ft.rule
-               FROM forward_tests ft
-               ORDER BY ft.id DESC"""
-    )
-    tests = [dict(r) for r in db.fetchall()]
-    return templates.TemplateResponse("forward.html", {"request": request, "tests": tests, "active_tab": "forward"})
-
-
+    try:
+        db.execute("SELECT * FROM favorites ORDER BY id DESC")
+        favs = [dict(r) for r in db.fetchall()]
+        for f in favs:
+            db.execute("SELECT status FROM forward_tests WHERE fav_id=? ORDER BY id DESC LIMIT 1", (f["id"],))
+            row = db.fetchone()
+            if row is None or row["status"] in ("done", "error"):
+                _create_forward_test(db, f)
+        _update_forward_tests(db)
+        db.execute(
+            """SELECT ft.id AS ft_id, ft.fav_id, ft.ticker, ft.direction, ft.interval,
+                      ft.roi, ft.hit_pct, ft.dd_pct, ft.status, ft.created_at, ft.rule
+                   FROM forward_tests ft
+                   ORDER BY ft.id DESC"""
+        )
+        tests = [dict(r) for r in db.fetchall()]
+        ctx = {"request": request, "tests": tests, "active_tab": "forward"}
+    except Exception:
+        logger.exception("Failed to load forward page")
+        ctx = {"request": request, "tests": [], "active_tab": "forward", "error": "Unable to load forward tests"}
+    return templates.TemplateResponse("forward.html", ctx)
 @router.post("/favorites/delete/{fav_id}")
 def favorites_delete(fav_id: int, db=Depends(get_db)):
     db.execute("DELETE FROM favorites WHERE id=?", (fav_id,))

@@ -58,16 +58,16 @@ def test_forward_tracking_only_future_bars(tmp_path, monkeypatch):
 
     request = Request({"type": "http"})
     forward_page(request, db=cur)
-    cur.execute("SELECT roi_pct, status FROM forward_tests")
+    cur.execute("SELECT roi, status FROM forward_tests")
     row = cur.fetchone()
-    assert row["roi_pct"] == 0.0
-    assert row["status"] == "OPEN"
+    assert row["roi"] == 0.0
+    assert row["status"] == "pending"
 
     forward_page(request, db=cur)
-    cur.execute("SELECT roi_pct, status, hit_pct, dd_pct FROM forward_tests")
+    cur.execute("SELECT roi, status, hit_pct, dd_pct FROM forward_tests")
     row = cur.fetchone()
-    assert row["roi_pct"] == approx(2.0)
-    assert row["status"] == "HIT"
+    assert row["roi"] == approx(2.0)
+    assert row["status"] == "done"
     assert row["hit_pct"] == 100.0
     assert row["dd_pct"] == 0.0
     conn.close()
