@@ -1,4 +1,5 @@
 import json
+import os
 from datetime import datetime
 from typing import Dict, Any, Optional
 import logging
@@ -6,6 +7,7 @@ import sqlite3
 import smtplib
 import ssl
 from email.message import EmailMessage
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import certifi
 from fastapi import APIRouter, Request, Form, Depends
@@ -444,10 +446,21 @@ async def scanner_run(request: Request):
 
     # Run the scan
     rows = []
-    for t in tickers:
-        r = compute_scan_for_ticker(t, params)
-        if r:
-            rows.append(r)
+    max_workers = max(1, int(os.getenv("SCAN_WORKERS", "8")))
+
+    def _scan_one(ticker: str):
+        try:
+            return compute_scan_for_ticker(ticker, params)
+        except Exception as e:
+            logger.error("scan failed for %s: %s", ticker, e)
+            return None
+
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futures = [ex.submit(_scan_one, t) for t in tickers]
+        for fut in as_completed(futures):
+            r = fut.result()
+            if r:
+                rows.append(r)
 
     # Optional filters (match desktop defaults)
     try:
