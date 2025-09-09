@@ -1,5 +1,5 @@
 import logging
-from typing import Dict, Any, Optional, Callable, List
+from typing import Dict, Any, Optional, Callable, List, Tuple
 
 import pandas as pd
 from services.data_fetcher import fetch_prices
@@ -167,13 +167,15 @@ def _install_real_engine_adapter():
         _real_scan_single = None
 
 
-_PRICE_DATA: Dict[str, pd.DataFrame] = {}
+_PRICE_DATA: Dict[Tuple[str, str, float], pd.DataFrame] = {}
 
 
 def preload_prices(tickers: List[str], interval: str, lookback_years: float) -> None:
     """Preload price data for a batch of tickers."""
     try:
-        _PRICE_DATA.update(fetch_prices(tickers, interval, lookback_years))
+        fetched = fetch_prices(tickers, interval, lookback_years)
+        for t, df in fetched.items():
+            _PRICE_DATA[(t, interval, lookback_years)] = df
     except Exception as e:  # pragma: no cover - network failures
         logger.error("prefetch failed: %r", e)
 
@@ -187,11 +189,12 @@ except Exception:
 
 if _pfa is not None:
     def _price_lookup(ticker: str, interval: str, lookback_years: float) -> pd.DataFrame:
-        df = _PRICE_DATA.get(ticker)
+        key = (ticker, interval, lookback_years)
+        df = _PRICE_DATA.get(key)
         if df is not None and not df.empty:
             return df.copy()
         data = fetch_prices([ticker], interval, lookback_years).get(ticker, pd.DataFrame())
-        _PRICE_DATA[ticker] = data
+        _PRICE_DATA[key] = data
         return data.copy()
 
     _pfa._download_prices = _price_lookup
