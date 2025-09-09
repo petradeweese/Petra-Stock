@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Callable, Dict, Any
 
 from db import DB_PATH, get_settings, set_last_run
@@ -19,6 +19,7 @@ async def favorites_loop(market_is_open: Callable[[datetime], bool], now_et: Cal
             if market_is_open(ts):
                 boundary = ts.replace(second=0, microsecond=0)
                 boundary = boundary.replace(minute=(boundary.minute - boundary.minute % 15))
+                boundary_utc_iso = boundary.astimezone(timezone.utc).isoformat()
                 with sqlite3.connect(DB_PATH) as conn:
                     conn.row_factory = sqlite3.Row
                     db = conn.cursor()
@@ -27,7 +28,7 @@ async def favorites_loop(market_is_open: Callable[[datetime], bool], now_et: Cal
                     last_boundary = st["last_boundary"] or ""
                     last_run_at = st["last_run_at"] or ""
 
-                    should_run = boundary.isoformat() != last_boundary
+                    should_run = boundary_utc_iso != last_boundary
                     if last_run_at:
                         last_dt = datetime.fromisoformat(last_run_at)
                         if (ts - last_dt).total_seconds() < throttle * 60:
@@ -51,7 +52,7 @@ async def favorites_loop(market_is_open: Callable[[datetime], bool], now_et: Cal
                                 hits.append(row)
                         # TODO: email YES hits in a readable format
                         # TODO: archive favorites 15m scan results only if there are YES hits
-                        set_last_run(boundary.isoformat(), db)
+                        set_last_run(boundary_utc_iso, db)
         except Exception as e:
             logger.error("scheduler error: %r", e)
         elapsed = asyncio.get_event_loop().time() - start

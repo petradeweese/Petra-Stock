@@ -26,9 +26,14 @@ OPEN_TIME = time(9, 30)
 CLOSE_TIME = time(16, 0)
 
 
+def now_utc() -> datetime:
+    """Return the current time in UTC."""
+    return datetime.now(timezone.utc)
+
+
 def now_et() -> datetime:
     """Return the current time in Eastern Time."""
-    return datetime.now(timezone.utc).astimezone(TZ)
+    return now_utc().astimezone(TZ)
 
 
 def market_is_open(ts: Optional[datetime] = None) -> bool:

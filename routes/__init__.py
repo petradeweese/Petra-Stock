@@ -1,7 +1,7 @@
 import atexit
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Any, Optional, Union, Callable
 import logging
 import sqlite3
@@ -24,7 +24,7 @@ from indices import SP100, TOP150, TOP250
 from db import DB_PATH, get_db, get_settings
 from scanner import compute_scan_for_ticker, preload_prices
 from services.data_fetcher import fetch_prices
-from utils import now_et, TZ
+from utils import now_et, now_utc, TZ
 import pandas as pd
 
 router = APIRouter()
@@ -370,7 +370,7 @@ def _create_forward_test(db: sqlite3.Cursor, fav: dict) -> None:
     ts = last_bar.name
     if hasattr(ts, "to_pydatetime"):
         ts = ts.to_pydatetime()
-    entry_ts = ts.astimezone(TZ).isoformat()
+    entry_ts = ts.astimezone(timezone.utc).isoformat()
     entry_price = float(last_bar["Close"])
     window_minutes = _window_to_minutes(fav.get("window_value", 4.0), fav.get("window_unit", "Hours"))
     db.execute(
@@ -450,7 +450,7 @@ def _update_forward_tests(db: sqlite3.Cursor) -> None:
             """UPDATE forward_tests
                    SET roi_pct=?, mfe_pct=?, mae_pct=?, dd_pct=?, status=?, hit_pct=?, updated_at=?
                    WHERE id=?""",
-            (roi, mfe, mae, dd, status, hit_pct, now_et().isoformat(), row["id"]),
+            (roi, mfe, mae, dd, status, hit_pct, now_utc().isoformat(), row["id"]),
         )
     db.connection.commit()
 
@@ -472,6 +472,18 @@ def forward_page(request: Request, db=Depends(get_db)):
                ORDER BY ft.id DESC"""
     )
     tests = [dict(r) for r in db.fetchall()]
+    for t in tests:
+        ts = t.get("entry_ts")
+        if ts:
+            try:
+                dt = datetime.fromisoformat(ts)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                t["entry_ts_display"] = dt.astimezone(TZ).strftime("%Y-%m-%d %H:%M")
+            except Exception:
+                t["entry_ts_display"] = ts
+        else:
+            t["entry_ts_display"] = ""
     return templates.TemplateResponse("forward.html", {"request": request, "tests": tests, "active_tab": "forward"})
 
 
@@ -573,7 +585,7 @@ async def archive_save(request: Request, db=Depends(get_db)):
         if not rows:
             return JSONResponse({"ok": False, "error": "no rows"}, status_code=400)
 
-        started = now_et().isoformat()
+        started = now_utc().isoformat()
         finished = started
         scan_type = str(params.get("scan_type") or "scan150")
         universe = ",".join({r.get("ticker","") for r in rows if r.get("ticker")})
@@ -739,10 +751,10 @@ async def archive_run(request: Request, db=Depends(get_db)):
     rows = payload.get("rows", [])
     universe = payload.get("universe", [])
 
-    started_at = now_et().isoformat()
+    started_at = now_utc().isoformat()
     db.execute(
         "INSERT INTO runs(started_at, scan_type, params_json, universe, finished_at, hit_count) VALUES (?, ?, ?, ?, ?, ?)",
-        (started_at, scan_type, json.dumps(params), ",".join(universe), now_et().isoformat(), len(rows)),
+        (started_at, scan_type, json.dumps(params), ",".join(universe), now_utc().isoformat(), len(rows)),
     )
     run_id = db.lastrowid
 

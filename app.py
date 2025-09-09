@@ -1,5 +1,6 @@
 import logging
 import os
+from datetime import datetime
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.proxy_headers import ProxyHeadersMiddleware
@@ -14,11 +15,12 @@ except Exception:
 from db import init_db
 from routes import router
 from scheduler import setup_scheduler
-from utils import now_et, market_is_open
+from utils import now_et, market_is_open, TZ
 from scanner import compute_scan_for_ticker
 
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+logging.Formatter.converter = lambda ts: datetime.fromtimestamp(ts, TZ).timetuple()
 logger = logging.getLogger(__name__)
 
 

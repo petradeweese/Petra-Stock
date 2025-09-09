@@ -2,7 +2,7 @@ import logging
 import sqlite3
 from typing import Dict, Any, List, Optional
 
-from utils import now_et
+from utils import now_utc
 
 logger = logging.getLogger(__name__)
 
@@ -162,6 +162,6 @@ def get_settings(db: sqlite3.Cursor) -> sqlite3.Row:
 def set_last_run(boundary_iso: str, db: sqlite3.Cursor):
     db.execute(
         "UPDATE settings SET last_boundary=?, last_run_at=? WHERE id=1",
-        (boundary_iso, now_et().isoformat()),
+        (boundary_iso, now_utc().isoformat()),
     )
     db.connection.commit()
