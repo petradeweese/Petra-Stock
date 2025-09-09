@@ -16,7 +16,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 
 from indices import SP100, TOP150, TOP250
-from db import DB_PATH, get_db, get_settings
+from db import get_db, get_settings
 from scanner import compute_scan_for_ticker, preload_prices
 from utils import now_et, TZ
 
