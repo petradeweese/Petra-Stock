@@ -3,6 +3,13 @@ import sqlite3
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 
+try:  # pragma: no cover - prefer real Alembic if available
+    from alembic import command as alembic_command
+    from alembic.config import Config as AlembicConfig
+except Exception:  # pragma: no cover - fallback stub
+    from alembic_stub import command as alembic_command
+    from alembic_stub.config import Config as AlembicConfig
+
 from utils import now_et
 
 logger = logging.getLogger(__name__)
@@ -137,61 +144,14 @@ SCHEMA = [
 
 
 def run_migrations() -> None:
-    """Apply pending SQL migrations from the migrations directory."""
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    try:
-        conn.row_factory = sqlite3.Row
-        cur = conn.cursor()
-        cur.execute("BEGIN")
-        cur.execute(
-            "CREATE TABLE IF NOT EXISTS migrations (filename TEXT PRIMARY KEY, applied_at TEXT NOT NULL)"
-        )
-        cur.execute("SELECT filename FROM migrations")
-        applied = {row[0] for row in cur.fetchall()}
-        migrations_dir = Path("migrations")
-        for path in sorted(migrations_dir.glob("*.sql")):
-            if path.name in applied:
-                continue
-            logger.info("Applying migration %s", path.name)
-            with open(path, "r", encoding="utf-8") as f:
-                statements = [s.strip() for s in f.read().split(";") if s.strip()]
-            for stmt in statements:
-                try:
-                    cur.execute(stmt)
-                except sqlite3.OperationalError as e:
-                    msg = str(e).lower()
-                    if any(x in msg for x in ["duplicate column name", "already exists", "no such column"]):
-                        logger.debug("Skipping statement %r: %s", stmt, e)
-                    else:
-                        raise
-            cur.execute(
-                "INSERT INTO migrations (filename, applied_at) VALUES (?, ?)",
-                (path.name, now_et().isoformat()),
-            )
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        logger.exception("Failed to run migrations")
-        raise
-    finally:
-        conn.close()
+    """Apply database migrations using Alembic."""
+    cfg = AlembicConfig(str(Path(__file__).with_name("alembic.ini")))
+    cfg.set_main_option("sqlalchemy.url", f"sqlite:///{DB_PATH}")
+    alembic_command.upgrade(cfg, "head")
 
 
 def init_db():
-    conn = None
-    try:
-        conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        cur = conn.cursor()
-        for stmt in SCHEMA:
-            cur.executescript(stmt)
-        conn.commit()
-    except sqlite3.Error:
-        logger.exception("Failed to initialize database")
-        raise
-    finally:
-        if conn is not None:
-            conn.close()
+    run_migrations()
 
 
 def get_db():
