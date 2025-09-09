@@ -2,7 +2,10 @@ import logging
 import os
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
-from starlette.middleware.proxy_headers import ProxyHeadersMiddleware
+try:
+    from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
+except Exception:  # pragma: no cover - optional dependency
+    ProxyHeadersMiddleware = None
 
 try:  # pragma: no cover - optional speed-up
     import uvloop
@@ -35,7 +38,11 @@ def create_app() -> FastAPI:
         raise
 
     app = FastAPI()
-    app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
+    if ProxyHeadersMiddleware is not None:
+        logger.info("ProxyHeadersMiddleware enabled")
+        app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
+    else:
+        logger.info("ProxyHeadersMiddleware unavailable; skipping")
     app.mount("/static", StaticFiles(directory="static"), name="static")
 
     app.include_router(router)
