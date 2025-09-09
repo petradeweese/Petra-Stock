@@ -9,3 +9,5 @@ Jinja2
 certifi
 python-multipart
 pytest
+httpx
+uvloop

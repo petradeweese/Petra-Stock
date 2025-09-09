@@ -184,27 +184,48 @@ def _desktop_like_single(ticker: str, params: dict) -> dict:
         logger.warning("pattern_finder_app is not available")
         return {}
     try:
+        # Pull parameters into locals once so the tight loops in the engine
+        # don't need repeated dict lookups.
+        interval = params["interval"]
+        direction = params["direction"]
+        target_pct = params["target_pct"]
+        stop_pct = params["stop_pct"]
+        window_value = params["window_value"]
+        window_unit = params["window_unit"]
+        lookback_years = params["lookback_years"]
+        max_tt_bars = params["max_tt_bars"]
+        min_support = params["min_support"]
+        delta_assumed = params["delta_assumed"]
+        theta_per_day_pct = params["theta_per_day_pct"]
+        atrz_gate = params["atrz_gate"]
+        slope_gate_pct = params["slope_gate_pct"]
+        use_regime = params["use_regime"]
+        regime_trend_only = params["regime_trend_only"]
+        vix_z_max = params["vix_z_max"]
+        slippage_bps = params["slippage_bps"]
+        vega_scale = params["vega_scale"]
+
         model, df, _ = _pfa.analyze_roi_mode(
             ticker=ticker,
-            interval=params["interval"],
-            direction=params["direction"],
-            target_pct=params["target_pct"],
-            stop_pct=params["stop_pct"],
-            window_value=params["window_value"],
-            window_unit=params["window_unit"],
-            lookback_years=params["lookback_years"],
-            max_tt_bars=params["max_tt_bars"],
-            min_support=params["min_support"],
-            delta_assumed=params["delta_assumed"],
-            theta_per_day_pct=params["theta_per_day_pct"],
-            atrz_gate=params["atrz_gate"],
-            slope_gate_pct=params["slope_gate_pct"],
-            use_regime=params["use_regime"],
-            regime_trend_only=params["regime_trend_only"],
-            vix_z_max=params["vix_z_max"],
+            interval=interval,
+            direction=direction,
+            target_pct=target_pct,
+            stop_pct=stop_pct,
+            window_value=window_value,
+            window_unit=window_unit,
+            lookback_years=lookback_years,
+            max_tt_bars=max_tt_bars,
+            min_support=min_support,
+            delta_assumed=delta_assumed,
+            theta_per_day_pct=theta_per_day_pct,
+            atrz_gate=atrz_gate,
+            slope_gate_pct=slope_gate_pct,
+            use_regime=use_regime,
+            regime_trend_only=regime_trend_only,
+            vix_z_max=vix_z_max,
             event_mask=None,
-            slippage_bps=params["slippage_bps"],
-            vega_scale=params["vega_scale"],
+            slippage_bps=slippage_bps,
+            vega_scale=vega_scale,
         )
         if df is None or df.empty:
             return {}
