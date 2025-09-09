@@ -52,7 +52,13 @@ SCHEMA = [
         vix_z_max REAL DEFAULT 3.0,
         slippage_bps REAL DEFAULT 7.0,
         vega_scale REAL DEFAULT 0.03,
-        ref_avg_dd REAL
+        ref_avg_dd REAL,
+        roi_snapshot REAL,
+        hit_pct_snapshot REAL,
+        dd_pct_snapshot REAL,
+        rule_snapshot TEXT,
+        settings_json_snapshot TEXT,
+        snapshot_at TEXT
     );
     """,
     # Forward test tracking
@@ -68,11 +74,14 @@ SCHEMA = [
         target_pct REAL NOT NULL,
         stop_pct REAL NOT NULL,
         window_minutes INTEGER NOT NULL,
-        status TEXT NOT NULL DEFAULT 'pending',
-        roi REAL,
-        hit_pct REAL,
-        dd_pct REAL,
-        last_run TEXT,
+        status TEXT NOT NULL DEFAULT 'queued',
+        roi_forward REAL,
+        hit_forward REAL,
+        dd_forward REAL,
+        last_run_at TEXT,
+        next_run_at TEXT,
+        runs_count INTEGER NOT NULL DEFAULT 0,
+        notes TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT,
         FOREIGN KEY(fav_id) REFERENCES favorites(id)
@@ -135,16 +144,33 @@ def migrate_forward_tests(conn: sqlite3.Connection) -> None:
         return
     cur.execute("PRAGMA table_info(forward_tests)")
     cols = {row[1] for row in cur.fetchall()}
+
+    def rename(old: str, new: str):
+        if old in cols and new not in cols:
+            cur.execute(f"ALTER TABLE forward_tests RENAME COLUMN {old} TO {new}")
+            cols.remove(old)
+            cols.add(new)
+
     def add(col: str, ddl: str, backfill: Optional[str] = None):
         if col not in cols:
             cur.execute(f"ALTER TABLE forward_tests ADD COLUMN {col} {ddl}")
             if backfill:
                 cur.execute(backfill)
-    add("status", "TEXT NOT NULL DEFAULT 'pending'", "UPDATE forward_tests SET status='pending' WHERE status IS NULL OR status=''" )
-    add("roi", "REAL", "UPDATE forward_tests SET roi=roi_pct WHERE roi IS NULL")
-    add("hit_pct", "REAL")
-    add("dd_pct", "REAL")
-    add("last_run", "TEXT")
+
+    rename("roi", "roi_forward")
+    rename("hit_pct", "hit_forward")
+    rename("dd_pct", "dd_forward")
+    rename("last_run", "last_run_at")
+
+    add("status", "TEXT NOT NULL DEFAULT 'queued'", "UPDATE forward_tests SET status='queued' WHERE status IS NULL OR status='pending'")
+    cur.execute("UPDATE forward_tests SET status='ok' WHERE status='done'")
+    add("next_run_at", "TEXT")
+    add("runs_count", "INTEGER NOT NULL DEFAULT 0")
+    add("notes", "TEXT")
+    add("roi_forward", "REAL", "UPDATE forward_tests SET roi_forward=0.0 WHERE roi_forward IS NULL")
+    add("hit_forward", "REAL")
+    add("dd_forward", "REAL")
+    add("last_run_at", "TEXT")
     add("rule", "TEXT")
     add("ticker", "TEXT")
     add("direction", "TEXT")
@@ -152,6 +178,30 @@ def migrate_forward_tests(conn: sqlite3.Connection) -> None:
     add("created_at", "TEXT", "UPDATE forward_tests SET created_at=entry_ts WHERE created_at IS NULL")
     add("updated_at", "TEXT", "UPDATE forward_tests SET updated_at=created_at WHERE updated_at IS NULL")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_forward_tests_fav ON forward_tests(fav_id)")
+    conn.commit()
+
+
+def migrate_favorites(conn: sqlite3.Connection) -> None:
+    """Ensure favorites table has snapshot columns."""
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='favorites'"
+    )
+    if cur.fetchone() is None:
+        return
+    cur.execute("PRAGMA table_info(favorites)")
+    cols = {row[1] for row in cur.fetchall()}
+
+    def add(col: str, ddl: str):
+        if col not in cols:
+            cur.execute(f"ALTER TABLE favorites ADD COLUMN {col} {ddl}")
+
+    add("roi_snapshot", "REAL")
+    add("hit_pct_snapshot", "REAL")
+    add("dd_pct_snapshot", "REAL")
+    add("rule_snapshot", "TEXT")
+    add("settings_json_snapshot", "TEXT")
+    add("snapshot_at", "TEXT")
     conn.commit()
 
 
@@ -164,6 +214,7 @@ def init_db():
         for stmt in SCHEMA:
             cur.executescript(stmt)
         migrate_forward_tests(conn)
+        migrate_favorites(conn)
         conn.commit()
     except sqlite3.Error:
         logger.exception("Failed to initialize database")

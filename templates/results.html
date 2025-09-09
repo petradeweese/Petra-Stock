@@ -78,6 +78,16 @@
     setTimeout(() => { toast.hidden = true; }, 1800);
   }
 
+  function getSettings(){
+    const form = document.getElementById('scan-form');
+    const params = {};
+    if (form) {
+      const fd = new FormData(form);
+      for (const [k, v] of fd.entries()) params[k] = v;
+    }
+    return params;
+  }
+
   async function addFavorite(payload){
     if (!payload || !payload.ticker || !payload.rule) {
       showToast('Missing ticker or rule', false);
@@ -109,7 +119,12 @@
       ticker: tr.dataset.tkr || '',
       direction: (tr.dataset.dir || 'UP').toUpperCase(),
       rule: tr.dataset.rule || '',
-      ref_avg_dd: parseFloat(tr.dataset.dd || '0')
+      ref_avg_dd: parseFloat(tr.dataset.dd || '0'),
+      roi_snapshot: parseFloat(tr.dataset.roi || '0'),
+      hit_pct_snapshot: parseFloat(tr.dataset.hit || '0'),
+      dd_pct_snapshot: parseFloat(tr.dataset.dd || '0'),
+      rule_snapshot: tr.dataset.rule || '',
+      settings_json_snapshot: getSettings()
     };
     showMenu(e.clientX, e.clientY);
   });
@@ -128,7 +143,12 @@
       ticker: tr.dataset.tkr || '',
       direction: (tr.dataset.dir || 'UP').toUpperCase(),
       rule: tr.dataset.rule || '',
-      ref_avg_dd: parseFloat(tr.dataset.dd || '0')
+      ref_avg_dd: parseFloat(tr.dataset.dd || '0'),
+      roi_snapshot: parseFloat(tr.dataset.roi || '0'),
+      hit_pct_snapshot: parseFloat(tr.dataset.hit || '0'),
+      dd_pct_snapshot: parseFloat(tr.dataset.dd || '0'),
+      rule_snapshot: tr.dataset.rule || '',
+      settings_json_snapshot: getSettings()
     };
     addFavorite(payload);
   });
