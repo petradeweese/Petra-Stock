@@ -2,6 +2,7 @@ import os
 import math
 import time
 import logging
+import shutil
 from pathlib import Path
 from typing import List, Dict, Tuple
 import asyncio
@@ -9,6 +10,7 @@ import asyncio
 import pandas as pd
 
 from services import http_client
+from services.price_utils import normalize_price_df
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +20,25 @@ TTL_DAILY = int(os.getenv("PF_TTL_DAILY", "3600"))
 PER_TICKER_SLEEP = float(os.getenv("PF_PER_TICKER_SLEEP", "0.0"))
 
 CACHE_DIR = Path(".cache/prices")
+CACHE_SCHEMA = 2
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
+_CACHE_VERSION_FILE = CACHE_DIR / "VERSION"
+
+
+def _ensure_cache_schema() -> None:
+    """Purge cache if schema version changed."""
+    ver = None
+    try:
+        ver = int(_CACHE_VERSION_FILE.read_text().strip())
+    except Exception:
+        ver = None
+    if ver != CACHE_SCHEMA:
+        shutil.rmtree(CACHE_DIR, ignore_errors=True)
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        _CACHE_VERSION_FILE.write_text(str(CACHE_SCHEMA))
+
+
+_ensure_cache_schema()
 
 INTRADAY_INTERVALS = {"1m", "2m", "5m", "15m", "30m", "60m", "90m"}
 INTRADAY_CAPS = {
@@ -139,7 +159,7 @@ def fetch_prices(tickers: List[str], interval: str, lookback_years: float) -> Di
     for t in tickers:
         key = _cache_key(t, interval, period)
         mem = _MEM_CACHE.get(key)
-        if mem is not None and not mem.empty:
+        if mem is not None and not getattr(mem, "empty", True):
             results[t] = mem.copy()
             logger.info("mem_cache_hit=%s", t)
             continue
@@ -147,10 +167,16 @@ def fetch_prices(tickers: List[str], interval: str, lookback_years: float) -> Di
         if _is_fresh(path, ttl):
             try:
                 df = pd.read_parquet(path)
-                df = _ensure_utc(df)
-                results[t] = df
-                _MEM_CACHE[key] = df
-                logger.info("cache_hit=%s", t)
+                df = normalize_price_df(df)
+                if df is not None:
+                    df = _ensure_utc(df)
+                    results[t] = df
+                    _MEM_CACHE[key] = df
+                    logger.info("cache_hit=%s", t)
+                else:
+                    logger.info("cache_miss=%s", t)
+                    to_download.append(t)
+                    continue
             except Exception:
                 logger.info("cache_miss=%s", t)
                 to_download.append(t)
@@ -162,14 +188,20 @@ def fetch_prices(tickers: List[str], interval: str, lookback_years: float) -> Di
         batch = to_download[i : i + BATCH_SIZE]
         fetched = asyncio.run(_download_batch(batch, period, interval))
         for t, df in fetched.items():
+            df = normalize_price_df(df)
+            if df is None:
+                df = pd.DataFrame()
+            else:
+                df = _ensure_utc(df)
             results[t] = df
             key = _cache_key(t, interval, period)
             _MEM_CACHE[key] = df
             path = _cache_file(t, interval, period)
-            try:
-                df.to_parquet(path)
-            except Exception:
-                pass
+            if not df.empty:
+                try:
+                    df.to_parquet(path)
+                except Exception:
+                    pass
             if PER_TICKER_SLEEP > 0 and len(batch) == 1:
                 time.sleep(PER_TICKER_SLEEP)
 

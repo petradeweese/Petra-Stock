@@ -30,7 +30,8 @@ def test_scanner_run_parallel_handles_errors(monkeypatch, caplog):
     monkeypatch.setattr(routes, "compute_scan_for_ticker", fake_scan)
 
     with caplog.at_level(logging.ERROR):
-        rows = routes._perform_scan(tickers, {}, "")
+        rows, skipped = routes._perform_scan(tickers, {}, "")
 
     assert {r["ticker"] for r in rows} == {"AAA", "CCC"}
+    assert skipped == 0
     assert any("BAD" in rec.message for rec in caplog.records)
