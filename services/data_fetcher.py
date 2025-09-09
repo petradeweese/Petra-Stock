@@ -8,6 +8,7 @@ from typing import List, Dict, Tuple
 import asyncio
 
 import pandas as pd
+import httpx
 
 from services import http_client
 from services.price_utils import normalize_price_df
@@ -16,6 +17,8 @@ logger = logging.getLogger(__name__)
 
 TTL_INTRADAY = int(os.getenv("PF_TTL_INTRADAY", "300"))
 TTL_DAILY = int(os.getenv("PF_TTL_DAILY", "3600"))
+# Delay inserted between batched Yahoo requests.  This was originally a per ticker
+# sleep but now applies to each batch request.
 PER_TICKER_SLEEP = float(os.getenv("PF_PER_TICKER_SLEEP", "0.0"))
 
 CACHE_DIR = Path(".cache/prices")
@@ -59,6 +62,8 @@ _MEM_CACHE: Dict[Tuple[str, str, str], pd.DataFrame] = {}
 # so the scanner favors reliability over speed; they can be tuned via env vars.
 YF_RPS = float(os.getenv("YF_MAX_RPS", "1"))
 YF_BURST = int(os.getenv("YF_MAX_BURST", "1"))
+YF_BATCH_SIZE = int(os.getenv("YF_BATCH_SIZE", "10"))
+YF_BATCH_MAX_RETRIES = int(os.getenv("YF_BATCH_MAX_RETRIES", "3"))
 try:
     http_client.set_rate_limit("query1.finance.yahoo.com", YF_RPS, YF_BURST)
 except Exception:  # pragma: no cover - best effort
@@ -122,20 +127,33 @@ def _normalize_ohlcv(records: List[dict]) -> pd.DataFrame:
 
 
 async def _download_batch(batch: List[str], period: str, interval: str) -> Dict[str, pd.DataFrame]:
-    """Download tickers via Yahoo's multi-symbol spark endpoint.
+    """Download a batch of tickers via Yahoo's multi-symbol spark endpoint.
 
-    Even though the endpoint accepts multiple symbols, the caller now
-    sends a single ticker at a time to minimize rate-limit errors.
+    Retries with exponential backoff when Yahoo responds with HTTP 429.
     """
     symbols = ",".join(batch)
     url = (
         "https://query1.finance.yahoo.com/v8/finance/spark"
         f"?symbols={symbols}&interval={interval}&range={period}&includePrePost=false&events=div%2Csplit"
     )
-    try:
-        data = await http_client.get_json(url)
-    except Exception as e:  # pragma: no cover - network failure
-        logger.error("download error %s: %r", symbols, e)
+
+    data = None
+    for attempt in range(YF_BATCH_MAX_RETRIES):
+        try:
+            data = await http_client.get_json(url)
+            break
+        except httpx.HTTPStatusError as e:
+            if e.response is not None and e.response.status_code == 429:
+                wait = 2 ** attempt
+                logger.warning("yahoo_429 symbols=%s wait=%.2fs", symbols, wait)
+                await asyncio.sleep(wait)
+                continue
+            logger.error("download error %s: %r", symbols, e)
+            return {t: pd.DataFrame() for t in batch}
+        except Exception as e:  # pragma: no cover - network failure
+            logger.error("download error %s: %r", symbols, e)
+            return {t: pd.DataFrame() for t in batch}
+    else:
         return {t: pd.DataFrame() for t in batch}
 
     results: Dict[str, pd.DataFrame] = {t: pd.DataFrame() for t in batch}
@@ -176,7 +194,16 @@ def fetch_prices(tickers: List[str], interval: str, lookback_years: float) -> Di
     results: Dict[str, pd.DataFrame] = {}
     to_download: List[str] = []
 
+    # Deduplicate tickers while preserving order so we do not request the same
+    # symbol multiple times.
+    seen = set()
+    unique: List[str] = []
     for t in tickers:
+        if t not in seen:
+            unique.append(t)
+            seen.add(t)
+
+    for t in unique:
         key = _cache_key(t, interval, period)
         mem = _MEM_CACHE.get(key)
         if mem is not None and not getattr(mem, "empty", True):
@@ -204,31 +231,32 @@ def fetch_prices(tickers: List[str], interval: str, lookback_years: float) -> Di
             logger.info("cache_miss=%s", t)
             to_download.append(t)
 
-    # Fetch each ticker individually to avoid Yahoo Finance 429 errors from
-    # multi-symbol requests.
-    for t in to_download:
-        fetched = asyncio.run(_download_batch([t], period, interval))
-        df = fetched.get(t, pd.DataFrame())
-        df = normalize_price_df(df)
-        if df is None:
-            df = pd.DataFrame()
-        else:
-            df = _ensure_utc(df)
-        results[t] = df
-        key = _cache_key(t, interval, period)
-        _MEM_CACHE[key] = df
-        path = _cache_file(t, interval, period)
-        if not df.empty:
-            try:
-                df.to_parquet(path)
-            except Exception:
-                pass
+    # Fetch tickers in batches to avoid overwhelming the Yahoo Finance API.
+    for i in range(0, len(to_download), YF_BATCH_SIZE):
+        batch = to_download[i : i + YF_BATCH_SIZE]
+        fetched = asyncio.run(_download_batch(batch, period, interval))
+        for t in batch:
+            df = fetched.get(t, pd.DataFrame())
+            df = normalize_price_df(df)
+            if df is None:
+                df = pd.DataFrame()
+            else:
+                df = _ensure_utc(df)
+            results[t] = df
+            key = _cache_key(t, interval, period)
+            _MEM_CACHE[key] = df
+            path = _cache_file(t, interval, period)
+            if not df.empty:
+                try:
+                    df.to_parquet(path)
+                except Exception:
+                    pass
         if PER_TICKER_SLEEP > 0:
             time.sleep(PER_TICKER_SLEEP)
 
-    for t in tickers:
+    for t in unique:
         results.setdefault(t, pd.DataFrame())
-    logger.info("fetched=%d cache=%d", len(to_download), len(tickers) - len(to_download))
+    logger.info("fetched=%d cache=%d", len(to_download), len(unique) - len(to_download))
     return results
 
 
