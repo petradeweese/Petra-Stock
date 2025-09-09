@@ -398,6 +398,11 @@ def settings_page(request: Request, db=Depends(get_db)):
     return templates.TemplateResponse("settings.html", {"request": request, "st": st, "active_tab": "settings"})
 
 
+@router.get("/info", response_class=HTMLResponse)
+def info_page(request: Request):
+    return templates.TemplateResponse("info.html", {"request": request, "active_tab": "info"})
+
+
 @router.post("/settings/save")
 def settings_save(
     request: Request,

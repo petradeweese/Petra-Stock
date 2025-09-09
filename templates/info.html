@@ -1,0 +1,70 @@
+{% extends 'base.html' %}
+{% block title %}Pattern Finder — Info{% endblock %}
+{% block content %}
+  <div class="card">
+    <h1 style="margin:0 0 1rem 0">Info</h1>
+
+    <section>
+      <h2>What the Scanner Does</h2>
+      <p>The scanner evaluates a universe of symbols to surface option setups.</p>
+      <ul>
+        <li>Fetches price and volatility data for the selected symbols.</li>
+        <li>Calculates indicators and pattern statistics for each window.</li>
+        <li>Ranks results by expected return, hit rate and stability.</li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>Parameters Explained</h2>
+      <ul>
+        <li><strong>Scan Type</strong> – Universe to scan. Valid: Top150, Top250, SP100 or Single. Default: Top150. Larger universes take longer.</li>
+        <li><strong>Ticker</strong> – Symbol used when Scan Type is Single. Must be a tradable ticker. Empty by default.</li>
+        <li><strong>Interval</strong> – Bar size for analysis (5m, 15m, 30m, 1h). Shorter bars react faster but add noise.</li>
+        <li><strong>Direction</strong> – BOTH, UP or DOWN. Determines long/short bias. BOTH checks both sides but doubles work.</li>
+        <li><strong>Target % / Stop %</strong> – Profit target and stop loss in percent. Defaults 1.0/0.5. Wider targets reduce hits but increase reward.</li>
+        <li><strong>Within</strong> – Time allowed to hit the target. Specify value and unit (Hours/Days). Default 4 Hours. Tight windows filter out slower setups.</li>
+        <li><strong>Lookback (years)</strong> – History depth used to estimate stats. Default 2 years. More history may smooth results but increases compute.</li>
+        <li><strong>Max TT Bars</strong> – Maximum bars a trade can take to reach target. Default 12. Higher values allow longer trades.</li>
+        <li><strong>Min Support</strong> – Minimum historical occurrences for a pattern. Default 20. Lower values include scarce data.</li>
+        <li><strong>Delta (assumed)</strong> – Estimated option delta for ROI math. Default 0.40. Adjust for moneyness sensitivity.</li>
+        <li><strong>Theta per day %</strong> – Expected daily decay of option price. Default 0.20. Higher values penalize time.</li>
+        <li><strong>ATRz gate</strong> – Minimum ATR z-score. Default 0.10. Filters out low-volatility conditions.</li>
+        <li><strong>Slope gate %</strong> – Minimum trend slope percent. Default 0.02. Larger slopes require stronger trends.</li>
+        <li><strong>Use Regime / Regime Trend Only</strong> – Apply market regime filters. Default Off. Trend only restricts to regime trend direction.</li>
+        <li><strong>VIX z max</strong> – Maximum VIX z-score allowed. Default 3.0. Lower values avoid extreme volatility.</li>
+        <li><strong>Slippage (bps)</strong> – Estimated execution cost in basis points. Default 7. Higher slippage reduces ROI.</li>
+        <li><strong>Vega scale</strong> – Scaling factor for implied volatility impact. Default 0.03. Adjust for option sensitivity.</li>
+        <li><strong>Scan min Hit %</strong> – Minimum historical hit rate. Default 50%. Raising this tightens quality.</li>
+        <li><strong>Scan max DD %</strong> – Maximum drawdown allowed. Default 50%. Lower limits cut riskier patterns.</li>
+        <li><strong>Email results</strong> – Send summary email after a run. Default No. Requires SMTP settings.</li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>How Results Are Computed</h2>
+      <ol>
+        <li>Retrieve price and volatility data for the chosen universe.</li>
+        <li>Preprocess and align data into analysis windows.</li>
+        <li>Compute indicators and detect pattern matches.</li>
+        <li>Score and filter candidates by rules and thresholds.</li>
+        <li>Sort the remaining rows by ROI, hit rate and stability.</li>
+      </ol>
+    </section>
+
+    <section>
+      <h2>Glossary</h2>
+      <table>
+        <thead>
+          <tr><th>Term</th><th>Meaning</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>ROI</td><td>Average return on investment for hits.</td></tr>
+          <tr><td>Hit %</td><td>Percentage of historical trades reaching the target.</td></tr>
+          <tr><td>TT</td><td>Time to target measured in bars.</td></tr>
+          <tr><td>DD %</td><td>Average drawdown percentage.</td></tr>
+          <tr><td>ATRz</td><td>ATR z-score compared to recent history.</td></tr>
+        </tbody>
+      </table>
+    </section>
+  </div>
+{% endblock %}
