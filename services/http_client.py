@@ -7,7 +7,8 @@ from typing import Dict, Optional
 import httpx
 
 MAX_CONCURRENCY = int(os.getenv("HTTP_MAX_CONCURRENCY", "10"))
-MAX_RETRIES = int(os.getenv("HTTP_MAX_RETRIES", "3"))
+# Allow more retries by default so transient rate limits have a chance to recover.
+MAX_RETRIES = int(os.getenv("HTTP_MAX_RETRIES", "5"))
 
 _client: Optional[httpx.AsyncClient] = None
 _semaphore = asyncio.Semaphore(MAX_CONCURRENCY)
@@ -70,14 +71,18 @@ async def request(method: str, url: str, **kwargs) -> httpx.Response:
         status = resp.status_code if resp else None
         if status and status not in (429,) and status < 500:
             resp.raise_for_status()
-        retry_after = None
-        if resp:
-            retry_after = resp.headers.get("Retry-After")
+        retry_after = resp.headers.get("Retry-After") if resp else None
         if retries >= MAX_RETRIES:
             if resp:
                 resp.raise_for_status()
             raise httpx.RequestError("max retries exceeded", request=None)
-        wait = float(retry_after) if retry_after else (0.5 * (2 ** retries) + random.uniform(0, 0.5))
+        if status == 429:
+            # Respect server-provided Retry-After header when available; otherwise
+            # fall back to an exponential backoff with a reasonable upper bound to
+            # avoid hammering the API.
+            wait = float(retry_after) if retry_after else min(60, 2 ** retries)
+        else:
+            wait = float(retry_after) if retry_after else (0.5 * (2 ** retries) + random.uniform(0, 0.5))
         retries += 1
         await asyncio.sleep(wait)
 
