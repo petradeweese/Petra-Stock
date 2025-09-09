@@ -61,6 +61,33 @@ def _get_scan_executor() -> Union[ThreadPoolExecutor, ProcessPoolExecutor]:
         atexit.register(_shutdown_executor)
     return _scan_executor
 
+
+def _format_rule_summary(params: Dict[str, Any]) -> str:
+    parts: list[str] = []
+    def fmt_pct(v: Any) -> str:
+        try:
+            return f"{float(v):g}%"
+        except (ValueError, TypeError):
+            return f"{v}%"
+    def fmt_val(v: Any) -> str:
+        try:
+            return f"{float(v):g}"
+        except (ValueError, TypeError):
+            return str(v)
+    for key, label, fmt in [
+        ("target_pct", "Target", fmt_pct),
+        ("stop_pct", "Stop", fmt_pct),
+        ("max_tt_bars", "MaxBars", fmt_val),
+        ("scan_min_hit", "MinHit%", fmt_pct),
+        ("scan_max_dd", "MaxDD%", fmt_pct),
+        ("vega_scale", "Vega", fmt_val),
+        ("vix_z_max", "VIXz", fmt_val),
+    ]:
+        val = params.get(key)
+        if val not in (None, ""):
+            parts.append(f"{label} {fmt(val)}")
+    return " - ".join(parts)
+
 def _sort_rows(rows, sort_key):
     if not rows or not sort_key:
         return rows
@@ -143,20 +170,7 @@ def results_from_archive(request: Request, run_id: int, db=Depends(get_db)):
     ran_at = ""
     try:
         params = json.loads(run["params_json"] or "{}")
-        tgt = params.get("target_pct")
-        stp = params.get("stop_pct")
-        parts = []
-        if tgt is not None:
-            try:
-                parts.append(f"Target,{float(tgt):g}%")
-            except (ValueError, TypeError):
-                parts.append(f"Target,{tgt}%")
-        if stp is not None:
-            try:
-                parts.append(f"Stop,{float(stp):g}%")
-            except (ValueError, TypeError):
-                parts.append(f"Stop,{stp}%")
-        rule_summary = "-".join(parts)
+        rule_summary = _format_rule_summary(params)
 
         dt = datetime.fromisoformat(run["started_at"])
         if dt.tzinfo is None:
