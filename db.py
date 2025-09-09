@@ -109,6 +109,19 @@ SCHEMA = [
     );
     """,
     "CREATE INDEX IF NOT EXISTS idx_run_results_run ON run_results(run_id);",
+    # Scan tasks for cross-worker communication
+    """
+    CREATE TABLE IF NOT EXISTS scan_tasks (
+        id TEXT PRIMARY KEY,
+        total INTEGER,
+        done INTEGER,
+        percent REAL,
+        state TEXT,
+        message TEXT,
+        ctx TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+    """,
 ]
 
 
