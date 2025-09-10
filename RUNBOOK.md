@@ -14,6 +14,10 @@ Adjust these env vars if your plan changes.
 - `python scripts/nightly_etl.py`
 - Runs at 20:15 ET by default and heals gaps for last 3 days.
 
+## Gap Fill
+- Use `services.price_store.detect_gaps` to identify missing bars.
+- Fetch via `polygon_client.fetch_polygon_prices` and `upsert_bars` to heal.
+
 ## Rotate API Key
 - Update `POLYGON_API_KEY` in environment or `.env` and restart processes.
 

@@ -1,8 +1,8 @@
 import logging
+import os
 import sqlite3
 from pathlib import Path
-from typing import Dict, Any, List, Optional
-import os
+from typing import Optional
 
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
@@ -10,9 +10,9 @@ from sqlalchemy.engine import Engine
 try:  # pragma: no cover - prefer real Alembic if available
     from alembic import command as alembic_command
     from alembic.config import Config as AlembicConfig
-except Exception:  # pragma: no cover - fallback stub
-    from alembic_stub import command as alembic_command
-    from alembic_stub.config import Config as AlembicConfig
+except ImportError:  # pragma: no cover - fallback stub
+    from alembic_stub import command as alembic_command  # type: ignore[no-redef]
+    from alembic_stub.config import Config as AlembicConfig  # type: ignore[assignment,no-redef]
 
 from utils import now_et
 
@@ -40,6 +40,7 @@ def get_engine() -> Engine:
         _ENGINE = create_engine(url, future=True)
     return _ENGINE
 
+
 SCHEMA = [
     # Settings singleton row
     """
@@ -56,7 +57,16 @@ SCHEMA = [
     """,
     """
     INSERT OR IGNORE INTO settings
-      (id, smtp_user, smtp_pass, recipients, scheduler_enabled, throttle_minutes, last_boundary, last_run_at)
+      (
+        id,
+        smtp_user,
+        smtp_pass,
+        recipients,
+        scheduler_enabled,
+        throttle_minutes,
+        last_boundary,
+        last_run_at
+      )
     VALUES
       (1, '', '', '', 0, 60, '', '');
     """,

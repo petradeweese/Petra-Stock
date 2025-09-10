@@ -1,15 +1,10 @@
 import asyncio
-import time
-import json
-import httpx
-import pytest
-
-import asyncio
-import time
-import httpx
-import pytest
 import sys
+import time
 from pathlib import Path
+
+import httpx
+import pytest
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
@@ -59,7 +54,6 @@ def test_jitter_present(monkeypatch):
         return httpx.Response(200, json={"ok": True})
 
     install_mock(monkeypatch, handler)
-    start = time.monotonic()
     asyncio.run(http_client.get_json("http://test/jitter"))
     # compute deltas between retries
     waits = [t2 - t1 for t1, t2 in zip(calls, calls[1:4])]
@@ -79,7 +73,9 @@ def test_rate_limiter(monkeypatch):
     install_mock(monkeypatch, handler)
 
     async def run_all():
-        await asyncio.gather(*[http_client.get_json("http://test/rl") for _ in range(10)])
+        await asyncio.gather(
+            *[http_client.get_json("http://test/rl") for _ in range(10)]
+        )
 
     asyncio.run(run_all())
     # Ensure no more than 2 requests occur within any one second window
@@ -135,7 +131,8 @@ def test_fetch_prices_batching(monkeypatch):
                             }
                         ],
                     }
-                    for s in symbols if s
+                    for s in symbols
+                    if s
                 ]
             }
         }
@@ -150,9 +147,10 @@ def test_fetch_prices_batching(monkeypatch):
 
 def test_progress_polling_does_not_hit_yahoo(monkeypatch):
     sys.path.append(str(Path(__file__).resolve().parents[1]))
-    import routes
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
+
+    import routes
 
     # Stub Yahoo requests via http_client.get_json
     calls = 0
@@ -187,3 +185,24 @@ def test_progress_polling_does_not_hit_yahoo(monkeypatch):
     # Wait for task to finish
     time.sleep(0.2)
     assert calls == 1
+
+
+def test_rate_limiter_load(monkeypatch):
+    http_client.set_rate_limit("load", rate=100, capacity=100)
+    call_times: list[float] = []
+
+    async def handler(request):
+        call_times.append(time.monotonic())
+        return httpx.Response(200, json={"ok": True})
+
+    install_mock(monkeypatch, handler)
+
+    async def run_all():
+        await asyncio.gather(
+            *[http_client.get_json("http://load/rl") for _ in range(250)]
+        )
+
+    asyncio.run(run_all())
+    for i, t in enumerate(call_times):
+        window = [x for x in call_times if 0 <= x - t < 1]
+        assert len(window) <= 100

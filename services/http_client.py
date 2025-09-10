@@ -1,10 +1,10 @@
 import asyncio
+import logging
 import os
 import random
 import time
-import logging
-from typing import Dict, Optional, Tuple, Callable, Deque
-from collections import deque, defaultdict
+from collections import defaultdict, deque
+from typing import Callable, Deque, Dict, Optional, Tuple
 
 import httpx
 
@@ -38,7 +38,7 @@ class TokenBucket:
     def __init__(self, rate: float, capacity: int) -> None:
         self.rate = rate
         self.capacity = capacity
-        self.tokens = capacity
+        self.tokens: float = capacity
         self.updated = time.monotonic()
 
     def _add_new_tokens(self) -> None:
@@ -62,7 +62,10 @@ def get_client() -> httpx.AsyncClient:
         _client = httpx.AsyncClient(
             http2=True,
             timeout=10.0,
-            limits=httpx.Limits(max_connections=MAX_CONCURRENCY * 4, max_keepalive_connections=MAX_CONCURRENCY * 2),
+            limits=httpx.Limits(
+                max_connections=MAX_CONCURRENCY * 4,
+                max_keepalive_connections=MAX_CONCURRENCY * 2,
+            ),
         )
     return _client
 
@@ -192,15 +195,32 @@ async def request(method: str, url: str, **kwargs) -> httpx.Response:
                     retries = 0
                     continue
 
-                wait = retry_after if retry_after is not None else min(64, 2 ** retries)
-                logger.warning("rate_limited host=%s wait=%.2fs", host, wait)
+                wait = retry_after if retry_after is not None else min(64, 2**retries)
+                logger.warning(
+                    "rate_limited host=%s wait=%.2fs retry_after=%s",
+                    host,
+                    wait,
+                    retry_after,
+                )
             else:
-                base = retry_after if retry_after is not None else 0.5 * (2 ** retries)
+                base = retry_after if retry_after is not None else 0.5 * (2**retries)
                 wait = base + random.uniform(0.2, 0.3)
+                logger.warning(
+                    "http_retry host=%s status=%s wait=%.2fs",
+                    host,
+                    status,
+                    wait,
+                )
             if _wait_cb:
                 _wait_cb(wait)
             retries += 1
-            logger.info("http_wait host=%s wait=%.2fs retries=%d", host, wait, retries)
+            logger.info(
+                "http_wait host=%s wait=%.2fs retries=%d retry_after=%s",
+                host,
+                wait,
+                retries,
+                retry_after,
+            )
             await asyncio.sleep(wait)
             if _wait_cb:
                 _wait_cb(0)
