@@ -38,18 +38,24 @@ def upsert_bars(symbol: str, df: pd.DataFrame, conn=None) -> int:
         df.index = df.index.tz_localize("UTC")
     else:
         df.index = df.index.tz_convert("UTC")
-    rows = [
-        (
-            symbol,
-            ts.isoformat(),
-            float(row.get("Open", 0.0) if pd.notna(row.get("Open", 0.0)) else None),  # type: ignore[arg-type]
-            float(row.get("High", 0.0) if pd.notna(row.get("High", 0.0)) else None),  # type: ignore[arg-type]
-            float(row.get("Low", 0.0) if pd.notna(row.get("Low", 0.0)) else None),  # type: ignore[arg-type]
-            float(row.get("Close", 0.0) if pd.notna(row.get("Close", 0.0)) else None),  # type: ignore[arg-type]
-            int(row.get("Volume", 0) if pd.notna(row.get("Volume", 0)) else 0),
+    rows = []
+    for ts, row in df.iterrows():
+        open_val = row.get("Open")
+        high_val = row.get("High")
+        low_val = row.get("Low")
+        close_val = row.get("Close")
+        volume_val = row.get("Volume")
+        rows.append(
+            (
+                symbol,
+                ts.isoformat(),
+                float(open_val) if pd.notna(open_val) else None,
+                float(high_val) if pd.notna(high_val) else None,
+                float(low_val) if pd.notna(low_val) else None,
+                float(close_val) if pd.notna(close_val) else None,
+                int(volume_val) if pd.notna(volume_val) else 0,
+            )
         )
-        for ts, row in df.iterrows()
-    ]
     close_conn = False
     if conn is None:
         conn = _open_conn()
