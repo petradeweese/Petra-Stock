@@ -38,13 +38,13 @@ def test_forward_tracking_only_future_bars(tmp_path, monkeypatch):
     df_update = pd.DataFrame({"Close": [100.0, 102.0]}, index=[ts0, ts1])
     calls = {"n": 0}
 
-    def fake_fetch_prices(tickers, interval, lookback_years):
+    def fake_get_prices(tickers, interval, start, end):
         calls["n"] += 1
         if calls["n"] <= 2:
             return {tickers[0]: df_create}
         return {tickers[0]: df_update}
 
-    monkeypatch.setattr(routes, "fetch_prices", fake_fetch_prices)
+    monkeypatch.setattr(routes, "get_prices", fake_get_prices)
 
     class DummyResponse:
         def __init__(self, name, context):
