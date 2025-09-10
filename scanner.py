@@ -2,7 +2,7 @@ import logging
 from typing import Dict, Any, Optional, Callable, List, Tuple
 
 import pandas as pd
-from services.market_data import fetch_prices
+from services.market_data import fetch_prices, window_from_lookback
 from services.price_utils import DataUnavailableError
 
 # Adapter to the original ROI engine
@@ -175,6 +175,51 @@ def _install_real_engine_adapter():
 _PRICE_DATA: Dict[Tuple[str, str, float], pd.DataFrame] = {}
 
 
+def _interval_to_freq(interval: str) -> str:
+    """Translate interval strings like "15m" into pandas frequency codes."""
+    interval = interval.strip().lower()
+    if interval.endswith("m"):
+        return f"{int(interval[:-1])}T"
+    if interval.endswith("h"):
+        return f"{int(interval[:-1])}H"
+    return "1D"
+
+
+def _ensure_coverage(ticker: str, interval: str, lookback_years: float) -> bool:
+    """Return ``True`` if price data coverage is >=95% for the window."""
+    start, end = window_from_lookback(lookback_years)
+    key = (ticker, interval, lookback_years)
+    df = _PRICE_DATA.get(key)
+    if df is None:
+        df = fetch_prices([ticker], interval, lookback_years).get(ticker, pd.DataFrame())
+        _PRICE_DATA[key] = df
+
+    freq = _interval_to_freq(interval)
+    expected = len(pd.date_range(start=start, end=end, freq=freq))
+    bars = len(df) if df is not None else 0
+    coverage = bars / expected if expected else 0.0
+    if bars > 0 and coverage >= 0.95:
+        return True
+
+    # gap-fill fetch once
+    df = fetch_prices([ticker], interval, lookback_years).get(ticker, pd.DataFrame())
+    _PRICE_DATA[key] = df
+    bars = len(df) if df is not None else 0
+    expected = len(pd.date_range(start=start, end=end, freq=freq))
+    coverage = bars / expected if expected else 0.0
+    if bars > 0 and coverage >= 0.95:
+        return True
+
+    logger.info(
+        "skip_no_data symbol=%s window=%s:%s bars=%d",
+        ticker,
+        start.date(),
+        end.date(),
+        bars,
+    )
+    return False
+
+
 def preload_prices(tickers: List[str], interval: str, lookback_years: float) -> None:
     """Preload price data for a batch of tickers."""
     try:
@@ -285,39 +330,56 @@ def _desktop_like_single(ticker: str, params: dict) -> dict:
         return {}
 
 
-def compute_scan_for_ticker(ticker: str, params: Dict[str, Any]) -> Dict[str, Any]:
+def compute_scan_for_ticker(ticker: str, params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """
     Final override: delegate to _desktop_like_single so the web API matches the desktop scanner.
     Handles BOTH by evaluating UP and DOWN and returning the better-scoring row.
+    Returns ``None`` when price data is unavailable.
     """
     try:
         dirn = str(params.get("direction", "UP")).upper()
     except Exception:
         dirn = "UP"
 
-    if dirn == "BOTH":
-        a = dict(params)
-        a["direction"] = "UP"
-        b = dict(params)
-        b["direction"] = "DOWN"
-        try:
+    interval = params.get("interval", "15m")
+    lookback_years = float(params.get("lookback_years", 2.0))
+    if not _ensure_coverage(ticker, interval, lookback_years):
+        return None
+
+    try:
+        if dirn == "BOTH":
+            a = dict(params)
+            a["direction"] = "UP"
+            b = dict(params)
+            b["direction"] = "DOWN"
             ra = _desktop_like_single(ticker, a)
             rb = _desktop_like_single(ticker, b)
-        except DataUnavailableError:
-            raise
-        picks = [r for r in (ra, rb) if isinstance(r, dict) and r]
-        if not picks:
-            return {}
-        return sorted(
-            picks,
-            key=lambda r: (
-                r.get("sharpe", 0.0),
-                r.get("avg_roi_pct", 0.0),
-                r.get("hit_pct", 0.0),
-                r.get("support", 0),
-                r.get("stability", 0.0),
-            ),
-            reverse=True,
-        )[0]
-    else:
-        return _desktop_like_single(ticker, params)
+            picks = [r for r in (ra, rb) if isinstance(r, dict) and r]
+            if not picks:
+                return {}
+            return sorted(
+                picks,
+                key=lambda r: (
+                    r.get("sharpe", 0.0),
+                    r.get("avg_roi_pct", 0.0),
+                    r.get("hit_pct", 0.0),
+                    r.get("support", 0),
+                    r.get("stability", 0.0),
+                ),
+                reverse=True,
+            )[0]
+        else:
+            return _desktop_like_single(ticker, params)
+    except DataUnavailableError:
+        start, end = window_from_lookback(lookback_years)
+        key = (ticker, interval, lookback_years)
+        df = _PRICE_DATA.get(key)
+        bars = len(df) if df is not None else 0
+        logger.info(
+            "skip_no_data symbol=%s window=%s:%s bars=%d",
+            ticker,
+            start.date(),
+            end.date(),
+            bars,
+        )
+        return None
