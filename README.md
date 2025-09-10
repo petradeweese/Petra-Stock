@@ -34,3 +34,36 @@ suite with:
 ```bash
 pytest
 ```
+
+## Environment
+
+Copy `.env.example` to `.env` and adjust:
+
+- `POLYGON_API_KEY` – API key for Polygon.io
+- `DATABASE_URL` – database connection string
+- `POLY_RPS` / `POLY_BURST` – Polygon rate limit settings
+- `DB_CACHE_TTL` – in-process DB cache TTL
+- `POLYGON_INCLUDE_PREPOST` – include pre/post market bars when true
+
+## Backfill and ETL
+
+Populate the database using the backfill script which resumes from checkpoints:
+
+```bash
+python scripts/backfill_polygon.py symbols.txt
+```
+
+Nightly ETL can keep data fresh:
+
+```bash
+python scripts/nightly_etl.py symbols.txt
+```
+
+## Gap Fill
+
+Run the nightly ETL to heal recent gaps or fetch missing bars manually using
+`detect_gaps` and `fetch_polygon_prices`.
+
+## Rotate API Key
+
+Update `POLYGON_API_KEY` in your environment or `.env` file and restart the process.

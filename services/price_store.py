@@ -1,9 +1,10 @@
-import time
-import sqlite3
-from typing import Dict, List, Optional, Tuple
-import pandas as pd
 import logging
 import os
+import sqlite3
+import time
+from typing import Dict, List, Tuple
+
+import pandas as pd  # type: ignore[import-untyped]
 
 import db
 
@@ -41,10 +42,10 @@ def upsert_bars(symbol: str, df: pd.DataFrame, conn=None) -> int:
         (
             symbol,
             ts.isoformat(),
-            float(row.get("Open", 0.0) if pd.notna(row.get("Open", 0.0)) else None),
-            float(row.get("High", 0.0) if pd.notna(row.get("High", 0.0)) else None),
-            float(row.get("Low", 0.0) if pd.notna(row.get("Low", 0.0)) else None),
-            float(row.get("Close", 0.0) if pd.notna(row.get("Close", 0.0)) else None),
+            float(row.get("Open", 0.0) if pd.notna(row.get("Open", 0.0)) else None),  # type: ignore[arg-type]
+            float(row.get("High", 0.0) if pd.notna(row.get("High", 0.0)) else None),  # type: ignore[arg-type]
+            float(row.get("Low", 0.0) if pd.notna(row.get("Low", 0.0)) else None),  # type: ignore[arg-type]
+            float(row.get("Close", 0.0) if pd.notna(row.get("Close", 0.0)) else None),  # type: ignore[arg-type]
             int(row.get("Volume", 0) if pd.notna(row.get("Volume", 0)) else 0),
         )
         for ts, row in df.iterrows()
@@ -75,7 +76,9 @@ def upsert_bars(symbol: str, df: pd.DataFrame, conn=None) -> int:
     return len(rows)
 
 
-def get_prices_from_db(symbols: List[str], start, end, conn=None) -> Dict[str, pd.DataFrame]:
+def get_prices_from_db(
+    symbols: List[str], start, end, conn=None
+) -> Dict[str, pd.DataFrame]:
     """Retrieve bars for symbols between start and end timestamps with caching."""
     close_conn = False
     results: Dict[str, pd.DataFrame] = {}
@@ -90,12 +93,17 @@ def get_prices_from_db(symbols: List[str], start, end, conn=None) -> Dict[str, p
             conn = _open_conn()
             close_conn = True
         cur = conn.execute(
-            f"SELECT ts, open, high, low, close, volume FROM {TABLE_15M} WHERE symbol=? AND ts>=? AND ts<=? ORDER BY ts",
+            (
+                f"SELECT ts, open, high, low, close, volume FROM {TABLE_15M} "
+                "WHERE symbol=? AND ts>=? AND ts<=? ORDER BY ts"
+            ),
             (sym, start.isoformat(), end.isoformat()),
         )
         rows = cur.fetchall()
         if rows:
-            df = pd.DataFrame(rows, columns=["ts", "Open", "High", "Low", "Close", "Volume"])
+            df = pd.DataFrame(
+                rows, columns=["ts", "Open", "High", "Low", "Close", "Volume"]
+            )
             df["ts"] = pd.to_datetime(df["ts"], utc=True)
             df = df.set_index("ts")
         else:
@@ -108,8 +116,15 @@ def get_prices_from_db(symbols: List[str], start, end, conn=None) -> Dict[str, p
 
 
 def detect_gaps(symbol: str, start, end, conn=None) -> List[pd.Timestamp]:
-    """Return list of expected 15m timestamps missing from DB."""
+    """Return list of expected 15m timestamps missing from DB.
+
+    The interval is treated as ``[start, end)`` so the ``end`` timestamp is
+    exclusive. This prevents an off-by-one error when the range boundary falls
+    exactly on a bar start.
+    """
     data = get_prices_from_db([symbol], start, end, conn=conn)[symbol]
-    expected = pd.date_range(start=start, end=end, freq="15min", tz="UTC")
+    expected = pd.date_range(
+        start=start, end=end, freq="15min", tz="UTC", inclusive="left"
+    )
     have = set(data.index)
     return [ts for ts in expected if ts not in have]

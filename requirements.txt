@@ -14,3 +14,10 @@ uvloop
 pyarrow>=15.0.0
 prometheus-client
 alembic
+
+# development tooling
+pre-commit
+ruff
+black
+isort
+mypy
