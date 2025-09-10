@@ -33,10 +33,17 @@ except Exception:
 async def _fetch_single(symbol: str, start: dt.datetime, end: dt.datetime, multiplier: int = 15, timespan: str = "minute") -> pd.DataFrame:
     api_key = _api_key()
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-    url = (
+
+    start_ms = int(start.timestamp() * 1000)
+    end_ms = int(end.timestamp() * 1000)
+    base_url = (
         f"https://api.polygon.io/v2/aggs/ticker/{symbol}/range/{multiplier}/{timespan}/"
-        f"{start.isoformat()}/{end.isoformat()}?adjusted=true&sort=asc&limit=50000"
+        f"{start_ms}/{end_ms}?adjusted=true&sort=asc&limit=50000"
     )
+    url = f"{base_url}&apiKey={api_key}" if api_key else base_url
+    log_url = url.replace(api_key, "***") if api_key else url
+    logger.info("polygon_request symbol=%s url=%s", symbol, log_url)
+
     all_results = []
     next_url: Optional[str] = url
     pages = 0
