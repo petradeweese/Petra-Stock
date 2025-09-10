@@ -8,7 +8,6 @@ from typing import List, Dict, Tuple
 import asyncio
 
 import pandas as pd
-import httpx
 
 from services import http_client
 from services.price_utils import normalize_price_df
@@ -61,9 +60,8 @@ _MEM_CACHE: Dict[Tuple[str, str, str], pd.DataFrame] = {}
 # callers share a single request budget.  Defaults are intentionally conservative
 # so the scanner favors reliability over speed; they can be tuned via env vars.
 YF_RPS = float(os.getenv("YF_MAX_RPS", "1"))
-YF_BURST = int(os.getenv("YF_MAX_BURST", "1"))
-YF_BATCH_SIZE = int(os.getenv("YF_BATCH_SIZE", "10"))
-YF_BATCH_MAX_RETRIES = int(os.getenv("YF_BATCH_MAX_RETRIES", "3"))
+YF_BURST = int(os.getenv("YF_MAX_BURST", "2"))
+YF_BATCH_SIZE = int(os.getenv("YF_BATCH_SIZE", "5"))
 try:
     http_client.set_rate_limit("query1.finance.yahoo.com", YF_RPS, YF_BURST)
 except Exception:  # pragma: no cover - best effort
@@ -129,7 +127,10 @@ def _normalize_ohlcv(records: List[dict]) -> pd.DataFrame:
 async def _download_batch(batch: List[str], period: str, interval: str) -> Dict[str, pd.DataFrame]:
     """Download a batch of tickers via Yahoo's multi-symbol spark endpoint.
 
-    Retries with exponential backoff when Yahoo responds with HTTP 429.
+    The heavy lifting for retries and rate limiting is delegated to
+    :mod:`http_client`, which provides backoff with jitter, per-host rate
+    limiting, request coalescing and caching.  This helper simply converts the
+    returned JSON payload into a mapping of ticker->DataFrame.
     """
     symbols = ",".join(batch)
     url = (
@@ -137,23 +138,10 @@ async def _download_batch(batch: List[str], period: str, interval: str) -> Dict[
         f"?symbols={symbols}&interval={interval}&range={period}&includePrePost=false&events=div%2Csplit"
     )
 
-    data = None
-    for attempt in range(YF_BATCH_MAX_RETRIES):
-        try:
-            data = await http_client.get_json(url)
-            break
-        except httpx.HTTPStatusError as e:
-            if e.response is not None and e.response.status_code == 429:
-                wait = 2 ** attempt
-                logger.warning("yahoo_429 symbols=%s wait=%.2fs", symbols, wait)
-                await asyncio.sleep(wait)
-                continue
-            logger.error("download error %s: %r", symbols, e)
-            return {t: pd.DataFrame() for t in batch}
-        except Exception as e:  # pragma: no cover - network failure
-            logger.error("download error %s: %r", symbols, e)
-            return {t: pd.DataFrame() for t in batch}
-    else:
+    try:
+        data = await http_client.get_json(url)
+    except Exception as e:  # pragma: no cover - network failure
+        logger.error("download error %s: %r", symbols, e)
         return {t: pd.DataFrame() for t in batch}
 
     results: Dict[str, pd.DataFrame] = {t: pd.DataFrame() for t in batch}
