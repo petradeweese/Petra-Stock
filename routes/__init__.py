@@ -23,7 +23,6 @@ from indices import SP100, TOP150, TOP250
 from db import DB_PATH, get_db, get_settings
 from scanner import compute_scan_for_ticker, preload_prices
 from services.market_data import get_prices, window_from_lookback
-from services.price_utils import DataUnavailableError
 from utils import now_et, TZ
 import pandas as pd
 
@@ -192,11 +191,10 @@ def _perform_scan(
         ticker = future_to_ticker[fut]
         try:
             r = fut.result()
-            if r:
+            if r is None:
+                skipped_missing_data += 1
+            elif r:
                 rows.append(r)
-        except DataUnavailableError:
-            skipped_missing_data += 1
-            logger.info("skip=%s reason=no_close_or_empty", ticker)
         except Exception as e:
             logger.error("scan failed for %s: %s", ticker, e)
         done += 1
