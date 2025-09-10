@@ -3,7 +3,8 @@ import os
 import random
 import time
 import logging
-from typing import Dict, Optional, Tuple, Callable
+from typing import Dict, Optional, Tuple, Callable, Deque
+from collections import deque, defaultdict
 
 import httpx
 
@@ -30,6 +31,7 @@ _wait_cb: Optional[Callable[[float], None]] = None
 
 # Track sustained 429 responses to implement a circuit breaker.
 _circuit: Dict[str, Dict[str, float]] = {}
+_req_counts: Dict[str, Deque[float]] = defaultdict(deque)
 
 
 class TokenBucket:
@@ -94,6 +96,7 @@ async def request(method: str, url: str, **kwargs) -> httpx.Response:
         key = f"{method}:{url}"
         cached = _CACHE.get(key)
         if cached and cached[0] > time.monotonic():
+            logger.info("http_cache_hit url=%s", url)
             return cached[1]
         inflight = _INFLIGHT.get(key)
         if inflight:
@@ -104,6 +107,7 @@ async def request(method: str, url: str, **kwargs) -> httpx.Response:
         host = httpx.URL(url).host
         limiter = _rate_limiters.get(host)
         retries = 0
+        start_time = time.monotonic()
         cb_state = _circuit.setdefault(host, {"first": 0.0, "opened": 0.0})
 
         while True:
@@ -118,7 +122,11 @@ async def request(method: str, url: str, **kwargs) -> httpx.Response:
                     _wait_cb(0)
 
             if limiter:
+                before_token = time.monotonic()
                 await limiter.consume()
+                waited = time.monotonic() - before_token
+                if waited > 0:
+                    logger.info("rate_wait host=%s wait=%.2fs", host, waited)
 
             try:
                 async with _semaphore:
@@ -131,6 +139,21 @@ async def request(method: str, url: str, **kwargs) -> httpx.Response:
                 if _wait_cb:
                     _wait_cb(0)
                 cb_state["first"] = 0.0
+                now = time.monotonic()
+                duration = now - start_time
+                dq = _req_counts[host]
+                dq.append(now)
+                while dq and now - dq[0] > 60:
+                    dq.popleft()
+                rpm = len(dq)
+                logger.info(
+                    "http_request method=%s url=%s retries=%d duration=%.2f rpm=%d",
+                    method,
+                    url,
+                    retries,
+                    duration,
+                    rpm,
+                )
                 return resp
 
             status = resp.status_code if resp else None
@@ -172,15 +195,12 @@ async def request(method: str, url: str, **kwargs) -> httpx.Response:
                 wait = retry_after if retry_after is not None else min(64, 2 ** retries)
                 logger.warning("rate_limited host=%s wait=%.2fs", host, wait)
             else:
-                wait = retry_after if retry_after is not None else (
-                    0.5 * (2 ** retries) + random.uniform(0, 0.5)
-                )
-
-            # Add +/-20%% jitter to the wait to avoid thundering herd.
-            wait *= random.uniform(0.8, 1.2)
+                base = retry_after if retry_after is not None else 0.5 * (2 ** retries)
+                wait = base + random.uniform(0.2, 0.3)
             if _wait_cb:
                 _wait_cb(wait)
             retries += 1
+            logger.info("http_wait host=%s wait=%.2fs retries=%d", host, wait, retries)
             await asyncio.sleep(wait)
             if _wait_cb:
                 _wait_cb(0)

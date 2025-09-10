@@ -2,6 +2,10 @@ import logging
 import sqlite3
 from pathlib import Path
 from typing import Dict, Any, List, Optional
+import os
+
+from sqlalchemy import create_engine
+from sqlalchemy.engine import Engine
 
 try:  # pragma: no cover - prefer real Alembic if available
     from alembic import command as alembic_command
@@ -15,6 +19,26 @@ from utils import now_et
 logger = logging.getLogger(__name__)
 
 DB_PATH = "patternfinder.db"
+# Connection URL used by SQLAlchemy.  Defaults to the local SQLite file but can
+# be overridden with e.g. ``postgresql+psycopg2://user:pass@host/db`` for
+# production deployments.  Using SQLAlchemy here keeps the code database
+# agnostic between SQLite (tests) and Postgres (prod).
+_ENV_DATABASE_URL = os.getenv("DATABASE_URL")
+
+_ENGINE: Optional[Engine] = None
+
+
+def _get_database_url() -> str:
+    return _ENV_DATABASE_URL or f"sqlite:///{DB_PATH}"
+
+
+def get_engine() -> Engine:
+    """Return a module-level SQLAlchemy engine, recreating if DB path changes."""
+    global _ENGINE
+    url = _get_database_url()
+    if _ENGINE is None or str(_ENGINE.url) != url:
+        _ENGINE = create_engine(url, future=True)
+    return _ENGINE
 
 SCHEMA = [
     # Settings singleton row
@@ -127,6 +151,19 @@ SCHEMA = [
     );
     """,
     "CREATE INDEX IF NOT EXISTS idx_run_results_run ON run_results(run_id);",
+    # 15-minute bars for market data
+    """
+    CREATE TABLE IF NOT EXISTS bars_15m (
+        symbol TEXT NOT NULL,
+        ts TIMESTAMPTZ NOT NULL,
+        open REAL,
+        high REAL,
+        low REAL,
+        close REAL,
+        volume BIGINT,
+        PRIMARY KEY(symbol, ts)
+    );
+    """,
     # Scan tasks for cross-worker communication
     """
     CREATE TABLE IF NOT EXISTS scan_tasks (
@@ -146,7 +183,7 @@ SCHEMA = [
 def run_migrations() -> None:
     """Apply database migrations using Alembic."""
     cfg = AlembicConfig(str(Path(__file__).with_name("alembic.ini")))
-    cfg.set_main_option("sqlalchemy.url", f"sqlite:///{DB_PATH}")
+    cfg.set_main_option("sqlalchemy.url", _get_database_url())
     alembic_command.upgrade(cfg, "head")
 
 
@@ -157,9 +194,16 @@ def init_db():
 def get_db():
     # Create a new connection for each request and allow it to be used from
     # the request-handling thread even though the connection is created in the
-    # dependency threadpool.
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
+    # dependency threadpool.  When running against SQLite (the common test
+    # setup) we use the sqlite3 module directly so row_factory works as
+    # expected; otherwise we fall back to SQLAlchemy's engine.
+    if _ENV_DATABASE_URL:
+        conn = get_engine().raw_connection()
+    else:
+        conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+    if hasattr(conn, "row_factory"):
+        conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
         yield cursor

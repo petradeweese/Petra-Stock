@@ -2,7 +2,7 @@ import logging
 from typing import Dict, Any, Optional, Callable, List, Tuple
 
 import pandas as pd
-from services.data_fetcher import fetch_prices
+from services.market_data import fetch_prices
 from services.price_utils import DataUnavailableError
 
 # Adapter to the original ROI engine

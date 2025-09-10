@@ -22,7 +22,7 @@ from prometheus_client import Counter, Histogram, CONTENT_TYPE_LATEST, generate_
 from indices import SP100, TOP150, TOP250
 from db import DB_PATH, get_db, get_settings
 from scanner import compute_scan_for_ticker, preload_prices
-from services.data_fetcher import fetch_prices
+from services.market_data import get_prices, window_from_lookback
 from services.price_utils import DataUnavailableError
 from utils import now_et, TZ
 import pandas as pd
@@ -343,7 +343,8 @@ def _window_to_minutes(value: float, unit: str) -> int:
 
 
 def _create_forward_test(db: sqlite3.Cursor, fav: dict) -> None:
-    data = fetch_prices([fav["ticker"]], fav.get("interval", "15m"), fav.get("lookback_years", 1.0)).get(fav["ticker"])
+    start, end = window_from_lookback(fav.get("lookback_years", 1.0))
+    data = get_prices([fav["ticker"]], fav.get("interval", "15m"), start, end).get(fav["ticker"])
     if data is None or getattr(data, "empty", True):
         return
     last_bar = data.iloc[-1]
@@ -392,7 +393,8 @@ def _update_forward_tests(db: sqlite3.Cursor) -> None:
                 "UPDATE forward_tests SET status='running', last_run_at=?, updated_at=?, runs_count=runs_count+1 WHERE id=?",
                 (now_iso, now_iso, row["id"]),
             )
-            data = fetch_prices([row["ticker"]], row["interval"], 1.0).get(row["ticker"])
+            start, end = window_from_lookback(1.0)
+            data = get_prices([row["ticker"]], row["interval"], start, end).get(row["ticker"])
             if data is None or getattr(data, "empty", True):
                 db.execute(
                     "UPDATE forward_tests SET status='queued' WHERE id=?",
