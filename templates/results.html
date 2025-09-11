@@ -19,11 +19,11 @@
         <tr>
           <th><button class="linklike" data-sort="ticker">Ticker</button></th>
           <th><button class="linklike" data-sort="direction">Dir</button></th>
-          <th><button class="linklike" data-sort="avg_roi_pct">ROI%</button></th>
-          <th><button class="linklike" data-sort="hit_pct">Hit%</button></th>
-          <th>Supp</th>
-          <th>DD%</th>
-          <th>Stability</th>
+          <th class="num"><button class="linklike" data-sort="avg_roi_pct">ROI%</button></th>
+          <th class="num"><button class="linklike" data-sort="hit_pct">Hit%</button></th>
+          <th class="num">Supp</th>
+          <th class="num">DD%</th>
+          <th class="num">Stability</th>
           <th>Rule</th>
         </tr>
       </thead>
@@ -40,11 +40,11 @@
             data-rule="{{ r.rule|e }}">
           <td>{{ r.ticker }}</td>
           <td>{{ r.direction }}</td>
-          <td>{{ '{:.0f}'.format(r.avg_roi_pct * 100 if r.avg_roi_pct is not none and r.avg_roi_pct <= 1 else r.avg_roi_pct) }}</td>
-          <td>{{ '%.1f'|format(r.hit_pct) }}</td>
-          <td>{{ r.support }}</td>
-          <td>{{ '{:.0f}'.format(r.avg_dd_pct * 100 if r.avg_dd_pct is not none and r.avg_dd_pct <= 1 else r.avg_dd_pct) }}</td>
-          <td>{{ '{:.2f}'.format(r.get('stability', 0)) }}</td>
+          <td class="num roi {% if r.avg_roi_pct > 0 %}pos{% elif r.avg_roi_pct < 0 %}neg{% endif %}">{{ '{:.0f}'.format(r.avg_roi_pct * 100 if r.avg_roi_pct is not none and r.avg_roi_pct <= 1 else r.avg_roi_pct) }}</td>
+          <td class="num hit {% if r.hit_pct >= 90 %}high{% endif %}">{{ '%.1f'|format(r.hit_pct) }}</td>
+          <td class="num">{{ r.support }}</td>
+          <td class="num">{{ '{:.0f}'.format(r.avg_dd_pct * 100 if r.avg_dd_pct is not none and r.avg_dd_pct <= 1 else r.avg_dd_pct) }}</td>
+          <td class="num">{{ '{:.2f}'.format(r.get('stability', 0)) }}</td>
           <td class="rule-td" title="{{ r.rule }}">{{ r.rule }}</td>
         </tr>
         {% endfor %}

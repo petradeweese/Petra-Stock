@@ -1,6 +1,7 @@
 fastapi
 uvicorn
 pandas
+pandas-market-calendars
 numpy
 yfinance>=0.2.52
 ta
@@ -13,6 +14,7 @@ httpx[http2]>=0.27.0
 uvloop
 pyarrow>=15.0.0
 prometheus-client
+pydantic
 alembic
 
 # development tooling

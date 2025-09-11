@@ -1,7 +1,9 @@
+# ruff: noqa: E501
 import logging
-from typing import Dict, Any, Optional, Callable, List, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import pandas as pd
+
 from services.market_data import fetch_prices, window_from_lookback
 from services.price_utils import DataUnavailableError
 
@@ -21,6 +23,7 @@ def _install_real_engine_adapter():
     global _real_scan_single
     try:
         import importlib
+
         mod = importlib.import_module("pattern_finder_app")
 
         fn = None
@@ -95,11 +98,13 @@ def _install_real_engine_adapter():
             }
 
         if mode in ("threaded", "parallel"):
+
             def wrapper(ticker: str, params: Dict[str, Any]) -> Dict[str, Any]:
                 try:
                     df = fn([ticker], params)
                     try:
                         import pandas as pd
+
                         if isinstance(df, pd.DataFrame) and not df.empty:
                             row = df.iloc[0].to_dict()
                             return _row_to_dict(row, params)
@@ -115,7 +120,9 @@ def _install_real_engine_adapter():
                 except Exception as e:
                     logger.error("scan_* error for %s: %r", ticker, e)
                     return {}
+
         else:
+
             def wrapper(ticker: str, params: Dict[str, Any]) -> Dict[str, Any]:
                 try:
                     model, df_te, _ = fn(
@@ -149,7 +156,9 @@ def _install_real_engine_adapter():
                     row = df_te.iloc[0].to_dict()
                     mapped = {
                         "ticker": ticker,
-                        "direction": row.get("direction", params.get("direction", "UP")),
+                        "direction": row.get(
+                            "direction", params.get("direction", "UP")
+                        ),
                         "avg_roi": row.get("avg_roi", 0.0),
                         "hit_rate": row.get("hit_rate", 0.0),
                         "support": row.get("support", 0),
@@ -191,7 +200,9 @@ def _ensure_coverage(ticker: str, interval: str, lookback_years: float) -> bool:
     key = (ticker, interval, lookback_years)
     df = _PRICE_DATA.get(key)
     if df is None:
-        df = fetch_prices([ticker], interval, lookback_years).get(ticker, pd.DataFrame())
+        df = fetch_prices([ticker], interval, lookback_years).get(
+            ticker, pd.DataFrame()
+        )
         _PRICE_DATA[key] = df
 
     freq = _interval_to_freq(interval)
@@ -201,7 +212,6 @@ def _ensure_coverage(ticker: str, interval: str, lookback_years: float) -> bool:
     if bars > 0 and coverage >= 0.95:
         return True
 
-    # gap-fill fetch once
     df = fetch_prices([ticker], interval, lookback_years).get(ticker, pd.DataFrame())
     _PRICE_DATA[key] = df
     bars = len(df) if df is not None else 0
@@ -211,13 +221,14 @@ def _ensure_coverage(ticker: str, interval: str, lookback_years: float) -> bool:
         return True
 
     logger.info(
-        "skip_no_data symbol=%s window=%s:%s bars=%d",
+        "skip_no_data symbol=%s window=%s:%s bars=%d coverage=%.2f",
         ticker,
         start.date(),
         end.date(),
         bars,
+        coverage,
     )
-    return False
+    raise DataUnavailableError(f"{ticker} coverage {coverage:.2%} <95%")
 
 
 def preload_prices(tickers: List[str], interval: str, lookback_years: float) -> None:
@@ -238,7 +249,10 @@ except Exception:
     _pfa = None
 
 if _pfa is not None:
-    def _price_lookup(ticker: str, interval: str, lookback_years: float) -> pd.DataFrame:
+
+    def _price_lookup(
+        ticker: str, interval: str, lookback_years: float
+    ) -> pd.DataFrame:
         key = (ticker, interval, lookback_years)
         df = _PRICE_DATA.get(key)
         if df is not None and not df.empty:
@@ -303,8 +317,10 @@ def _desktop_like_single(ticker: str, params: dict) -> dict:
         )
         if df is None or df.empty:
             return {}
-        df = df[(df["hit_rate"] * 100.0 >= params["scan_min_hit"]) &
-                (df["avg_dd"] * 100.0 <= params["scan_max_dd"])]
+        df = df[
+            (df["hit_rate"] * 100.0 >= params["scan_min_hit"])
+            & (df["avg_dd"] * 100.0 <= params["scan_max_dd"])
+        ]
         if df.empty:
             return {}
         r = df.sort_values(
@@ -330,7 +346,9 @@ def _desktop_like_single(ticker: str, params: dict) -> dict:
         return {}
 
 
-def compute_scan_for_ticker(ticker: str, params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def compute_scan_for_ticker(
+    ticker: str, params: Dict[str, Any]
+) -> Optional[Dict[str, Any]]:
     """
     Final override: delegate to _desktop_like_single so the web API matches the desktop scanner.
     Handles BOTH by evaluating UP and DOWN and returning the better-scoring row.
@@ -343,7 +361,11 @@ def compute_scan_for_ticker(ticker: str, params: Dict[str, Any]) -> Optional[Dic
 
     interval = params.get("interval", "15m")
     lookback_years = float(params.get("lookback_years", 2.0))
-    if not _ensure_coverage(ticker, interval, lookback_years):
+    try:
+        if not _ensure_coverage(ticker, interval, lookback_years):
+            return None
+    except DataUnavailableError as e:
+        logger.info("skip_no_data symbol=%s reason=%s", ticker, e)
         return None
 
     try:

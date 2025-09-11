@@ -20,6 +20,11 @@ CACHE_TTL = int(os.getenv("DB_CACHE_TTL", "120"))  # seconds
 
 def _open_conn():
     conn = db.get_engine().raw_connection()
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+    except Exception:
+        pass
     if hasattr(conn, "row_factory"):
         conn.row_factory = sqlite3.Row
     return conn

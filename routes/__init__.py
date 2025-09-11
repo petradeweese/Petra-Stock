@@ -1,50 +1,54 @@
+# ruff: noqa: E501
 import atexit
 import json
-import os
-from datetime import datetime
-from typing import Dict, Any, Optional, Union, Callable
 import logging
-import sqlite3
+import os
 import smtplib
+import sqlite3
 import ssl
+import time
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from email.message import EmailMessage
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
-from uuid import uuid4
 from threading import Thread
+from typing import Any, Callable, Dict, Optional, Union
+from uuid import uuid4
 
 import certifi
-import time
-from fastapi import APIRouter, Request, Form, Depends, Response
-from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
+import pandas as pd
+from fastapi import APIRouter, Depends, Form, Request, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
-from prometheus_client import Counter, Histogram, CONTENT_TYPE_LATEST, generate_latest
 
+from config import settings
+from db import DB_PATH, get_db, get_schema_status, get_settings
 from indices import SP100, TOP150, TOP250
-from db import DB_PATH, get_db, get_settings
+from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 from scanner import compute_scan_for_ticker, preload_prices
 from services.market_data import get_prices, window_from_lookback
-from utils import now_et, TZ
-import pandas as pd
+from utils import TZ, now_et
+
+from .archive import router as archive_router
 
 router = APIRouter()
 templates = Jinja2Templates(directory="templates")
 logger = logging.getLogger(__name__)
 
-from .archive import router as archive_router, _format_rule_summary
 router.include_router(archive_router)
 
 scan_duration = Histogram("scan_duration_seconds", "Duration of /scanner/run requests")
 scan_tickers = Counter("scan_tickers_total", "Tickers processed by /scanner/run")
 
 
-@router.get("/healthz")
-def healthz() -> dict:
-    return {"status": "ok"}
+@router.get("/health")
+def health() -> dict:
+    return {"status": "ok", **get_schema_status()}
 
 
-@router.get("/metrics")
-def metrics() -> Response:
-    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+if settings.metrics_enabled:
+
+    @router.get("/metrics")
+    def metrics() -> Response:
+        return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 _scan_executor: Optional[Union[ThreadPoolExecutor, ProcessPoolExecutor]] = None
@@ -178,13 +182,17 @@ def _perform_scan(
 ) -> list[dict]:
     start = time.perf_counter()
     total = len(tickers)
-    preload_prices(tickers, params.get("interval", "15m"), params.get("lookback_years", 2.0))
+    preload_prices(
+        tickers, params.get("interval", "15m"), params.get("lookback_years", 2.0)
+    )
     if progress_cb:
         progress_cb(0, total, "preloading")
     rows: list[dict] = []
     skipped_missing_data = 0
     ex = _get_scan_executor()
-    future_to_ticker = {ex.submit(compute_scan_for_ticker, t, params): t for t in tickers}
+    future_to_ticker = {
+        ex.submit(compute_scan_for_ticker, t, params): t for t in tickers
+    }
     step = max(1, int(progress_every))
     done = 0
     for fut in as_completed(future_to_ticker):
@@ -208,16 +216,32 @@ def _perform_scan(
         scan_min_hit, scan_max_dd = 0.0, 100.0
 
     rows = [
-        r for r in rows
-        if (r.get("hit_pct", 0.0) >= scan_min_hit) and (r.get("avg_dd_pct", 100.0) <= scan_max_dd)
+        r
+        for r in rows
+        if (r.get("hit_pct", 0.0) >= scan_min_hit)
+        and (r.get("avg_dd_pct", 100.0) <= scan_max_dd)
     ]
 
     if sort_key == "ticker":
         rows.sort(key=lambda r: (r.get("ticker") or ""))
     elif sort_key == "roi":
-        rows.sort(key=lambda r: (r.get("avg_roi_pct", 0.0), r.get("hit_pct", 0.0), r.get("support", 0)), reverse=True)
+        rows.sort(
+            key=lambda r: (
+                r.get("avg_roi_pct", 0.0),
+                r.get("hit_pct", 0.0),
+                r.get("support", 0),
+            ),
+            reverse=True,
+        )
     elif sort_key == "hit":
-        rows.sort(key=lambda r: (r.get("hit_pct", 0.0), r.get("avg_roi_pct", 0.0), r.get("support", 0)), reverse=True)
+        rows.sort(
+            key=lambda r: (
+                r.get("hit_pct", 0.0),
+                r.get("avg_roi_pct", 0.0),
+                r.get("support", 0),
+            ),
+            reverse=True,
+        )
     else:
         rows.sort(
             key=lambda r: (
@@ -255,18 +279,20 @@ def _sort_rows(rows, sort_key):
     if not rows or not sort_key:
         return rows
     keymap = {
-        'ticker': lambda r: (r.get('ticker') or ''),
-        'roi':    lambda r: (r.get('avg_roi_pct') or 0.0),
-        'hit':    lambda r: (r.get('hit_pct') or 0.0),
+        "ticker": lambda r: (r.get("ticker") or ""),
+        "roi": lambda r: (r.get("avg_roi_pct") or 0.0),
+        "hit": lambda r: (r.get("hit_pct") or 0.0),
     }
     keyfn = keymap.get(sort_key)
     if not keyfn:
         return rows
-    reverse = sort_key != 'ticker'
+    reverse = sort_key != "ticker"
     return sorted(rows, key=keyfn, reverse=reverse)
 
 
-def _send_email(st: sqlite3.Row, subject: str, body: str, html_body: Optional[str] = None) -> None:
+def _send_email(
+    st: sqlite3.Row, subject: str, body: str, html_body: Optional[str] = None
+) -> None:
     """Send an email using settings stored in the database.
 
     This helper mirrors the logic used by the desktop application: the
@@ -305,13 +331,16 @@ def _send_email(st: sqlite3.Row, subject: str, body: str, html_body: Optional[st
 
 @router.get("/", response_class=HTMLResponse)
 def home(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request, "active_tab": "scanner"})
+    return templates.TemplateResponse(
+        "index.html", {"request": request, "active_tab": "scanner"}
+    )
 
 
 @router.get("/scanner", response_class=HTMLResponse)
 def scanner_page(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request, "active_tab": "scanner"})
-
+    return templates.TemplateResponse(
+        "index.html", {"request": request, "active_tab": "scanner"}
+    )
 
 
 @router.get("/favorites", response_class=HTMLResponse)
@@ -324,7 +353,10 @@ def favorites_page(request: Request, db=Depends(get_db)):
         f["avg_dd_pct"] = f.get("dd_pct_snapshot")
         if f.get("rule_snapshot"):
             f["rule"] = f.get("rule_snapshot")
-    return templates.TemplateResponse("favorites.html", {"request": request, "favorites": favs, "active_tab": "favorites"})
+    return templates.TemplateResponse(
+        "favorites.html",
+        {"request": request, "favorites": favs, "active_tab": "favorites"},
+    )
 
 
 def _window_to_minutes(value: float, unit: str) -> int:
@@ -342,7 +374,9 @@ def _window_to_minutes(value: float, unit: str) -> int:
 
 def _create_forward_test(db: sqlite3.Cursor, fav: dict) -> None:
     start, end = window_from_lookback(fav.get("lookback_years", 1.0))
-    data = get_prices([fav["ticker"]], fav.get("interval", "15m"), start, end).get(fav["ticker"])
+    data = get_prices([fav["ticker"]], fav.get("interval", "15m"), start, end).get(
+        fav["ticker"]
+    )
     if data is None or getattr(data, "empty", True):
         return
     last_bar = data.iloc[-1]
@@ -351,7 +385,9 @@ def _create_forward_test(db: sqlite3.Cursor, fav: dict) -> None:
         ts = ts.to_pydatetime()
     entry_ts = ts.astimezone(TZ).isoformat()
     entry_price = float(last_bar["Close"])
-    window_minutes = _window_to_minutes(fav.get("window_value", 4.0), fav.get("window_unit", "Hours"))
+    window_minutes = _window_to_minutes(
+        fav.get("window_value", 4.0), fav.get("window_unit", "Hours")
+    )
     now_iso = now_et().isoformat()
     db.execute(
         """INSERT INTO forward_tests
@@ -392,7 +428,9 @@ def _update_forward_tests(db: sqlite3.Cursor) -> None:
                 (now_iso, now_iso, row["id"]),
             )
             start, end = window_from_lookback(1.0)
-            data = get_prices([row["ticker"]], row["interval"], start, end).get(row["ticker"])
+            data = get_prices([row["ticker"]], row["interval"], start, end).get(
+                row["ticker"]
+            )
             if data is None or getattr(data, "empty", True):
                 db.execute(
                     "UPDATE forward_tests SET status='queued' WHERE id=?",
@@ -424,10 +462,18 @@ def _update_forward_tests(db: sqlite3.Cursor) -> None:
             stop_time = prices[stop_cond].index[0] if stop_cond.any() else None
             expire_ts = entry_ts + pd.Timedelta(minutes=row["window_minutes"])
             final_ts = after.index[-1]
-            if hit_time and (not stop_time or hit_time <= stop_time) and hit_time <= expire_ts:
+            if (
+                hit_time
+                and (not stop_time or hit_time <= stop_time)
+                and hit_time <= expire_ts
+            ):
                 roi = float(pct_series.loc[hit_time])
                 hit_pct = 100.0
-            elif stop_time and (not hit_time or stop_time < hit_time) and stop_time <= expire_ts:
+            elif (
+                stop_time
+                and (not hit_time or stop_time < hit_time)
+                and stop_time <= expire_ts
+            ):
                 roi = float(pct_series.loc[stop_time])
                 hit_pct = 0.0
             elif final_ts < expire_ts:
@@ -463,7 +509,10 @@ def forward_page(request: Request, db=Depends(get_db)):
         db.execute("SELECT * FROM favorites ORDER BY id DESC")
         favs = [dict(r) for r in db.fetchall()]
         for f in favs:
-            db.execute("SELECT status FROM forward_tests WHERE fav_id=? ORDER BY id DESC LIMIT 1", (f["id"],))
+            db.execute(
+                "SELECT status FROM forward_tests WHERE fav_id=? ORDER BY id DESC LIMIT 1",
+                (f["id"],),
+            )
             row = db.fetchone()
             if row is None or row["status"] in ("ok", "error"):
                 _create_forward_test(db, f)
@@ -478,8 +527,15 @@ def forward_page(request: Request, db=Depends(get_db)):
         ctx = {"request": request, "tests": tests, "active_tab": "forward"}
     except Exception:
         logger.exception("Failed to load forward page")
-        ctx = {"request": request, "tests": [], "active_tab": "forward", "error": "Unable to load forward tests"}
+        ctx = {
+            "request": request,
+            "tests": [],
+            "active_tab": "forward",
+            "error": "Unable to load forward tests",
+        }
     return templates.TemplateResponse("forward.html", ctx)
+
+
 @router.post("/favorites/delete/{fav_id}")
 def favorites_delete(fav_id: int, db=Depends(get_db)):
     db.execute("DELETE FROM favorites WHERE id=?", (fav_id,))
@@ -522,7 +578,9 @@ async def favorites_add(request: Request, db=Depends(get_db)):
         ref_dd = None
 
     if not t or not rule:
-        return JSONResponse({"ok": False, "error": "missing ticker or rule"}, status_code=400)
+        return JSONResponse(
+            {"ok": False, "error": "missing ticker or rule"}, status_code=400
+        )
 
     if isinstance(settings, dict):
         settings = json.dumps(settings)
@@ -550,17 +608,19 @@ async def favorites_add(request: Request, db=Depends(get_db)):
     return {"ok": True}
 
 
-
-
 @router.get("/settings", response_class=HTMLResponse)
 def settings_page(request: Request, db=Depends(get_db)):
     st = get_settings(db)
-    return templates.TemplateResponse("settings.html", {"request": request, "st": st, "active_tab": "settings"})
+    return templates.TemplateResponse(
+        "settings.html", {"request": request, "st": st, "active_tab": "settings"}
+    )
 
 
 @router.get("/info", response_class=HTMLResponse)
 def info_page(request: Request):
-    return templates.TemplateResponse("info.html", {"request": request, "active_tab": "info"})
+    return templates.TemplateResponse(
+        "info.html", {"request": request, "active_tab": "info"}
+    )
 
 
 @router.post("/settings/save")
@@ -579,7 +639,13 @@ def settings_save(
            SET smtp_user=?, smtp_pass=?, recipients=?, scheduler_enabled=?, throttle_minutes=?
          WHERE id=1
         """,
-        (smtp_user.strip(), smtp_pass.strip(), recipients.strip(), int(scheduler_enabled), int(throttle_minutes)),
+        (
+            smtp_user.strip(),
+            smtp_pass.strip(),
+            recipients.strip(),
+            int(scheduler_enabled),
+            int(throttle_minutes),
+        ),
     )
     db.connection.commit()
     return RedirectResponse(url="/settings", status_code=302)
@@ -635,7 +701,9 @@ async def scanner_run(request: Request):
                 "note": f"{scan_type} • {params.get('interval')} • {params.get('direction')} • window {params.get('window_value')} {params.get('window_unit')}",
                 "skipped_missing_data": skipped,
             }
-            _task_update(task_id, state="done", percent=100.0, done=len(tickers), ctx=ctx)
+            _task_update(
+                task_id, state="done", percent=100.0, done=len(tickers), ctx=ctx
+            )
             logger.info("task %s saved results", task_id)
         except Exception as e:
             logger.error("scan task %s failed: %s", task_id, e)
@@ -651,7 +719,9 @@ async def scanner_run(request: Request):
 async def scanner_progress(task_id: str):
     task = _task_get(task_id)
     if not task:
-        return JSONResponse({"done": 0, "total": 0, "percent": 0.0, "state": "failed"}, status_code=404)
+        return JSONResponse(
+            {"done": 0, "total": 0, "percent": 0.0, "state": "failed"}, status_code=404
+        )
     data = {
         "done": task.get("done", 0),
         "total": task.get("total", 0),
@@ -670,25 +740,36 @@ async def scanner_results(request: Request, task_id: str):
     ctx = (task.get("ctx") or {}).copy()
     ctx["request"] = request
     logger.info("task %s rendered", task_id)
-    response = templates.TemplateResponse("results.html", ctx, headers={"Cache-Control": "no-store"})
+    response = templates.TemplateResponse(
+        "results.html", ctx, headers={"Cache-Control": "no-store"}
+    )
     _task_delete(task_id)
     return response
-
 
 
 @router.post("/scanner/parity")
 def scanner_parity(request: Request):
     PARAMS = dict(
-        interval="15m", direction="BOTH",
-        target_pct=1.5, stop_pct=0.7,
-        window_value=8.0, window_unit="Hours",
-        lookback_years=2.0, max_tt_bars=20, min_support=20,
-        delta_assumed=0.25, theta_per_day_pct=0.20,
-        atrz_gate=-0.5, slope_gate_pct=-0.01,
-        use_regime=1, regime_trend_only=0, vix_z_max=3.0,
-        slippage_bps=7.0, vega_scale=0.03,
+        interval="15m",
+        direction="BOTH",
+        target_pct=1.5,
+        stop_pct=0.7,
+        window_value=8.0,
+        window_unit="Hours",
+        lookback_years=2.0,
+        max_tt_bars=20,
+        min_support=20,
+        delta_assumed=0.25,
+        theta_per_day_pct=0.20,
+        atrz_gate=-0.5,
+        slope_gate_pct=-0.01,
+        use_regime=1,
+        regime_trend_only=0,
+        vix_z_max=3.0,
+        slippage_bps=7.0,
+        vega_scale=0.03,
         scan_min_hit=55.0,
-        scan_max_dd=1.0
+        scan_max_dd=1.0,
     )
     sort_key = request.query_params.get("sort")
     rows = []
@@ -696,10 +777,16 @@ def scanner_parity(request: Request):
         r = compute_scan_for_ticker(t, PARAMS) or {}
         if not r:
             continue
-        if r.get("hit_pct", 0) >= PARAMS["scan_min_hit"] and r.get("avg_dd_pct", 999) <= PARAMS["scan_max_dd"]:
+        if (
+            r.get("hit_pct", 0) >= PARAMS["scan_min_hit"]
+            and r.get("avg_dd_pct", 999) <= PARAMS["scan_max_dd"]
+        ):
             rows.append(r)
 
-    rows.sort(key=lambda x: (x["avg_roi_pct"], x["hit_pct"], x["support"], x["stability"]), reverse=True)
+    rows.sort(
+        key=lambda x: (x["avg_roi_pct"], x["hit_pct"], x["support"], x["stability"]),
+        reverse=True,
+    )
 
     return templates.TemplateResponse(
         "results.html",
@@ -714,6 +801,7 @@ def scanner_parity(request: Request):
 
 def _coerce_scan_params(form: dict) -> dict:
     """Coerce scanner form fields into typed params (no silent hard-coding)."""
+
     def F(k, cast=float, default=None):
         v = form.get(k, None)
         if v in (None, ""):

@@ -10,7 +10,9 @@ import pandas as pd
 
 from services import http_client
 
+RUN_ID = os.getenv("RUN_ID", "")
 logger = logging.getLogger(__name__)
+logger.addFilter(lambda record: setattr(record, "run_id", RUN_ID) or True)
 NY_TZ = ZoneInfo("America/New_York")
 
 
@@ -27,6 +29,7 @@ POLY_BURST = int(os.getenv("POLY_BURST", "1"))
 
 try:  # pragma: no cover - best effort
     http_client.set_rate_limit("api.polygon.io", POLY_RPS, POLY_BURST)
+    http_client.set_concurrency("api.polygon.io", POLY_BURST)
     logger.info("polygon_rate_limit rps=%.2f burst=%d", POLY_RPS, POLY_BURST)
 except Exception:
     pass
@@ -161,8 +164,15 @@ async def fetch_polygon_prices_async(
     timespan = "minute"
     out: Dict[str, pd.DataFrame] = {}
     for sym in symbols:
-        df = await _fetch_single(sym, start, end, multiplier, timespan)
-        out[sym] = df
+        window_start = start
+        frames: List[pd.DataFrame] = []
+        while window_start < end:
+            window_end = min(window_start + dt.timedelta(days=7), end)
+            frames.append(
+                await _fetch_single(sym, window_start, window_end, multiplier, timespan)
+            )
+            window_start = window_end
+        out[sym] = pd.concat(frames).sort_index() if frames else pd.DataFrame()
     return out
 
 

@@ -1,11 +1,12 @@
 import logging
-import os
 import sqlite3
 from pathlib import Path
 from typing import Optional
 
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
+
+from config import settings
 
 try:  # pragma: no cover - prefer real Alembic if available
     from alembic import command as alembic_command
@@ -23,7 +24,8 @@ DB_PATH = "patternfinder.db"
 # be overridden with e.g. ``postgresql+psycopg2://user:pass@host/db`` for
 # production deployments.  Using SQLAlchemy here keeps the code database
 # agnostic between SQLite (tests) and Postgres (prod).
-_ENV_DATABASE_URL = os.getenv("DATABASE_URL")
+
+_ENV_DATABASE_URL = settings.database_url
 
 _ENGINE: Optional[Engine] = None
 
@@ -39,6 +41,22 @@ def get_engine() -> Engine:
     if _ENGINE is None or str(_ENGINE.url) != url:
         _ENGINE = create_engine(url, future=True)
     return _ENGINE
+
+
+def get_schema_status() -> dict:
+    conn = get_engine().raw_connection()
+    try:
+        journal = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        synchronous = conn.execute("PRAGMA synchronous").fetchone()[0]
+        idx_list = conn.execute("PRAGMA index_list('bars_15m')").fetchall()
+        has_idx = any(r[1] == "idx_bars_symbol_ts" for r in idx_list)
+        return {
+            "journal_mode": journal,
+            "synchronous": synchronous,
+            "has_index": bool(has_idx),
+        }
+    finally:
+        conn.close()
 
 
 SCHEMA = [
@@ -174,6 +192,7 @@ SCHEMA = [
         PRIMARY KEY(symbol, ts)
     );
     """,
+    "CREATE INDEX IF NOT EXISTS idx_bars_symbol_ts ON bars_15m(symbol, ts);",
     # Scan tasks for cross-worker communication
     """
     CREATE TABLE IF NOT EXISTS scan_tasks (

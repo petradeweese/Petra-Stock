@@ -8,9 +8,14 @@ from typing import Callable, Deque, Dict, Optional, Tuple
 
 import httpx
 
-logger = logging.getLogger(__name__)
+from config import settings
+from prometheus_client import Counter, Histogram
 
-MAX_CONCURRENCY = int(os.getenv("HTTP_MAX_CONCURRENCY", "10"))
+RUN_ID = os.getenv("RUN_ID", "")
+logger = logging.getLogger(__name__)
+logger.addFilter(lambda record: setattr(record, "run_id", RUN_ID) or True)
+
+MAX_CONCURRENCY = settings.http_max_concurrency
 # Allow more retries by default so transient rate limits have a chance to recover.
 # Waits are capped at 64s but a high retry count lets the backoff continue for
 # several minutes when needed.
@@ -18,6 +23,7 @@ MAX_RETRIES = int(os.getenv("HTTP_MAX_RETRIES", "10"))
 
 _client: Optional[httpx.AsyncClient] = None
 _semaphore = asyncio.Semaphore(MAX_CONCURRENCY)
+_semaphores: Dict[str, asyncio.Semaphore] = {}
 _rate_limiters: Dict[str, "TokenBucket"] = {}
 
 # Simple in-memory cache and in-flight tracking so duplicate requests coalesce
@@ -32,6 +38,12 @@ _wait_cb: Optional[Callable[[float], None]] = None
 # Track sustained 429 responses to implement a circuit breaker.
 _circuit: Dict[str, Dict[str, float]] = {}
 _req_counts: Dict[str, Deque[float]] = defaultdict(deque)
+
+rate_limited = Counter("http_rate_limited_total", "Times a request hit rate limiting")
+circuit_open = Counter("http_circuit_open_total", "Circuit breaker openings")
+request_duration = Histogram(
+    "http_request_duration_seconds", "Duration of HTTP requests"
+)
 
 
 class TokenBucket:
@@ -73,6 +85,11 @@ def get_client() -> httpx.AsyncClient:
 def set_rate_limit(host: str, rate: float, capacity: int) -> None:
     """Configure a token bucket rate limiter for a host."""
     _rate_limiters[host] = TokenBucket(rate, capacity)
+
+
+def set_concurrency(host: str, concurrent: int) -> None:
+    """Limit concurrent requests for a host via a semaphore."""
+    _semaphores[host] = asyncio.Semaphore(concurrent)
 
 
 def set_wait_callback(cb: Optional[Callable[[float], None]]) -> None:
@@ -131,8 +148,9 @@ async def request(method: str, url: str, **kwargs) -> httpx.Response:
                 if waited > 0:
                     logger.info("rate_wait host=%s wait=%.2fs", host, waited)
 
+            sem = _semaphores.get(host, _semaphore)
             try:
-                async with _semaphore:
+                async with sem:
                     resp = await client.request(method, url, **kwargs)
             except httpx.RequestError:
                 resp = None
@@ -149,6 +167,7 @@ async def request(method: str, url: str, **kwargs) -> httpx.Response:
                 while dq and now - dq[0] > 60:
                     dq.popleft()
                 rpm = len(dq)
+                request_duration.observe(duration)
                 logger.info(
                     "http_request method=%s url=%s retries=%d duration=%.2f rpm=%d",
                     method,
@@ -184,8 +203,9 @@ async def request(method: str, url: str, **kwargs) -> httpx.Response:
                 # Circuit breaker: if we've been continuously rate limited for
                 # more than 60s, pause outbound requests for a cool-down period.
                 if now - cb_state["first"] > 60:
-                    cooldown = random.uniform(120, 300)
+                    cooldown = 90.0
                     cb_state["opened"] = now + cooldown
+                    circuit_open.inc()
                     if _wait_cb:
                         _wait_cb(cooldown)
                     await asyncio.sleep(cooldown)
@@ -196,6 +216,7 @@ async def request(method: str, url: str, **kwargs) -> httpx.Response:
                     continue
 
                 wait = retry_after if retry_after is not None else min(64, 2**retries)
+                rate_limited.inc()
                 logger.warning(
                     "rate_limited host=%s wait=%.2fs retry_after=%s",
                     host,
