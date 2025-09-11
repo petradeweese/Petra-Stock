@@ -55,12 +55,20 @@ work_queue = WorkQueue()
 
 def queue_gap_fill(symbol: str, start, end, interval: str) -> None:
     async def _job() -> None:
-        df_y = yahoo_fetch([symbol], interval, (end - start).days / 365.0).get(symbol)
+        df_y = (
+            await asyncio.to_thread(
+                yahoo_fetch, [symbol], interval, (end - start).days / 365.0
+            )
+        ).get(symbol)
         if df_y is not None and not df_y.empty:
-            upsert_bars(symbol, df_y)
-        df_p = fetch_polygon_prices([symbol], interval, start, end).get(symbol)
+            await asyncio.to_thread(upsert_bars, symbol, df_y)
+        df_p = (
+            await asyncio.to_thread(
+                fetch_polygon_prices, [symbol], interval, start, end
+            )
+        ).get(symbol)
         if df_p is not None and not df_p.empty:
-            upsert_bars(symbol, df_p)
+            await asyncio.to_thread(upsert_bars, symbol, df_p)
 
     key = f"gap:{symbol}:{start.isoformat()}:{end.isoformat()}"
     work_queue.enqueue(key, _job)
