@@ -1,11 +1,12 @@
-import os
-import datetime as dt
 import asyncio
-from typing import Dict, List, Optional, Tuple
-import pandas as pd
+import datetime as dt
 import logging
+import os
 import time
+from typing import Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
+
+import pandas as pd
 
 from services import http_client
 
@@ -31,7 +32,9 @@ except Exception:
     pass
 
 
-def _normalize_window(start: dt.datetime, end: dt.datetime) -> Tuple[dt.datetime, dt.datetime, int, int]:
+def _normalize_window(
+    start: dt.datetime, end: dt.datetime
+) -> Tuple[dt.datetime, dt.datetime, int, int]:
     """Align the requested window to NY midnight boundaries and return UTC ms."""
     if start.tzinfo is None:
         start = start.replace(tzinfo=dt.timezone.utc)
@@ -54,7 +57,13 @@ def _normalize_window(start: dt.datetime, end: dt.datetime) -> Tuple[dt.datetime
     return ny_start, ny_end, start_ms, end_ms
 
 
-async def _fetch_single(symbol: str, start: dt.datetime, end: dt.datetime, multiplier: int = 15, timespan: str = "minute") -> pd.DataFrame:
+async def _fetch_single(
+    symbol: str,
+    start: dt.datetime,
+    end: dt.datetime,
+    multiplier: int = 15,
+    timespan: str = "minute",
+) -> pd.DataFrame:
     api_key = _api_key()
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
 
@@ -95,9 +104,15 @@ async def _fetch_single(symbol: str, start: dt.datetime, end: dt.datetime, multi
             }
         )
     if not records:
-        logger.info("polygon_fetch symbol=%s pages=%d rows=0 duration=%.2f", symbol, pages, time.monotonic()-t0)
         logger.info(
-            "polygon_window symbol=%s ny_start=%s ny_end=%s utc_start_ms=%d utc_end_ms=%d bars_returned=0",
+            "polygon_fetch symbol=%s pages=%d rows=0 duration=%.2f",
+            symbol,
+            pages,
+            time.monotonic() - t0,
+        )
+        logger.info(
+            "polygon_window symbol=%s ny_start=%s ny_end=%s "
+            "utc_start_ms=%d utc_end_ms=%d bars_returned=0",
             symbol,
             ny_start.isoformat(),
             ny_end.isoformat(),
@@ -122,7 +137,8 @@ async def _fetch_single(symbol: str, start: dt.datetime, end: dt.datetime, multi
         duration,
     )
     logger.info(
-        "polygon_window symbol=%s ny_start=%s ny_end=%s utc_start_ms=%d utc_end_ms=%d bars_returned=%d",
+        "polygon_window symbol=%s ny_start=%s ny_end=%s "
+        "utc_start_ms=%d utc_end_ms=%d bars_returned=%d",
         symbol,
         ny_start.isoformat(),
         ny_end.isoformat(),
@@ -133,13 +149,25 @@ async def _fetch_single(symbol: str, start: dt.datetime, end: dt.datetime, multi
     return df
 
 
-def fetch_polygon_prices(symbols: List[str], interval: str, start: dt.datetime, end: dt.datetime) -> Dict[str, pd.DataFrame]:
+async def fetch_polygon_prices_async(
+    symbols: List[str],
+    interval: str,
+    start: dt.datetime,
+    end: dt.datetime,
+) -> Dict[str, pd.DataFrame]:
     if not _api_key():
         raise RuntimeError("POLYGON_API_KEY missing")
     multiplier = 15
     timespan = "minute"
     out: Dict[str, pd.DataFrame] = {}
     for sym in symbols:
-        df = asyncio.run(_fetch_single(sym, start, end, multiplier, timespan))
+        df = await _fetch_single(sym, start, end, multiplier, timespan)
         out[sym] = df
     return out
+
+
+def fetch_polygon_prices(
+    symbols: List[str], interval: str, start: dt.datetime, end: dt.datetime
+) -> Dict[str, pd.DataFrame]:
+    """Synchronous wrapper around ``fetch_polygon_prices_async``."""
+    return asyncio.run(fetch_polygon_prices_async(symbols, interval, start, end))

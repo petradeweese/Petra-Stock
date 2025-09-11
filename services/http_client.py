@@ -243,3 +243,11 @@ async def get(url: str, **kwargs) -> httpx.Response:
 async def get_json(url: str, **kwargs):
     resp = await get(url, **kwargs)
     return resp.json()
+
+
+async def aclose() -> None:
+    """Close the underlying AsyncClient and reset global state."""
+    global _client
+    if _client is not None:
+        await _client.aclose()
+        _client = None

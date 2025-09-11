@@ -12,15 +12,16 @@ per-symbol progress log is emitted including row counts and duration.
 for SPY and logging how many rows were returned and saved.
 """
 
+import argparse
+import asyncio
+import datetime as dt
+import json
+import logging
 import sys
 import time
-import datetime as dt
-import logging
-import json
 from pathlib import Path
-import argparse
 
-from services import polygon_client
+from services import http_client, polygon_client
 from services.price_store import upsert_bars
 
 logging.basicConfig(level=logging.INFO)
@@ -46,7 +47,7 @@ def save_checkpoint(idx: int) -> None:
     CHECKPOINT.write_text(json.dumps({"index": idx}))
 
 
-def backfill(
+async def _backfill(
     symbols: list[str],
     dry_run: bool = False,
     *,
@@ -62,7 +63,10 @@ def backfill(
     start_idx = load_checkpoint() if use_checkpoint else 0
     for i, sym in enumerate(symbols[start_idx:], start_idx):
         t0 = time.monotonic()
-        data = polygon_client.fetch_polygon_prices([sym], "15m", start, end)[sym]
+        data_map = await polygon_client.fetch_polygon_prices_async(
+            [sym], "15m", start, end
+        )
+        data = data_map[sym]
         bars = len(data)
         rows = 0
         if not dry_run:
@@ -76,11 +80,33 @@ def backfill(
         )
         if use_checkpoint:
             save_checkpoint(i + 1)
+    await http_client.aclose()
+
+
+def backfill(
+    symbols: list[str],
+    dry_run: bool = False,
+    *,
+    start: dt.datetime | None = None,
+    end: dt.datetime | None = None,
+    use_checkpoint: bool = True,
+) -> None:
+    asyncio.run(
+        _backfill(
+            symbols,
+            dry_run,
+            start=start,
+            end=end,
+            use_checkpoint=use_checkpoint,
+        )
+    )
 
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Backfill 15m bars from Polygon")
-    parser.add_argument("symbols", nargs="?", help="file containing symbols, one per line")
+    parser.add_argument(
+        "symbols", nargs="?", help="file containing symbols, one per line"
+    )
     parser.add_argument("--dry-run", action="store_true", dest="dry_run")
     parser.add_argument("--test", action="store_true", dest="test")
     args = parser.parse_args(argv)
@@ -88,7 +114,9 @@ def main(argv: list[str] | None = None) -> None:
     if args.test:
         end = dt.datetime.now(tz=dt.timezone.utc)
         start = end - dt.timedelta(days=1)
-        backfill(["SPY"], dry_run=args.dry_run, start=start, end=end, use_checkpoint=False)
+        backfill(
+            ["SPY"], dry_run=args.dry_run, start=start, end=end, use_checkpoint=False
+        )
         return
 
     if not args.symbols:
@@ -101,4 +129,3 @@ def main(argv: list[str] | None = None) -> None:
 
 if __name__ == "__main__":
     main()
-
