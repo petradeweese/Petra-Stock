@@ -1,7 +1,7 @@
 import os
 import datetime as dt
 import asyncio
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 import pandas as pd
 import logging
 import time
@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 from services import http_client
 
 logger = logging.getLogger(__name__)
+NY_TZ = ZoneInfo("America/New_York")
 
 
 def _api_key() -> str:
@@ -30,12 +31,34 @@ except Exception:
     pass
 
 
+def _normalize_window(start: dt.datetime, end: dt.datetime) -> Tuple[dt.datetime, dt.datetime, int, int]:
+    """Align the requested window to NY midnight boundaries and return UTC ms."""
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=dt.timezone.utc)
+    if end.tzinfo is None:
+        end = end.replace(tzinfo=dt.timezone.utc)
+
+    ny_start = start.astimezone(NY_TZ)
+    ny_end = end.astimezone(NY_TZ)
+    ny_start = dt.datetime(ny_start.year, ny_start.month, ny_start.day, tzinfo=NY_TZ)
+    ny_end = dt.datetime(ny_end.year, ny_end.month, ny_end.day, tzinfo=NY_TZ)
+
+    if ny_end <= ny_start:
+        ny_end = ny_start + dt.timedelta(days=1)
+
+    utc_start = ny_start.astimezone(dt.timezone.utc)
+    utc_end = ny_end.astimezone(dt.timezone.utc)
+    start_ms = int(utc_start.timestamp() * 1000)
+    end_ms = int(utc_end.timestamp() * 1000)
+
+    return ny_start, ny_end, start_ms, end_ms
+
+
 async def _fetch_single(symbol: str, start: dt.datetime, end: dt.datetime, multiplier: int = 15, timespan: str = "minute") -> pd.DataFrame:
     api_key = _api_key()
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
 
-    start_ms = int(start.timestamp() * 1000)
-    end_ms = int(end.timestamp() * 1000)
+    ny_start, ny_end, start_ms, end_ms = _normalize_window(start, end)
     base_url = (
         f"https://api.polygon.io/v2/aggs/ticker/{symbol}/range/{multiplier}/{timespan}/"
         f"{start_ms}/{end_ms}?adjusted=true&sort=asc&limit=50000"
@@ -73,6 +96,14 @@ async def _fetch_single(symbol: str, start: dt.datetime, end: dt.datetime, multi
         )
     if not records:
         logger.info("polygon_fetch symbol=%s pages=%d rows=0 duration=%.2f", symbol, pages, time.monotonic()-t0)
+        logger.info(
+            "polygon_window symbol=%s ny_start=%s ny_end=%s utc_start_ms=%d utc_end_ms=%d bars_returned=0",
+            symbol,
+            ny_start.isoformat(),
+            ny_end.isoformat(),
+            start_ms,
+            end_ms,
+        )
         return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
     df = pd.DataFrame(records).set_index("ts")
     # Align to NYSE session and return UTC timestamps
@@ -81,12 +112,23 @@ async def _fetch_single(symbol: str, start: dt.datetime, end: dt.datetime, multi
     if not _include_prepost():
         df = df.between_time("09:30", "16:00")
     df = df.tz_convert("UTC")
+    duration = time.monotonic() - t0
+    rows = len(df)
     logger.info(
         "polygon_fetch symbol=%s pages=%d rows=%d duration=%.2f",
         symbol,
         pages,
-        len(df),
-        time.monotonic() - t0,
+        rows,
+        duration,
+    )
+    logger.info(
+        "polygon_window symbol=%s ny_start=%s ny_end=%s utc_start_ms=%d utc_end_ms=%d bars_returned=%d",
+        symbol,
+        ny_start.isoformat(),
+        ny_end.isoformat(),
+        start_ms,
+        end_ms,
+        rows,
     )
     return df
 
