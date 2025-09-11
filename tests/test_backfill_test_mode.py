@@ -1,13 +1,14 @@
 import datetime as dt
 import logging
-import pandas as pd
 import sys
 from pathlib import Path
+
+import pandas as pd
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 import scripts.backfill_polygon as backfill
-from services import polygon_client
+from services import http_client, polygon_client
 
 
 def test_quick_test_mode(monkeypatch, caplog):
@@ -24,13 +25,13 @@ def test_quick_test_mode(monkeypatch, caplog):
         index=pd.date_range("2024-01-01", periods=2, freq="15T", tz="UTC"),
     )
 
-    def fake_fetch(symbols, interval, start, end):
+    async def fake_fetch(symbols, interval, start, end):
         assert symbols == ["SPY"]
         assert interval == "15m"
         assert end - start <= dt.timedelta(days=1, minutes=1)
         return {"SPY": df}
 
-    monkeypatch.setattr(polygon_client, "fetch_polygon_prices", fake_fetch)
+    monkeypatch.setattr(polygon_client, "fetch_polygon_prices_async", fake_fetch)
 
     saved = {}
 
@@ -43,7 +44,9 @@ def test_quick_test_mode(monkeypatch, caplog):
 
     caplog.set_level(logging.INFO)
     monkeypatch.setattr(sys, "argv", ["backfill_polygon.py", "--test"])
+    client = http_client.get_client()
     backfill.main()
+    assert client.is_closed
 
     assert saved["sym"] == "SPY"
     assert saved["rows"] == 2
