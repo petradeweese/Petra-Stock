@@ -19,7 +19,9 @@ from utils import now_et
 
 logger = logging.getLogger(__name__)
 
-DB_PATH = "patternfinder.db"
+# Derive an absolute path for the default SQLite database so we don't depend on
+# the process working directory (e.g. when run via systemd).
+DB_PATH = str(Path(__file__).resolve().with_name("patternfinder.db"))
 # Connection URL used by SQLAlchemy.  Defaults to the local SQLite file but can
 # be overridden with e.g. ``postgresql+psycopg2://user:pass@host/db`` for
 # production deployments.  Using SQLAlchemy here keeps the code database
