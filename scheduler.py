@@ -87,9 +87,9 @@ async def favorites_loop(
                     conn.row_factory = sqlite3.Row
                     db = conn.cursor()
                     st = get_settings(db)
-                    throttle = int(st["throttle_minutes"] or 60)
-                    last_boundary = st["last_boundary"] or ""
-                    last_run_at = st["last_run_at"] or ""
+                    throttle = int(st.get("throttle_minutes") or 60)
+                    last_boundary = st.get("last_boundary") or ""
+                    last_run_at = st.get("last_run_at") or ""
 
                     should_run = boundary.isoformat() != last_boundary
                     if last_run_at:
@@ -116,10 +116,11 @@ async def favorites_loop(
                         )
                         hits = []
                         for f in favs:
+                            ticker = f.get("ticker", "?")
                             try:
                                 row = await asyncio.wait_for(
                                     asyncio.to_thread(
-                                        compute_scan_for_ticker, f["ticker"], params
+                                        compute_scan_for_ticker, ticker, params
                                     ),
                                     timeout=settings.job_timeout,
                                 )
@@ -129,9 +130,16 @@ async def favorites_loop(
                                     and row.get("avg_roi_pct", 0) > 0
                                 ):
                                     hits.append(row)
+                            except KeyError as e:
+                                logger.warning(
+                                    "favorite scan missing data ticker=%s date=%s",
+                                    ticker,
+                                    e.args[0],
+                                )
+                                continue
                             except Exception:
                                 logger.exception(
-                                    "favorite scan failed ticker=%s", f["ticker"]
+                                    "favorite scan failed ticker=%s", ticker
                                 )
                         # TODO: email YES hits in a readable format
                         # TODO: archive favorites 15m scan results only if there are YES hits
