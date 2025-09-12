@@ -4,7 +4,11 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import pandas as pd
 
-from services.market_data import fetch_prices, window_from_lookback
+from services.market_data import (
+    expected_bar_count,
+    fetch_prices,
+    window_from_lookback,
+)
 from services.price_utils import DataUnavailableError
 
 # Adapter to the original ROI engine
@@ -184,16 +188,6 @@ def _install_real_engine_adapter():
 _PRICE_DATA: Dict[Tuple[str, str, float], pd.DataFrame] = {}
 
 
-def _interval_to_freq(interval: str) -> str:
-    """Translate interval strings like "15m" into pandas frequency codes."""
-    interval = interval.strip().lower()
-    if interval.endswith("m"):
-        return f"{int(interval[:-1])}T"
-    if interval.endswith("h"):
-        return f"{int(interval[:-1])}H"
-    return "1D"
-
-
 def _ensure_coverage(ticker: str, interval: str, lookback_years: float) -> bool:
     """Return ``True`` if price data coverage is >=95% for the window."""
     start, end = window_from_lookback(lookback_years)
@@ -205,8 +199,7 @@ def _ensure_coverage(ticker: str, interval: str, lookback_years: float) -> bool:
         )
         _PRICE_DATA[key] = df
 
-    freq = _interval_to_freq(interval)
-    expected = len(pd.date_range(start=start, end=end, freq=freq))
+    expected = expected_bar_count(start, end, interval)
     bars = len(df) if df is not None else 0
     coverage = bars / expected if expected else 0.0
     if bars > 0 and coverage >= 0.95:
@@ -215,7 +208,7 @@ def _ensure_coverage(ticker: str, interval: str, lookback_years: float) -> bool:
     df = fetch_prices([ticker], interval, lookback_years).get(ticker, pd.DataFrame())
     _PRICE_DATA[key] = df
     bars = len(df) if df is not None else 0
-    expected = len(pd.date_range(start=start, end=end, freq=freq))
+    expected = expected_bar_count(start, end, interval)
     coverage = bars / expected if expected else 0.0
     if bars > 0 and coverage >= 0.95:
         return True

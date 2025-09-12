@@ -35,6 +35,14 @@ suite with:
 pytest
 ```
 
+## Scanning
+
+During a scan, the application verifies that price data covers at least 95% of the
+expected bars in the lookback window. For intraday intervals, expected bars are
+derived from actual market sessions: only minutes when the market is open are
+counted. Weekends and holidays therefore no longer inflate the coverage
+requirement.
+
 ## Environment
 
 Copy `.env.example` to `.env` and adjust:

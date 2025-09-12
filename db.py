@@ -1,12 +1,11 @@
 import logging
+import os
 import sqlite3
 from pathlib import Path
 from typing import Optional
 
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
-
-from config import settings
 
 try:  # pragma: no cover - prefer real Alembic if available
     from alembic import command as alembic_command
@@ -27,7 +26,7 @@ DB_PATH = str(Path(__file__).resolve().with_name("patternfinder.db"))
 # production deployments.  Using SQLAlchemy here keeps the code database
 # agnostic between SQLite (tests) and Postgres (prod).
 
-_ENV_DATABASE_URL = settings.database_url
+_ENV_DATABASE_URL = os.getenv("DATABASE_URL", "")
 
 _ENGINE: Optional[Engine] = None
 
