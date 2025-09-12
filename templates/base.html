@@ -8,15 +8,18 @@
   {% block head_extra %}{% endblock %}
 </head>
 <body>
-  <div class="wrap">
-    <nav class="tabs">
-      <a class="tab {% if active_tab=='scanner' %}active{% endif %}" href="/scanner">Scanner</a>
-      <a class="tab {% if active_tab=='favorites' %}active{% endif %}" href="/favorites">Favorites</a>
-      <a class="tab {% if active_tab=='forward' %}active{% endif %}" href="/forward">Forward Test</a>
-      <a class="tab {% if active_tab=='archive' %}active{% endif %}" href="/archive">Archive</a>
-      <a class="tab {% if active_tab=='settings' %}active{% endif %}" href="/settings">Settings</a>
-      <a class="tab {% if active_tab=='info' %}active{% endif %}" href="/info">Info</a>
+  <header class="top-bar">
+    <div class="brand">PETRA STOCK</div>
+    <nav class="nav-links">
+      <a class="nav-link {% if active_tab=='scanner' %}active{% endif %}" href="/scanner">Scanner</a>
+      <a class="nav-link {% if active_tab=='favorites' %}active{% endif %}" href="/favorites">Favorites</a>
+      <a class="nav-link {% if active_tab=='forward' %}active{% endif %}" href="/forward">Forward Test</a>
+      <a class="nav-link {% if active_tab=='archive' %}active{% endif %}" href="/archive">Archive</a>
+      <a class="nav-link {% if active_tab=='history' %}active{% endif %}" href="/history">History</a>
+      <a class="nav-link {% if active_tab=='settings' %}active{% endif %}" href="/settings">Settings</a>
     </nav>
+  </header>
+  <div class="wrap">
     {% block content %}{% endblock %}
   </div>
   {% block extra_body %}{% endblock %}

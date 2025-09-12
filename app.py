@@ -1,11 +1,14 @@
+import json
 import logging
 import os
+
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
+
 try:
     from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 except Exception:  # pragma: no cover - optional dependency
-    ProxyHeadersMiddleware = None
+    ProxyHeadersMiddleware = None  # type: ignore[assignment]
 
 try:  # pragma: no cover - optional speed-up
     import uvloop
@@ -14,14 +17,31 @@ try:  # pragma: no cover - optional speed-up
 except Exception:
     pass
 
+from config import settings
 from db import init_db
 from routes import router
-from scheduler import setup_scheduler
-from utils import now_et, market_is_open
 from scanner import compute_scan_for_ticker
+from scheduler import setup_scheduler
+from services import http_client
+from utils import market_is_open, now_et
 
 
-logging.basicConfig(level=logging.INFO)
+class JsonFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        data = {
+            "level": record.levelname,
+            "logger": record.name,
+            "msg": record.getMessage(),
+        }
+        run_id = getattr(record, "run_id", None)
+        if run_id:
+            data["run_id"] = run_id
+        return json.dumps(data)
+
+
+handler = logging.StreamHandler()
+handler.setFormatter(JsonFormatter())
+logging.basicConfig(level=logging.INFO, handlers=[handler])
 logger = logging.getLogger(__name__)
 
 
@@ -30,24 +50,27 @@ def create_app() -> FastAPI:
     os.makedirs("static", exist_ok=True)
 
     logger.info("Initializing database")
-    try:
+    if settings.run_migrations:
         logger.info("Running database migrations")
         init_db()
-    except Exception:
-        logger.exception(
-            "Failed to initialize database; continuing without migrations"
-        )
+    else:
+        logger.info("Skipping database migrations")
 
     app = FastAPI()
     if ProxyHeadersMiddleware is not None:
         logger.info("ProxyHeadersMiddleware enabled")
-        app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
+        app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")  # type: ignore[arg-type]
     else:
         logger.info("ProxyHeadersMiddleware unavailable; skipping")
     app.mount("/static", StaticFiles(directory="static"), name="static")
 
     app.include_router(router)
     setup_scheduler(app, market_is_open, now_et, compute_scan_for_ticker)
+
+    @app.on_event("shutdown")
+    async def _shutdown():
+        await http_client.aclose()
+
     return app
 
 
