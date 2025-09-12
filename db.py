@@ -25,13 +25,12 @@ DB_PATH = "patternfinder.db"
 # production deployments.  Using SQLAlchemy here keeps the code database
 # agnostic between SQLite (tests) and Postgres (prod).
 
-_ENV_DATABASE_URL = settings.database_url
-
 _ENGINE: Optional[Engine] = None
 
 
 def _get_database_url() -> str:
-    return _ENV_DATABASE_URL or f"sqlite:///{DB_PATH}"
+    env_url = settings.database_url
+    return env_url or f"sqlite:///{DB_PATH}"
 
 
 def get_engine() -> Engine:
@@ -221,23 +220,19 @@ def init_db():
 
 
 def get_db():
-    # Create a new connection for each request and allow it to be used from
-    # the request-handling thread even though the connection is created in the
-    # dependency threadpool.  When running against SQLite (the common test
-    # setup) we use the sqlite3 module directly so row_factory works as
-    # expected; otherwise we fall back to SQLAlchemy's engine.
-    if _ENV_DATABASE_URL:
+    """Yield a database cursor with rows as dictionaries."""
+    url = _get_database_url()
+    if url.startswith("sqlite:///"):
+        path = url.replace("sqlite:///", "", 1)
+        conn = sqlite3.connect(path, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+    else:  # pragma: no cover - used only in prod with non-SQLite DBs
         conn = get_engine().raw_connection()
-    else:
-        conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-    if hasattr(conn, "row_factory"):
-        conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
         yield cursor
         conn.commit()
-    except sqlite3.Error:
+    except Exception:
         conn.rollback()
         logger.exception("Database operation failed")
         raise

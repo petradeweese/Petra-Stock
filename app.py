@@ -8,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 try:
     from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 except Exception:  # pragma: no cover - optional dependency
-    ProxyHeadersMiddleware = None  # type: ignore[assignment]
+    ProxyHeadersMiddleware = None  # type: ignore[assignment, misc]
 
 try:  # pragma: no cover - optional speed-up
     import uvloop
@@ -17,7 +17,6 @@ try:  # pragma: no cover - optional speed-up
 except Exception:
     pass
 
-from config import settings
 from db import init_db
 from routes import router
 from scanner import compute_scan_for_ticker
@@ -50,7 +49,12 @@ def create_app() -> FastAPI:
     os.makedirs("static", exist_ok=True)
 
     logger.info("Initializing database")
-    if settings.run_migrations:
+    run_migrations = os.getenv("RUN_MIGRATIONS", "true").lower() not in {
+        "0",
+        "false",
+        "",
+    }
+    if run_migrations:
         logger.info("Running database migrations")
         init_db()
     else:
