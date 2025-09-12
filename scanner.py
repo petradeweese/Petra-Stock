@@ -244,9 +244,9 @@ def preload_prices(tickers: List[str], interval: str, lookback_years: float) -> 
 _install_real_engine_adapter()
 
 try:
-    import pattern_finder_app as _pfa
+    import pattern_finder_app as _pfa  # type: ignore[import]
 except Exception:
-    _pfa = None
+    _pfa = None  # type: ignore[assignment]
 
 if _pfa is not None:
 

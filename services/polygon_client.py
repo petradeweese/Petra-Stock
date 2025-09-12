@@ -12,7 +12,14 @@ from services import http_client
 
 RUN_ID = os.getenv("RUN_ID", "")
 logger = logging.getLogger(__name__)
-logger.addFilter(lambda record: setattr(record, "run_id", RUN_ID) or True)
+
+
+def _add_run_id(record: logging.LogRecord) -> bool:
+    setattr(record, "run_id", RUN_ID)
+    return True
+
+
+logger.addFilter(_add_run_id)
 NY_TZ = ZoneInfo("America/New_York")
 
 

@@ -1,13 +1,15 @@
+from typing import Any, List
+
 CONTENT_TYPE_LATEST = "text/plain; version=0.0.4; charset=utf-8"
 
-_metrics = {}
+_metrics: dict[str, Any] = {}
 
 
 class Counter:
     def __init__(self, name: str, documentation: str):
         self.name = name
         self.documentation = documentation
-        self.value = 0
+        self.value: float = 0.0
         _metrics[name] = self
 
     def inc(self, amount: float = 1.0) -> None:
@@ -25,7 +27,7 @@ class Histogram:
     def __init__(self, name: str, documentation: str):
         self.name = name
         self.documentation = documentation
-        self.samples = []
+        self.samples: List[float] = []
         _metrics[name] = self
 
     def observe(self, value: float) -> None:

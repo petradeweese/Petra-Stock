@@ -14,6 +14,7 @@ select = ["E", "F"]
 [tool.mypy]
 python_version = "3.11"
 strict = false
+ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = "alembic_stub.*"

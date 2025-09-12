@@ -110,17 +110,19 @@ async def favorites_loop(
                             "SELECT ticker, direction, interval, rule FROM favorites ORDER BY id DESC"
                         )
                         favs = [dict(r) for r in db.fetchall()]
-                        params = dict(
-                            interval="15m",
-                            direction="BOTH",
-                            scan_min_hit=50.0,
-                            atrz_gate=0.10,
-                            slope_gate_pct=0.02,
-                        )
+                        params: Dict[str, Any] = {
+                            "interval": "15m",
+                            "direction": "BOTH",
+                            "scan_min_hit": 50.0,
+                            "atrz_gate": 0.10,
+                            "slope_gate_pct": 0.02,
+                        }
+                        interval = str(params.get("interval", "15m"))
+                        lookback_years = float(params.get("lookback_years", 2.0))
                         preload_prices(
                             [f["ticker"] for f in favs],
-                            params.get("interval", "15m"),
-                            params.get("lookback_years", 2.0),
+                            interval,
+                            lookback_years,
                         )
                         hits = []
                         for f in favs:
