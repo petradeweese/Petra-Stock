@@ -27,7 +27,7 @@ from scanner import compute_scan_for_ticker, preload_prices
 from services.market_data import get_prices, window_from_lookback
 from utils import TZ, now_et
 
-from .archive import router as archive_router
+from .archive import _format_rule_summary, router as archive_router
 
 router = APIRouter()
 templates = Jinja2Templates(directory="templates")
@@ -39,16 +39,27 @@ scan_duration = Histogram("scan_duration_seconds", "Duration of /scanner/run req
 scan_tickers = Counter("scan_tickers_total", "Tickers processed by /scanner/run")
 
 
+def healthz() -> dict:
+    """Simple health check used by tests and the /health endpoint."""
+    return {"status": "ok"}
+
+
 @router.get("/health")
 def health() -> dict:
-    return {"status": "ok", **get_schema_status()}
+    """Return app health along with schema status information."""
+    return {**healthz(), **get_schema_status()}
+
+
+def metrics() -> Response:
+    """Expose Prometheus metrics used by tests and the /metrics endpoint."""
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 if settings.metrics_enabled:
 
     @router.get("/metrics")
-    def metrics() -> Response:
-        return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+    def metrics_endpoint() -> Response:
+        return metrics()
 
 
 _scan_executor: Optional[Union[ThreadPoolExecutor, ProcessPoolExecutor]] = None
