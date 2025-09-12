@@ -10,7 +10,7 @@ import time
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from email.message import EmailMessage
 from threading import Thread
-from typing import Any, Callable, Dict, Optional, Union
+from typing import Any, Callable, Dict, Mapping, Optional, Union
 from uuid import uuid4
 
 import certifi
@@ -27,6 +27,7 @@ from scanner import compute_scan_for_ticker, preload_prices
 from services.market_data import get_prices, window_from_lookback
 from utils import TZ, now_et
 
+from .archive import _format_rule_summary as _format_rule_summary
 from .archive import router as archive_router
 
 router = APIRouter()
@@ -44,11 +45,19 @@ def health() -> dict:
     return {"status": "ok", **get_schema_status()}
 
 
-if settings.metrics_enabled:
+@router.get("/healthz")
+def healthz() -> dict:
+    """Simple health check endpoint returning only status."""
+    return {"status": "ok"}
 
-    @router.get("/metrics")
-    def metrics() -> Response:
-        return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+def metrics() -> Response:
+    """Return Prometheus metrics."""
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
+if settings.metrics_enabled:
+    router.get("/metrics")(metrics)
 
 
 _scan_executor: Optional[Union[ThreadPoolExecutor, ProcessPoolExecutor]] = None
@@ -179,7 +188,7 @@ def _perform_scan(
     sort_key: str,
     progress_cb: Optional[Callable[[int, int, str], None]] = None,
     progress_every: int = 5,
-) -> list[dict]:
+) -> tuple[list[dict], int]:
     start = time.perf_counter()
     total = len(tickers)
     preload_prices(
@@ -657,7 +666,7 @@ async def scanner_run(request: Request):
     params = _coerce_scan_params(form)
 
     scan_type = params.get("scan_type", "scan150")
-    single_ticker = (form.get("ticker") or "").strip().upper()
+    single_ticker = str(form.get("ticker") or "").strip().upper()
     if scan_type.lower() in ("single", "single_ticker") and single_ticker:
         tickers = [single_ticker]
     elif scan_type.lower() in ("sp100", "sp_100", "sp100_scan"):
@@ -667,7 +676,7 @@ async def scanner_run(request: Request):
     else:
         tickers = TOP150
 
-    sort_key = (form.get("sort") or "").strip().lower()
+    sort_key = str(form.get("sort") or "").strip().lower()
     if sort_key not in ("ticker", "roi", "hit"):
         sort_key = ""
 
@@ -799,7 +808,7 @@ def scanner_parity(request: Request):
     )
 
 
-def _coerce_scan_params(form: dict) -> dict:
+def _coerce_scan_params(form: Mapping[str, Any]) -> dict:
     """Coerce scanner form fields into typed params (no silent hard-coding)."""
 
     def F(k, cast=float, default=None):
