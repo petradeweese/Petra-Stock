@@ -18,3 +18,7 @@ strict = false
 [[tool.mypy.overrides]]
 module = "alembic_stub.*"
 ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = "pandas_market_calendars.*"
+ignore_missing_imports = true
