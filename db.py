@@ -131,6 +131,7 @@ SCHEMA = [
         direction TEXT NOT NULL,
         interval TEXT NOT NULL,
         rule TEXT,
+        version INTEGER NOT NULL DEFAULT 1,
         entry_price REAL NOT NULL,
         target_pct REAL NOT NULL,
         stop_pct REAL NOT NULL,
@@ -161,6 +162,15 @@ SCHEMA = [
     );
     """,
     "CREATE INDEX IF NOT EXISTS idx_forward_tests_fav ON forward_tests(fav_id);",
+    # Guardrail skip log
+    """
+    CREATE TABLE IF NOT EXISTS guardrail_skips (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ticker TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    """,
     # Runs (archive)
     """
     CREATE TABLE IF NOT EXISTS runs (
