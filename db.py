@@ -70,6 +70,7 @@ SCHEMA = [
         recipients TEXT,
         scheduler_enabled INTEGER DEFAULT 0,
         throttle_minutes INTEGER DEFAULT 60,
+        fav_cooldown_minutes INTEGER DEFAULT 30,
         last_boundary TEXT,
         last_run_at TEXT
     );
@@ -83,11 +84,12 @@ SCHEMA = [
         recipients,
         scheduler_enabled,
         throttle_minutes,
+        fav_cooldown_minutes,
         last_boundary,
         last_run_at
       )
     VALUES
-      (1, '', '', '', 0, 60, '', '');
+      (1, '', '', '', 0, 60, 30, '', '');
     """,
     # Favorites
     """
@@ -119,7 +121,11 @@ SCHEMA = [
         dd_pct_snapshot REAL,
         rule_snapshot TEXT,
         settings_json_snapshot TEXT,
-        snapshot_at TEXT
+        snapshot_at TEXT,
+        alerts_enabled INTEGER DEFAULT 0,
+        cooldown_minutes INTEGER DEFAULT 30,
+        last_notified_ts TEXT,
+        last_signal_bar TEXT
     );
     """,
     # Forward test tracking
