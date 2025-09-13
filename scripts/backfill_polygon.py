@@ -70,7 +70,7 @@ async def _backfill(
         bars = len(data)
         rows = 0
         if not dry_run:
-            rows = upsert_bars(sym, data)
+            rows = upsert_bars(sym, data, "15m")
         logger.info(
             "backfill symbol=%s returned=%d saved=%d duration=%.2fs",
             sym,

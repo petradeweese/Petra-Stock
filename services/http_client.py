@@ -9,11 +9,18 @@ from typing import Callable, Deque, Dict, Optional, Tuple
 import httpx
 
 from config import settings
-from prometheus_client import Counter, Histogram
+from prometheus_client import Counter, Histogram  # type: ignore
 
 RUN_ID = os.getenv("RUN_ID", "")
 logger = logging.getLogger(__name__)
-logger.addFilter(lambda record: setattr(record, "run_id", RUN_ID) or True)
+
+
+def _add_run_id(record: logging.LogRecord) -> bool:
+    setattr(record, "run_id", RUN_ID)
+    return True
+
+
+logger.addFilter(_add_run_id)
 
 MAX_CONCURRENCY = settings.http_max_concurrency
 # Allow more retries by default so transient rate limits have a chance to recover.
@@ -179,7 +186,12 @@ async def request(method: str, url: str, **kwargs) -> httpx.Response:
                 return resp
 
             status = resp.status_code if resp else None
-            if status and status not in (429,) and status < 500:
+            if (
+                resp is not None
+                and status is not None
+                and status not in (429,)
+                and status < 500
+            ):
                 resp.raise_for_status()
 
             # Parse Retry-After header if provided.

@@ -35,7 +35,7 @@ def test_backfill_two_symbols(monkeypatch, caplog):
 
     saved = {}
 
-    def fake_upsert(sym, data):
+    def fake_upsert(sym, data, interval="15m"):
         saved.setdefault(sym, 0)
         saved[sym] += len(data)
         return len(data)

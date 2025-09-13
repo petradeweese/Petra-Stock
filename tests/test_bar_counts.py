@@ -44,9 +44,9 @@ def test_full_day_bar_count(monkeypatch, tmp_path):
 
     db.DB_PATH = str(tmp_path / "full.db")
     db.init_db()
-    upsert_bars("AAA", df)
+    upsert_bars("AAA", df, "15m")
     end_ts = start_ts + pd.Timedelta(minutes=15 * 26)
-    gaps = detect_gaps("AAA", start_ts.to_pydatetime(), end_ts.to_pydatetime())
+    gaps = detect_gaps("AAA", start_ts.to_pydatetime(), end_ts.to_pydatetime(), "15m")
     assert gaps == []
 
 
@@ -67,7 +67,7 @@ def test_half_day_bar_count(monkeypatch, tmp_path):
 
     db.DB_PATH = str(tmp_path / "half.db")
     db.init_db()
-    upsert_bars("AAA", df)
+    upsert_bars("AAA", df, "15m")
     end_ts = start_ts + pd.Timedelta(minutes=15 * 13)
-    gaps = detect_gaps("AAA", start_ts.to_pydatetime(), end_ts.to_pydatetime())
+    gaps = detect_gaps("AAA", start_ts.to_pydatetime(), end_ts.to_pydatetime(), "15m")
     assert gaps == []

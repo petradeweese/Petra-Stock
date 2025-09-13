@@ -1,15 +1,16 @@
-import os
-import math
-import time
-import logging
-import shutil
-from pathlib import Path
-from typing import List, Dict, Tuple
 import asyncio
+import datetime as dt
+import logging
+import math
+import os
+import shutil
+import time
+from pathlib import Path
+from typing import Dict, List, Tuple
 
 import pandas as pd
 
-from services import http_client
+from services import http_client, price_store
 from services.price_utils import normalize_price_df
 
 logger = logging.getLogger(__name__)
@@ -120,11 +121,15 @@ def _normalize_ohlcv(records: List[dict]) -> pd.DataFrame:
     )
     df = df.dropna(how="all")
     # Ensure all expected OHLCV columns exist so downstream code does not fail
-    df = df.reindex(columns=["Open", "High", "Low", "Close", "Adj Close", "Volume"], fill_value=None)
+    df = df.reindex(
+        columns=["Open", "High", "Low", "Close", "Adj Close", "Volume"], fill_value=None
+    )
     return df
 
 
-async def _download_batch(batch: List[str], period: str, interval: str) -> Dict[str, pd.DataFrame]:
+async def _download_batch(
+    batch: List[str], period: str, interval: str
+) -> Dict[str, pd.DataFrame]:
     """Download a batch of tickers via Yahoo's multi-symbol spark endpoint.
 
     The heavy lifting for retries and rate limiting is delegated to
@@ -161,11 +166,31 @@ async def _download_batch(batch: List[str], period: str, interval: str) -> Dict[
             records.append(
                 {
                     "timestamp": t,
-                    "open": quote.get("open", [None])[i] if i < len(quote.get("open", [])) else None,
-                    "high": quote.get("high", [None])[i] if i < len(quote.get("high", [])) else None,
-                    "low": quote.get("low", [None])[i] if i < len(quote.get("low", [])) else None,
-                    "close": quote.get("close", [None])[i] if i < len(quote.get("close", [])) else None,
-                    "volume": quote.get("volume", [None])[i] if i < len(quote.get("volume", [])) else None,
+                    "open": (
+                        quote.get("open", [None])[i]
+                        if i < len(quote.get("open", []))
+                        else None
+                    ),
+                    "high": (
+                        quote.get("high", [None])[i]
+                        if i < len(quote.get("high", []))
+                        else None
+                    ),
+                    "low": (
+                        quote.get("low", [None])[i]
+                        if i < len(quote.get("low", []))
+                        else None
+                    ),
+                    "close": (
+                        quote.get("close", [None])[i]
+                        if i < len(quote.get("close", []))
+                        else None
+                    ),
+                    "volume": (
+                        quote.get("volume", [None])[i]
+                        if i < len(quote.get("volume", []))
+                        else None
+                    ),
                     "adjclose": adj_list[i] if i < len(adj_list) else None,
                 }
             )
@@ -175,7 +200,9 @@ async def _download_batch(batch: List[str], period: str, interval: str) -> Dict[
     return results
 
 
-def fetch_prices(tickers: List[str], interval: str, lookback_years: float) -> Dict[str, pd.DataFrame]:
+def fetch_prices(
+    tickers: List[str], interval: str, lookback_years: float
+) -> Dict[str, pd.DataFrame]:
     """Fetch price data for tickers with batching, caching, and retries."""
     period = _period_for(interval, lookback_years)
     ttl = _cache_ttl(interval)
@@ -198,6 +225,28 @@ def fetch_prices(tickers: List[str], interval: str, lookback_years: float) -> Di
             results[t] = mem.copy()
             logger.info("mem_cache_hit=%s", t)
             continue
+        end_dt = dt.datetime.utcnow().replace(tzinfo=dt.timezone.utc)
+        start_dt = end_dt - dt.timedelta(days=int(lookback_years * 365))
+        cov_min, cov_max = price_store.get_coverage(t, interval)
+        if price_store.covers(start_dt, end_dt, cov_min, cov_max):
+            logger.info(
+                "db_coverage_ok symbol=%s interval=%s %s..%s",
+                t,
+                interval,
+                start_dt,
+                end_dt,
+            )
+            df = price_store.load_bars(t, interval, start_dt, end_dt)
+            results[t] = df
+            _MEM_CACHE[key] = df
+            continue
+        to_fetch = price_store.missing_ranges(start_dt, end_dt, cov_min, cov_max)
+        logger.info(
+            "db_coverage_gap symbol=%s interval=%s missing=%s",
+            t,
+            interval,
+            to_fetch,
+        )
         path = _cache_file(t, interval, period)
         if _is_fresh(path, ttl):
             try:

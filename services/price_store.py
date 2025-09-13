@@ -2,7 +2,8 @@ import logging
 import os
 import sqlite3
 import time
-from typing import Dict, List, Tuple
+from datetime import datetime
+from typing import Dict, List, Optional, Tuple
 
 import pandas as pd  # type: ignore[import-untyped]
 
@@ -10,11 +11,11 @@ import db
 
 logger = logging.getLogger(__name__)
 
-TABLE_15M = "bars_15m"
+BARS_TABLE = "bars"
 
 # Simple in-process cache for DB reads so repeated scans within a short window
 # do not thrash the database.
-_CACHE: Dict[Tuple[str, str, str], Tuple[float, pd.DataFrame]] = {}
+_CACHE: Dict[Tuple[str, str, str, str], Tuple[float, pd.DataFrame]] = {}
 CACHE_TTL = int(os.getenv("DB_CACHE_TTL", "120"))  # seconds
 
 
@@ -35,8 +36,8 @@ def clear_cache() -> None:
     _CACHE.clear()
 
 
-def upsert_bars(symbol: str, df: pd.DataFrame, conn=None) -> int:
-    """Upsert OHLCV rows into the 15m bars table and log the row count."""
+def upsert_bars(symbol: str, df: pd.DataFrame, interval: str = "15m", conn=None) -> int:
+    """Upsert OHLCV rows into the bars table and log the row count."""
     if df is None or df.empty:
         return 0
     if df.index.tz is None:
@@ -53,6 +54,7 @@ def upsert_bars(symbol: str, df: pd.DataFrame, conn=None) -> int:
         rows.append(
             (
                 symbol,
+                interval,
                 ts.isoformat(),
                 float(open_val) if pd.notna(open_val) else None,
                 float(high_val) if pd.notna(high_val) else None,
@@ -68,9 +70,10 @@ def upsert_bars(symbol: str, df: pd.DataFrame, conn=None) -> int:
     try:
         conn.executemany(
             f"""
-            INSERT INTO {TABLE_15M}(symbol, ts, open, high, low, close, volume)
-            VALUES(?,?,?,?,?,?,?)
-            ON CONFLICT(symbol, ts) DO UPDATE SET
+            INSERT INTO {BARS_TABLE}(symbol, interval, ts, open, high, low, close,
+                                    volume)
+            VALUES(?,?,?,?,?,?,?,?)
+            ON CONFLICT(symbol, interval, ts) DO UPDATE SET
                 open=excluded.open,
                 high=excluded.high,
                 low=excluded.low,
@@ -88,13 +91,13 @@ def upsert_bars(symbol: str, df: pd.DataFrame, conn=None) -> int:
 
 
 def get_prices_from_db(
-    symbols: List[str], start, end, conn=None
+    symbols: List[str], start, end, interval: str = "15m", conn=None
 ) -> Dict[str, pd.DataFrame]:
     """Retrieve bars for symbols between start and end timestamps with caching."""
     close_conn = False
     results: Dict[str, pd.DataFrame] = {}
     for sym in symbols:
-        key = (sym, start.isoformat(), end.isoformat())
+        key = (sym, interval, start.isoformat(), end.isoformat())
         cached = _CACHE.get(key)
         if cached and cached[0] > time.monotonic():
             logger.info("db_cache_hit symbol=%s", sym)
@@ -105,10 +108,10 @@ def get_prices_from_db(
             close_conn = True
         cur = conn.execute(
             (
-                f"SELECT ts, open, high, low, close, volume FROM {TABLE_15M} "
-                "WHERE symbol=? AND ts>=? AND ts<=? ORDER BY ts"
+                f"SELECT ts, open, high, low, close, volume FROM {BARS_TABLE} "
+                "WHERE symbol=? AND interval=? AND ts>=? AND ts<=? ORDER BY ts"
             ),
-            (sym, start.isoformat(), end.isoformat()),
+            (sym, interval, start.isoformat(), end.isoformat()),
         )
         rows = cur.fetchall()
         if rows:
@@ -126,16 +129,83 @@ def get_prices_from_db(
     return results
 
 
-def detect_gaps(symbol: str, start, end, conn=None) -> List[pd.Timestamp]:
-    """Return list of expected 15m timestamps missing from DB.
+def detect_gaps(
+    symbol: str, start, end, interval: str = "15m", conn=None
+) -> List[pd.Timestamp]:
+    """Return list of expected timestamps missing from DB.
 
     The interval is treated as ``[start, end)`` so the ``end`` timestamp is
     exclusive. This prevents an off-by-one error when the range boundary falls
     exactly on a bar start.
     """
-    data = get_prices_from_db([symbol], start, end, conn=conn)[symbol]
+    data = get_prices_from_db([symbol], start, end, interval=interval, conn=conn)[
+        symbol
+    ]
+    freq = f"{interval[:-1]}min" if interval.endswith("m") else interval
     expected = pd.date_range(
-        start=start, end=end, freq="15min", tz="UTC", inclusive="left"
+        start=start, end=end, freq=freq, tz="UTC", inclusive="left"
     )
     have = set(data.index)
     return [ts for ts in expected if ts not in have]
+
+
+def get_coverage(
+    symbol: str, interval: str, conn=None
+) -> Tuple[Optional[datetime], Optional[datetime]]:
+    """Return the min/max timestamps present for the symbol/interval."""
+    close_conn = False
+    if conn is None:
+        conn = _open_conn()
+        close_conn = True
+    try:
+        cur = conn.execute(
+            f"SELECT MIN(ts) AS min_ts, MAX(ts) AS max_ts FROM {BARS_TABLE} "
+            "WHERE symbol=? AND interval=?",
+            (symbol, interval),
+        )
+        row = cur.fetchone()
+        min_ts = None
+        max_ts = None
+        if row:
+            if isinstance(row, sqlite3.Row):
+                min_ts = row["min_ts"]
+                max_ts = row["max_ts"]
+            else:  # fallback when row factory not set
+                min_ts, max_ts = row[0], row[1]
+        return (
+            pd.to_datetime(min_ts, utc=True).to_pydatetime() if min_ts else None,
+            pd.to_datetime(max_ts, utc=True).to_pydatetime() if max_ts else None,
+        )
+    finally:
+        if close_conn:
+            conn.close()
+
+
+def covers(start: datetime, end: datetime, cov_min, cov_max) -> bool:
+    """Return True if coverage fully spans the requested window."""
+    if cov_min is None or cov_max is None:
+        return False
+    return cov_min <= start and cov_max >= end
+
+
+def missing_ranges(
+    start: datetime, end: datetime, cov_min, cov_max
+) -> List[Tuple[datetime, datetime]]:
+    """Return list of (start,end) tuples not covered by existing data."""
+    if cov_min is None or cov_max is None:
+        return [(start, end)]
+    ranges: List[Tuple[datetime, datetime]] = []
+    if start < cov_min:
+        ranges.append((start, cov_min))
+    if cov_max < end:
+        ranges.append((cov_max, end))
+    return [(a, b) for a, b in ranges if a < b]
+
+
+def load_bars(
+    symbol: str, interval: str, start: datetime, end: datetime, conn=None
+) -> pd.DataFrame:
+    """Helper to load bars for a single symbol."""
+    return get_prices_from_db([symbol], start, end, interval=interval, conn=conn)[
+        symbol
+    ]

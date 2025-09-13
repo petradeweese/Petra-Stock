@@ -19,12 +19,13 @@ def test_gap_fill_fetch(monkeypatch, tmp_path):
         {"Open": [1], "High": [1], "Low": [1], "Close": [1], "Volume": [1]},
         index=[start],
     )
-    upsert_bars("AAA", df)
+    upsert_bars("AAA", df, "15m")
 
     gaps = detect_gaps(
         "AAA",
         start.to_pydatetime(),
         (missing + pd.Timedelta(minutes=15)).to_pydatetime(),
+        "15m",
     )
     assert missing in gaps
 
@@ -43,12 +44,13 @@ def test_gap_fill_fetch(monkeypatch, tmp_path):
         start.to_pydatetime(),
         (missing + pd.Timedelta(minutes=15)).to_pydatetime(),
     )["AAA"]
-    upsert_bars("AAA", fetched)
+    upsert_bars("AAA", fetched, "15m")
     clear_cache()
 
     gaps = detect_gaps(
         "AAA",
         start.to_pydatetime(),
         (missing + pd.Timedelta(minutes=15)).to_pydatetime(),
+        "15m",
     )
     assert gaps == []
