@@ -10,6 +10,7 @@ from config import settings
 from db import DB_PATH, get_settings, set_last_run
 from prometheus_client import Counter
 from scanner import preload_prices
+from routes import _update_forward_tests
 from services.data_fetcher import fetch_prices as yahoo_fetch
 from services.polygon_client import fetch_polygon_prices
 from services.price_store import upsert_bars
@@ -150,6 +151,33 @@ async def favorites_loop(
         await asyncio.sleep(max(0, 60 - elapsed))
 
 
+async def forward_tests_loop(
+    market_is_open: Callable[[datetime], bool], now_et: Callable[[], datetime]
+) -> None:
+    logger.info("forward tests scheduler started")
+    while True:
+        start_time = asyncio.get_event_loop().time()
+        jitter = random.uniform(0, 5)
+        await asyncio.sleep(jitter)
+        try:
+            ts = now_et()
+            run = False
+            if market_is_open(ts):
+                if ts.minute % 15 == 0:
+                    run = True
+            elif ts.minute == 0:
+                run = True
+            if run:
+                with sqlite3.connect(DB_PATH) as conn:
+                    conn.row_factory = sqlite3.Row
+                    db = conn.cursor()
+                    _update_forward_tests(db)
+        except Exception as e:
+            logger.error("forward tests loop error: %r", e)
+        elapsed = asyncio.get_event_loop().time() - start_time
+        await asyncio.sleep(max(0, 60 - elapsed))
+
+
 def setup_scheduler(app, market_is_open, now_et, compute_scan_for_ticker):
     @app.on_event("startup")
     async def on_startup():
@@ -157,3 +185,4 @@ def setup_scheduler(app, market_is_open, now_et, compute_scan_for_ticker):
         asyncio.create_task(
             favorites_loop(market_is_open, now_et, compute_scan_for_ticker)
         )
+        asyncio.create_task(forward_tests_loop(market_is_open, now_et))
