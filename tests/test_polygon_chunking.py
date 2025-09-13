@@ -6,10 +6,11 @@ from services import polygon_client
 
 
 def test_week_chunking(monkeypatch):
-    calls = []
+    windows = []
 
     async def fake_fetch(symbol, start, end, multiplier, timespan):
-        calls.append((start, end))
+        ny_start, ny_end, *_ = polygon_client._normalize_window(start, end)
+        windows.append((ny_start, ny_end))
         return pd.DataFrame()
 
     monkeypatch.setattr(polygon_client, "_fetch_single", fake_fetch)
@@ -19,4 +20,8 @@ def test_week_chunking(monkeypatch):
     end = start + dt.timedelta(days=15)
 
     polygon_client.fetch_polygon_prices(["AAA"], "15m", start, end)
-    assert len(calls) == 3  # 15 days -> 3 chunks
+    assert len(windows) == 3  # 15 days -> 3 chunks
+    for i, (ws, we) in enumerate(windows):
+        assert (we - ws) <= dt.timedelta(days=7)
+        if i > 0:
+            assert ws == windows[i - 1][1]

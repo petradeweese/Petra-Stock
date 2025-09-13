@@ -164,12 +164,24 @@ async def fetch_polygon_prices_async(
     timespan = "minute"
     out: Dict[str, pd.DataFrame] = {}
     for sym in symbols:
-        window_start = start
+        # Chunk requests on NY midnight boundaries to avoid overlapping or
+        # overlong windows once normalized inside ``_fetch_single``.
+        ny_start = start.astimezone(NY_TZ)
+        ny_end = end.astimezone(NY_TZ)
+        window_start = dt.datetime(
+            ny_start.year, ny_start.month, ny_start.day, tzinfo=NY_TZ
+        )
         frames: List[pd.DataFrame] = []
-        while window_start < end:
-            window_end = min(window_start + dt.timedelta(days=7), end)
+        while window_start < ny_end:
+            window_end = min(window_start + dt.timedelta(days=7), ny_end)
             frames.append(
-                await _fetch_single(sym, window_start, window_end, multiplier, timespan)
+                await _fetch_single(
+                    sym,
+                    window_start.astimezone(dt.timezone.utc),
+                    window_end.astimezone(dt.timezone.utc),
+                    multiplier,
+                    timespan,
+                )
             )
             window_start = window_end
         out[sym] = pd.concat(frames).sort_index() if frames else pd.DataFrame()

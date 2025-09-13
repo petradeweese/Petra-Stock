@@ -45,3 +45,22 @@ def test_earnings_blackout(monkeypatch):
     )
     assert not allowed
     assert "earnings" in flags
+
+
+def test_zero_mid_price(monkeypatch):
+    allowed, flags = check_alert_filters(
+        "AAA",
+        "UP",
+        get_adv=lambda t: 2_000_000,
+        get_option=lambda t: {
+            "open_interest": 1000,
+            "volume": 200,
+            "bid": 1.0,
+            "ask": 1.2,
+            "mid": 0.0,
+        },
+        get_price_sma=_base_price_sma,
+        get_earnings=lambda t: None,
+    )
+    assert not allowed
+    assert "wide_spread" in flags
