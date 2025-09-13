@@ -3,6 +3,7 @@ import time
 import httpx
 import sys
 from pathlib import Path
+import pytest
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
@@ -50,4 +51,4 @@ def test_retry_after_respected(monkeypatch):
     elapsed = time.monotonic() - start
     assert resp.status_code == 200
     assert client.calls == 2
-    assert elapsed >= 0.1
+    assert elapsed == pytest.approx(0.1, abs=0.01)
