@@ -27,11 +27,64 @@ from scanner import compute_scan_for_ticker, preload_prices
 from services.market_data import get_prices, window_from_lookback
 from utils import TZ, now_et
 
-from .archive import _format_rule_summary, router as archive_router
+from .archive import _format_rule_summary
+from .archive import router as archive_router
 
 router = APIRouter()
 templates = Jinja2Templates(directory="templates")
 logger = logging.getLogger(__name__)
+
+
+def _get_next_earnings(ticker: str):  # pragma: no cover - external service
+    return None
+
+
+def _get_adv(ticker: str):  # pragma: no cover - external service
+    return None
+
+
+def check_guardrails(
+    ticker: str,
+    *,
+    earnings_window: int = 7,
+    adv_threshold: float = 1_000_000.0,
+    get_earnings: Callable[[str], pd.Timestamp | None] | None = None,
+    get_adv: Callable[[str], float | None] | None = None,
+) -> tuple[bool, list[str]]:
+    """Evaluate guardrails for a forward test.
+
+    Returns ``(True, [])`` when the test may proceed. When guardrails trigger,
+    returns ``(False, flags)`` where ``flags`` describes the failing rules.
+    ``earnings`` is flagged when within ``earnings_window`` trading days of a
+    known earnings date.  ``low_liquidity`` is flagged when average daily volume
+    falls below ``adv_threshold``.
+    """
+
+    get_earnings = get_earnings or _get_next_earnings
+    get_adv = get_adv or _get_adv
+
+    flags: list[str] = []
+    today = now_et().date()
+
+    try:
+        edate = get_earnings(ticker)
+        if edate is not None:
+            edate = pd.Timestamp(edate).date()
+            diff = abs(len(pd.bdate_range(today, edate)) - 1)
+            if diff <= earnings_window:
+                flags.append("earnings")
+    except Exception:
+        logger.exception("earnings guardrail failed ticker=%s", ticker)
+
+    try:
+        adv = get_adv(ticker)
+        if adv is not None and adv < adv_threshold:
+            flags.append("low_liquidity")
+    except Exception:
+        logger.exception("liquidity guardrail failed ticker=%s", ticker)
+
+    return (not flags, flags)
+
 
 router.include_router(archive_router)
 
@@ -340,6 +393,71 @@ def _send_email(
             server.send_message(msg)
 
 
+def compile_weekly_digest(
+    db: sqlite3.Cursor, ts: Optional[pd.Timestamp] = None
+) -> tuple[str, str]:
+    ts = pd.Timestamp(ts or now_et())
+    week_start = (ts - pd.Timedelta(days=ts.weekday())).date()
+    start_iso = pd.Timestamp(week_start, tz=TZ).isoformat()
+
+    db.execute("SELECT COUNT(*) FROM forward_tests WHERE created_at>=?", (start_iso,))
+    new_count = db.fetchone()[0]
+    db.execute(
+        "SELECT COUNT(*) FROM forward_tests WHERE status IN ('target','stop','expired') AND updated_at>=?",
+        (start_iso,),
+    )
+    resolved_count = db.fetchone()[0]
+    db.execute(
+        "SELECT AVG(hit_forward), AVG(roi_forward) FROM forward_tests WHERE created_at>=?",
+        (start_iso,),
+    )
+    hit_avg, roi_avg = db.fetchone()
+    hit_avg = hit_avg or 0.0
+    roi_avg = roi_avg or 0.0
+
+    subject = (
+        f"[Forward Digest] Week of {week_start:%Y-%m-%d} – {new_count} New | {resolved_count} Resolved | "
+        f"Hit% {hit_avg:.0f} | Avg ROI {roi_avg:.1f}%"
+    )
+
+    db.execute(
+        "SELECT reason, COUNT(*) FROM guardrail_skips WHERE created_at>=? GROUP BY reason",
+        (start_iso,),
+    )
+    guard = {r[0]: r[1] for r in db.fetchall()}
+
+    lines = [
+        f"New tests: {new_count}",
+        f"Resolved tests: {resolved_count}",
+        f"Hit%: {hit_avg:.0f}",
+        f"Avg ROI: {roi_avg:.1f}%",
+        f"Guardrails - earnings: {guard.get('earnings',0)}, low_liquidity: {guard.get('low_liquidity',0)}",
+        "Top Winners:",
+    ]
+    db.execute(
+        "SELECT ticker, roi_forward FROM forward_tests WHERE created_at>=? ORDER BY roi_forward DESC LIMIT 3",
+        (start_iso,),
+    )
+    for sym, roi in db.fetchall():
+        lines.append(f"  {sym} {roi or 0:.1f}%")
+    lines.append("Top Losers:")
+    db.execute(
+        "SELECT ticker, dd_forward FROM forward_tests WHERE created_at>=? ORDER BY dd_forward DESC LIMIT 3",
+        (start_iso,),
+    )
+    for sym, dd in db.fetchall():
+        lines.append(f"  {sym} {dd or 0:.1f}% DD")
+    lines.append("Link: /forward?filter=last7d")
+    body = "\n".join(lines)
+    return subject, body
+
+
+def send_weekly_digest(db: sqlite3.Cursor) -> None:
+    st = get_settings(db)
+    subject, body = compile_weekly_digest(db)
+    _send_email(st, subject, body)
+
+
 @router.get("/", response_class=HTMLResponse)
 def home(request: Request):
     return templates.TemplateResponse(
@@ -384,6 +502,19 @@ def _window_to_minutes(value: float, unit: str) -> int:
 
 
 def _create_forward_test(db: sqlite3.Cursor, fav: dict) -> None:
+    allowed, flags = check_guardrails(fav.get("ticker"))
+    if not allowed:
+        logger.info(
+            "forward test for %s skipped due to guardrails: %s",
+            fav.get("ticker"),
+            ",".join(flags),
+        )
+        db.execute(
+            "INSERT INTO guardrail_skips(ticker, reason) VALUES (?, ?)",
+            (fav.get("ticker"), ",".join(flags)),
+        )
+        return
+
     start, end = window_from_lookback(fav.get("lookback_years", 1.0))
     data = get_prices([fav["ticker"]], fav.get("interval", "15m"), start, end).get(
         fav["ticker"]
@@ -399,15 +530,37 @@ def _create_forward_test(db: sqlite3.Cursor, fav: dict) -> None:
     window_minutes = _window_to_minutes(
         fav.get("window_value", 4.0), fav.get("window_unit", "Hours")
     )
+
+    db.execute(
+        """SELECT version, target_pct, stop_pct, window_minutes, rule
+            FROM forward_tests WHERE fav_id=? ORDER BY id DESC LIMIT 1""",
+        (fav["id"],),
+    )
+    row = db.fetchone()
+    version = 1
+    if row:
+        version = row[0]
+        if (
+            float(row[1]) != float(fav.get("target_pct", 1.0))
+            or float(row[2]) != float(fav.get("stop_pct", 0.5))
+            or int(row[3]) != window_minutes
+            or (row[4] or "") != fav.get("rule")
+        ):
+            db.execute(
+                "UPDATE forward_tests SET status='closed' WHERE fav_id=? AND version=?",
+                (fav["id"], row[0]),
+            )
+            version = row[0] + 1
+
     now_iso = now_et().isoformat()
     db.execute(
         """INSERT INTO forward_tests
-            (fav_id, ticker, direction, interval, rule, entry_price,
+            (fav_id, ticker, direction, interval, rule, version, entry_price,
              target_pct, stop_pct, window_minutes, status, roi_forward, hit_forward, dd_forward,
              roi_1, roi_3, roi_5, roi_expiry, mae, mfe, time_to_hit, time_to_stop,
              option_expiry, option_strike, option_delta, option_roi_proxy,
              last_run_at, next_run_at, runs_count, notes, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0.0, NULL, 0.0,
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0.0, NULL, 0.0,
                     NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
                     NULL, NULL, ?, 0.0,
                     NULL, NULL, 0, NULL, ?, ?)""",
@@ -417,6 +570,7 @@ def _create_forward_test(db: sqlite3.Cursor, fav: dict) -> None:
             fav.get("direction", "UP"),
             fav.get("interval", "15m"),
             fav.get("rule"),
+            version,
             entry_price,
             fav.get("target_pct", 1.0),
             fav.get("stop_pct", 0.5),
@@ -474,9 +628,7 @@ def _update_forward_tests(db: sqlite3.Cursor) -> None:
             expire_ts = entry_ts + pd.Timedelta(minutes=row["window_minutes"])
             expiry_prices = prices[prices.index <= expire_ts]
             roi_expiry = (
-                float(
-                    (expiry_prices.iloc[-1] / row["entry_price"] - 1.0) * 100 * mult
-                )
+                float((expiry_prices.iloc[-1] / row["entry_price"] - 1.0) * 100 * mult)
                 if not expiry_prices.empty
                 else None
             )
