@@ -164,15 +164,8 @@ async def fetch_polygon_prices_async(
     timespan = "minute"
     out: Dict[str, pd.DataFrame] = {}
     for sym in symbols:
-        window_start = start
-        frames: List[pd.DataFrame] = []
-        while window_start < end:
-            window_end = min(window_start + dt.timedelta(days=7), end)
-            frames.append(
-                await _fetch_single(sym, window_start, window_end, multiplier, timespan)
-            )
-            window_start = window_end
-        out[sym] = pd.concat(frames).sort_index() if frames else pd.DataFrame()
+        # Single full-range request; _fetch_single paginates if needed
+        out[sym] = await _fetch_single(sym, start, end, multiplier, timespan)
     return out
 
 
