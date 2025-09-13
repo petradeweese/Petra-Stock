@@ -20,7 +20,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from config import settings
-from db import DB_PATH, get_db, get_schema_status, get_settings
+from db import DB_PATH, get_db, get_schema_status, get_settings, _ensure_scanner_column
 from indices import SP100, TOP150, TOP250
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 from scanner import compute_scan_for_ticker, preload_prices
@@ -355,7 +355,13 @@ def _sort_rows(rows, sort_key):
 
 
 def _send_email(
-    st: sqlite3.Row, subject: str, body: str, html_body: Optional[str] = None
+    st: dict,
+    subject: str,
+    body: str,
+    html_body: Optional[str] = None,
+    *,
+    list_field: str = "recipients",
+    allow_sms: bool = True,
 ) -> None:
     """Send an email using settings stored in the database.
 
@@ -365,11 +371,17 @@ def _send_email(
     scanner can proceed without failing.
     """
 
-    user = (st["smtp_user"] or "").strip()
-    pwd = (st["smtp_pass"] or "").replace(" ", "").strip()
-    recips = [r.strip() for r in (st["recipients"] or "").split(",") if r.strip()]
+    user = (st.get("smtp_user") or "").strip()
+    pwd = (st.get("smtp_pass") or "").replace(" ", "").strip()
+    recips = [r.strip() for r in (st.get(list_field) or "").split(",") if r.strip()]
+    if not allow_sms:
+        from services.notifications import is_carrier_address
+
+        recips = [r for r in recips if not is_carrier_address(r)]
     if not user or not pwd or not recips:
         return
+
+    logger.info("sending email using %s list to %d recipients", list_field, len(recips))
 
     msg = EmailMessage()
     msg["Subject"] = subject
@@ -848,20 +860,41 @@ def settings_save(
     smtp_user: str = Form(""),
     smtp_pass: str = Form(""),
     recipients: str = Form(""),
+    scanner_recipients: str = Form(""),
     scheduler_enabled: int = Form(1),
     throttle_minutes: int = Form(60),
     db=Depends(get_db),
 ):
+    _ensure_scanner_column(db)
+    from email.utils import parseaddr
+    from services.notifications import is_carrier_address
+
+    def _clean(raw: str, *, allow_sms: bool) -> str:
+        parts = [r.strip() for r in raw.split(",") if r.strip()]
+        cleaned: list[str] = []
+        for r in parts:
+            addr = parseaddr(r)[1]
+            if "@" not in addr:
+                continue
+            if not allow_sms and is_carrier_address(addr):
+                continue
+            cleaned.append(addr)
+        return ",".join(cleaned)
+
+    clean_fav = _clean(recipients, allow_sms=True)
+    clean_scan = _clean(scanner_recipients, allow_sms=False)
+
     db.execute(
         """
         UPDATE settings
-           SET smtp_user=?, smtp_pass=?, recipients=?, scheduler_enabled=?, throttle_minutes=?
+           SET smtp_user=?, smtp_pass=?, recipients=?, scanner_recipients=?, scheduler_enabled=?, throttle_minutes=?
          WHERE id=1
         """,
         (
             smtp_user.strip(),
             smtp_pass.strip(),
-            recipients.strip(),
+            clean_fav,
+            clean_scan,
             int(scheduler_enabled),
             int(throttle_minutes),
         ),
