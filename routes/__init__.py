@@ -404,8 +404,11 @@ def _create_forward_test(db: sqlite3.Cursor, fav: dict) -> None:
         """INSERT INTO forward_tests
             (fav_id, ticker, direction, interval, rule, entry_price,
              target_pct, stop_pct, window_minutes, status, roi_forward, hit_forward, dd_forward,
+             roi_1, roi_3, roi_5, roi_expiry, mae, mfe, time_to_hit, time_to_stop,
              last_run_at, next_run_at, runs_count, notes, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0.0, NULL, 0.0, NULL, NULL, 0, NULL, ?, ?)""",
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0.0, NULL, 0.0,
+                    NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+                    NULL, NULL, 0, NULL, ?, ?)""",
         (
             fav["id"],
             fav["ticker"],
@@ -457,48 +460,95 @@ def _update_forward_tests(db: sqlite3.Cursor) -> None:
                 )
                 continue
             prices = after["Close"]
+            highs = after["High"]
+            lows = after["Low"]
             mult = 1.0 if row["direction"] == "UP" else -1.0
             pct_series = (prices / row["entry_price"] - 1.0) * 100 * mult
-            roi = float(pct_series.iloc[-1])
-            mae = float(pct_series.min())
+            roi_curve = {1: None, 3: None, 5: None}
+            for n in roi_curve:
+                if len(pct_series) >= n:
+                    roi_curve[n] = float(pct_series.iloc[n - 1])
+            expire_ts = entry_ts + pd.Timedelta(minutes=row["window_minutes"])
+            expiry_prices = prices[prices.index <= expire_ts]
+            roi_expiry = (
+                float(
+                    (expiry_prices.iloc[-1] / row["entry_price"] - 1.0) * 100 * mult
+                )
+                if not expiry_prices.empty
+                else None
+            )
+            if row["direction"] == "UP":
+                hit_cond = highs >= row["entry_price"] * (1 + row["target_pct"] / 100)
+                stop_cond = lows <= row["entry_price"] * (1 - row["stop_pct"] / 100)
+                mae_series = (lows / row["entry_price"] - 1.0) * 100 * mult
+                mfe_series = (highs / row["entry_price"] - 1.0) * 100 * mult
+            else:
+                hit_cond = lows <= row["entry_price"] * (1 - row["target_pct"] / 100)
+                stop_cond = highs >= row["entry_price"] * (1 + row["stop_pct"] / 100)
+                mae_series = (highs / row["entry_price"] - 1.0) * 100 * mult
+                mfe_series = (lows / row["entry_price"] - 1.0) * 100 * mult
+            hit_time = hit_cond[hit_cond].index[0] if hit_cond.any() else None
+            stop_time = stop_cond[stop_cond].index[0] if stop_cond.any() else None
+            mae = float(mae_series.min()) if not mae_series.empty else 0.0
+            mfe = float(mfe_series.max()) if not mfe_series.empty else 0.0
+            roi = float(pct_series.iloc[-1]) if not pct_series.empty else 0.0
             status = "ok"
             hit_pct = None
-            if row["direction"] == "UP":
-                hit_cond = prices >= row["entry_price"] * (1 + row["target_pct"] / 100)
-                stop_cond = prices <= row["entry_price"] * (1 - row["stop_pct"] / 100)
-            else:
-                hit_cond = prices <= row["entry_price"] * (1 - row["target_pct"] / 100)
-                stop_cond = prices >= row["entry_price"] * (1 + row["stop_pct"] / 100)
-            hit_time = prices[hit_cond].index[0] if hit_cond.any() else None
-            stop_time = prices[stop_cond].index[0] if stop_cond.any() else None
-            expire_ts = entry_ts + pd.Timedelta(minutes=row["window_minutes"])
-            final_ts = after.index[-1]
+            event_time = None
+            event_roi = roi
             if (
                 hit_time
-                and (not stop_time or hit_time <= stop_time)
+                and (not stop_time or hit_time < stop_time)
                 and hit_time <= expire_ts
             ):
-                roi = float(pct_series.loc[hit_time])
+                event_time = hit_time
+                event_roi = row["target_pct"]
                 hit_pct = 100.0
             elif (
                 stop_time
-                and (not hit_time or stop_time < hit_time)
+                and (not hit_time or stop_time <= hit_time)
                 and stop_time <= expire_ts
             ):
-                roi = float(pct_series.loc[stop_time])
+                event_time = stop_time
+                event_roi = -row["stop_pct"]
                 hit_pct = 0.0
-            elif final_ts < expire_ts:
+            elif prices.index[-1] < expire_ts:
                 status = "queued"
+            roi = event_roi
+            if event_time is not None:
+                event_idx = after.index.get_loc(event_time)
+                for n in roi_curve:
+                    if event_idx <= n - 1:
+                        roi_curve[n] = event_roi
+                roi_expiry = event_roi
             dd = float(max(0.0, -mae))
+            t_hit = (
+                (hit_time - entry_ts).total_seconds() / 60
+                if hit_time and hit_time <= expire_ts
+                else None
+            )
+            t_stop = (
+                (stop_time - entry_ts).total_seconds() / 60
+                if stop_time and stop_time <= expire_ts
+                else None
+            )
             db.execute(
                 """UPDATE forward_tests
-                       SET roi_forward=?, dd_forward=?, status=?, hit_forward=?, last_run_at=?, next_run_at=?, updated_at=?
+                       SET roi_forward=?, dd_forward=?, status=?, hit_forward=?, roi_1=?, roi_3=?, roi_5=?, roi_expiry=?, mae=?, mfe=?, time_to_hit=?, time_to_stop=?, last_run_at=?, next_run_at=?, updated_at=?
                        WHERE id=?""",
                 (
                     roi,
                     dd,
                     status,
                     hit_pct,
+                    roi_curve[1],
+                    roi_curve[3],
+                    roi_curve[5],
+                    roi_expiry,
+                    mae,
+                    mfe,
+                    t_hit,
+                    t_stop,
                     now_et().isoformat(),
                     now_et().isoformat(),
                     now_iso,
