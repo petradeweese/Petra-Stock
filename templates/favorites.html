@@ -20,7 +20,6 @@
           <th>Hit%</th>
           <th>DD%</th>
           <th>Rule</th>
-          <th>Alerts</th>
           <th></th>
         </tr>
       </thead>
@@ -35,13 +34,6 @@
           <td>{{ '{:.1f}'.format(f['hit_pct']) if f['hit_pct'] is not none else '' }}</td>
           <td>{{ '{:.0f}'.format(f['avg_dd_pct']*100 if f['avg_dd_pct'] is not none and f['avg_dd_pct'] <= 1 else f['avg_dd_pct']) if f['avg_dd_pct'] is not none else '' }}</td>
           <td><code>{{ f["rule"] }}</code></td>
-          <td>
-            <form method="post" action="/favorites/update/{{ f['id'] }}" style="margin:0; display:flex; gap:4px; align-items:center;">
-              <input type="checkbox" name="alerts_enabled" value="1" {% if f['alerts_enabled'] %}checked{% endif %} />
-              <input name="cooldown_minutes" type="number" value="{{ f['cooldown_minutes'] or st['fav_cooldown_minutes'] }}" style="width:60px;" />
-              <button type="submit">Save</button>
-            </form>
-          </td>
           <td>
             <form method="post" action="/favorites/delete/{{ f['id'] }}" style="margin:0;">
               <button type="submit" class="del-btn">&#10005;</button>

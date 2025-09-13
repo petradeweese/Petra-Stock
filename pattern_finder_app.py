@@ -34,10 +34,11 @@ import httpx
 
 from services.price_utils import normalize_price_df, DataUnavailableError
 
+from email.message import EmailMessage
 from datetime import datetime, timedelta
 
 from utils import now_et
-import certifi
+import smtplib, ssl, certifi
 
 from ta.momentum import RSIIndicator
 from ta.trend import EMAIndicator, MACD
@@ -1457,15 +1458,36 @@ class App:
         self.alert_status.set("Alert settings saved.")
 
     def _send_email(self, cfg, subject, body):
-        from services.emailer import send_email
+        if not cfg.get("smtp_user") or not cfg.get("smtp_pass"):
+            raise RuntimeError("SMTP user/password missing.")
+        if not cfg.get("recipients"):
+            raise RuntimeError("Recipient list is empty.")
 
-        st = {
-            "smtp_user": cfg.get("smtp_user"),
-            "smtp_pass": cfg.get("smtp_pass"),
-            "recipients": ",".join(cfg.get("recipients", [])),
-        }
-        if not send_email(st, subject, body):
-            raise RuntimeError("SMTP settings incomplete.")
+        # Build the message
+        msg = EmailMessage()
+        msg["Subject"] = subject
+        msg["From"] = cfg["smtp_user"].strip()
+        msg["To"] = ", ".join(cfg["recipients"])
+        msg.set_content(body)
+
+        # Trust store for TLS using certifi to provide a consistent CA bundle
+        ctx = ssl.create_default_context(cafile=certifi.where())
+
+        # Gmail app passwords are shown with spaces — strip them out
+        user = cfg["smtp_user"].strip()
+        pwd = cfg["smtp_pass"].replace(" ", "").strip()
+
+        # Try implicit TLS first, then fall back to STARTTLS
+        try:
+            with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=ctx, timeout=20) as server:
+                server.login(user, pwd)
+                server.send_message(msg)
+        except ssl.SSLError:
+            with smtplib.SMTP("smtp.gmail.com", 587, timeout=20) as server:
+                server.ehlo()
+                server.starttls(context=ctx)
+                server.login(user, pwd)
+                server.send_message(msg)
 
     def _compose_alert_email(self, rows):
         lines = []
