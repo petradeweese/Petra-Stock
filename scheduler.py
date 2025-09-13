@@ -1,5 +1,6 @@
 # ruff: noqa: E501
 import asyncio
+import json
 import logging
 import random
 import sqlite3
@@ -13,7 +14,9 @@ from scanner import preload_prices
 from services.alerts import alert_due, in_earnings_blackout
 from services.data_fetcher import fetch_prices as yahoo_fetch
 from services.emailer import send_email
+from services.forward import create_forward_test, update_forward_tests
 from services.market_data import fetch_prices as md_fetch_prices
+from services.market_data import get_prices
 from services.polygon_client import fetch_polygon_prices
 from services.price_store import upsert_bars
 
@@ -168,7 +171,8 @@ async def favorites_loop(
                         hits = []
                         for f in favs:
                             f.setdefault(
-                                "cooldown_minutes", int(st.get("fav_cooldown_minutes") or 30)
+                                "cooldown_minutes",
+                                int(st.get("fav_cooldown_minutes") or 30),
                             )
                             ticker = f.get("ticker", "?")
                             try:
@@ -189,9 +193,7 @@ async def favorites_loop(
                                     and row.get("avg_roi_pct", 0) > 0
                                 ):
                                     if alert_due(f, boundary, ts):
-                                        subject = (
-                                            f"[Pattern Alert] {ticker} {f.get('direction')} — {f.get('rule')}"
-                                        )
+                                        subject = f"[Pattern Alert] {ticker} {f.get('direction')} — {f.get('rule')}"
                                         body = (
                                             f"Ticker: {ticker}\n"
                                             f"Direction: {f.get('direction')}\n"
@@ -201,7 +203,11 @@ async def favorites_loop(
                                         send_email(st, subject, body)
                                         db.execute(
                                             "UPDATE favorites SET last_notified_ts=?, last_signal_bar=? WHERE id=?",
-                                            (ts.isoformat(), boundary.isoformat(), f["id"]),
+                                            (
+                                                ts.isoformat(),
+                                                boundary.isoformat(),
+                                                f["id"],
+                                            ),
                                         )
                                         db.connection.commit()
                                         hits.append(row)
@@ -259,10 +265,54 @@ async def favorites_loop(
         await asyncio.sleep(max(0, 60 - elapsed))
 
 
-def setup_scheduler(app, market_is_open, now_et, compute_scan_for_ticker):
+async def forward_tests_loop(
+    market_is_open: Callable[[datetime], bool],
+    now_et: Callable[[], datetime],
+    get_prices_fn=get_prices,
+) -> None:
+    """Background loop advancing forward tests on a cadence."""
+    logger.info("forward test scheduler started")
+    last_boundary = None
+    while True:
+        start_time = asyncio.get_event_loop().time()
+        try:
+            ts = now_et()
+            boundary = ts.replace(second=0, microsecond=0)
+            run_intraday = market_is_open(ts) and boundary.minute % 15 == 0
+            run_after_hours = not market_is_open(ts) and boundary.minute == 0
+            if boundary != last_boundary and (run_intraday or run_after_hours):
+                last_boundary = boundary
+                with sqlite3.connect(DB_PATH) as conn:
+                    conn.row_factory = sqlite3.Row
+                    db = conn.cursor()
+                    db.execute("SELECT * FROM favorites ORDER BY id DESC")
+                    favs = [dict(r) for r in db.fetchall()]
+                    for f in favs:
+                        db.execute(
+                            "SELECT status FROM forward_tests WHERE fav_id=? ORDER BY id DESC LIMIT 1",
+                            (f["id"],),
+                        )
+                        row = db.fetchone()
+                        if row is None or row["status"] in ("ok", "error"):
+                            create_forward_test(db, f, get_prices_fn)
+                    update_forward_tests(db, get_prices_fn)
+        except Exception as e:
+            logger.error("forward test scheduler error: %r", e)
+        elapsed = asyncio.get_event_loop().time() - start_time
+        await asyncio.sleep(max(0, 60 - elapsed))
+
+
+def setup_scheduler(
+    app,
+    market_is_open,
+    now_et,
+    compute_scan_for_ticker,
+    get_prices_fn=get_prices,
+):
     @app.on_event("startup")
     async def on_startup():
         asyncio.create_task(work_queue.worker())
         asyncio.create_task(
             favorites_loop(market_is_open, now_et, compute_scan_for_ticker)
         )
+        asyncio.create_task(forward_tests_loop(market_is_open, now_et, get_prices_fn))
