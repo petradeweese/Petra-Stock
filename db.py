@@ -71,7 +71,10 @@ SCHEMA = [
         scheduler_enabled INTEGER DEFAULT 0,
         throttle_minutes INTEGER DEFAULT 60,
         last_boundary TEXT,
-        last_run_at TEXT
+        last_run_at TEXT,
+        fav_filter_liquidity INTEGER DEFAULT 1,
+        fav_filter_trend INTEGER DEFAULT 1,
+        fav_filter_earnings INTEGER DEFAULT 1
     );
     """,
     """
@@ -84,10 +87,13 @@ SCHEMA = [
         scheduler_enabled,
         throttle_minutes,
         last_boundary,
-        last_run_at
+        last_run_at,
+        fav_filter_liquidity,
+        fav_filter_trend,
+        fav_filter_earnings
       )
     VALUES
-      (1, '', '', '', 0, 60, '', '');
+      (1, '', '', '', 0, 60, '', '', 1, 1, 1);
     """,
     # Favorites
     """

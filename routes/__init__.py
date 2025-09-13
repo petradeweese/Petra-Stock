@@ -86,6 +86,98 @@ def check_guardrails(
     return (not flags, flags)
 
 
+def check_alert_filters(
+    ticker: str,
+    direction: str,
+    *,
+    enable_liquidity: bool = True,
+    enable_trend: bool = True,
+    enable_earnings: bool = True,
+    earnings_window: int = 7,
+    adv_threshold: float = 1_000_000.0,
+    oi_threshold: int = 500,
+    volume_threshold: int = 100,
+    spread_pct: float = 0.10,
+    spread_abs: float = 0.10,
+    get_earnings: Callable[[str], pd.Timestamp | None] | None = None,
+    get_adv: Callable[[str], float | None] | None = None,
+    get_option: Callable[[str], Dict[str, float]] | None = None,
+    get_price_sma: Callable[[str], tuple[float, float]] | None = None,
+) -> tuple[bool, list[str]]:
+    """Evaluate alert filters for Favorites notifications.
+
+    Returns ``(True, [])`` when all enabled filters pass.  ``flags`` contains
+    the names of any failing filters.  The ``get_*`` callables allow dependency
+    injection for tests and external data providers.
+    """
+
+    flags: list[str] = []
+    get_earnings = get_earnings or _get_next_earnings
+    get_adv = get_adv or _get_adv
+    get_option = get_option or (lambda t: {})
+    get_price_sma = get_price_sma or (lambda t: (None, None))
+
+    if enable_earnings:
+        try:
+            today = now_et().date()
+            edate = get_earnings(ticker)
+            if edate is not None:
+                edate = pd.Timestamp(edate).date()
+                diff = abs(len(pd.bdate_range(today, edate)) - 1)
+                if diff <= earnings_window:
+                    flags.append("earnings")
+        except Exception:
+            logger.exception("earnings filter failed ticker=%s", ticker)
+
+    if enable_liquidity:
+        try:
+            adv = get_adv(ticker)
+            if adv is not None and adv < adv_threshold:
+                flags.append("low_adv")
+        except Exception:
+            logger.exception("adv filter failed ticker=%s", ticker)
+
+        try:
+            opt = get_option(ticker) or {}
+            oi = int(opt.get("open_interest") or opt.get("oi") or 0)
+            vol = int(opt.get("volume") or 0)
+            bid = opt.get("bid")
+            ask = opt.get("ask")
+            mid = opt.get("mid")
+            if mid is None and bid is not None and ask is not None:
+                mid = (bid + ask) / 2.0
+            if oi < oi_threshold:
+                flags.append("low_option_oi")
+            if vol < volume_threshold:
+                flags.append("low_option_volume")
+            if bid is not None and ask is not None and mid:
+                spread = ask - bid
+                limit = spread_abs if mid < 1.25 else spread_pct * mid
+                if spread > limit:
+                    flags.append("wide_spread")
+        except Exception:
+            logger.exception("option liquidity filter failed ticker=%s", ticker)
+
+    if enable_trend:
+        try:
+            price, sma = get_price_sma(ticker)
+            if price is not None and sma is not None:
+                d = direction.upper()
+                if d == "UP" and price <= sma:
+                    flags.append("trend")
+                if d == "DOWN" and price >= sma:
+                    flags.append("trend")
+        except Exception:
+            logger.exception("trend filter failed ticker=%s", ticker)
+
+    allowed = not flags
+    if not allowed:
+        logger.info(
+            "favorite alert suppressed ticker=%s reason=%s", ticker, ",".join(flags)
+        )
+    return allowed, flags
+
+
 router.include_router(archive_router)
 
 scan_duration = Histogram("scan_duration_seconds", "Duration of /scanner/run requests")
@@ -850,12 +942,15 @@ def settings_save(
     recipients: str = Form(""),
     scheduler_enabled: int = Form(1),
     throttle_minutes: int = Form(60),
+    fav_filter_liquidity: int = Form(1),
+    fav_filter_trend: int = Form(1),
+    fav_filter_earnings: int = Form(1),
     db=Depends(get_db),
 ):
     db.execute(
         """
         UPDATE settings
-           SET smtp_user=?, smtp_pass=?, recipients=?, scheduler_enabled=?, throttle_minutes=?
+           SET smtp_user=?, smtp_pass=?, recipients=?, scheduler_enabled=?, throttle_minutes=?, fav_filter_liquidity=?, fav_filter_trend=?, fav_filter_earnings=?
          WHERE id=1
         """,
         (
@@ -864,6 +959,9 @@ def settings_save(
             recipients.strip(),
             int(scheduler_enabled),
             int(throttle_minutes),
+            int(fav_filter_liquidity),
+            int(fav_filter_trend),
+            int(fav_filter_earnings),
         ),
     )
     db.connection.commit()
