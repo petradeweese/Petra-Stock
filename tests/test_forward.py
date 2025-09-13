@@ -74,10 +74,11 @@ def test_forward_tracking_only_future_bars(tmp_path, monkeypatch):
 
     forward_page(request, db=cur)
     cur.execute(
-        "SELECT roi_forward, status, hit_forward, dd_forward, roi_1, mae, mfe, time_to_stop FROM forward_tests"
+        "SELECT roi_forward, option_roi_proxy, status, hit_forward, dd_forward, roi_1, mae, mfe, time_to_stop FROM forward_tests"
     )
     row = cur.fetchone()
     assert row["roi_forward"] == approx(-1.0)
+    assert row["option_roi_proxy"] == approx(-1.0 / 0.4)
     assert row["status"] == "ok"
     assert row["hit_forward"] == 0.0
     assert row["dd_forward"] == approx(3.0)

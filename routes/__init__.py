@@ -405,9 +405,11 @@ def _create_forward_test(db: sqlite3.Cursor, fav: dict) -> None:
             (fav_id, ticker, direction, interval, rule, entry_price,
              target_pct, stop_pct, window_minutes, status, roi_forward, hit_forward, dd_forward,
              roi_1, roi_3, roi_5, roi_expiry, mae, mfe, time_to_hit, time_to_stop,
+             option_expiry, option_strike, option_delta, option_roi_proxy,
              last_run_at, next_run_at, runs_count, notes, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0.0, NULL, 0.0,
                     NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+                    NULL, NULL, ?, 0.0,
                     NULL, NULL, 0, NULL, ?, ?)""",
         (
             fav["id"],
@@ -419,6 +421,7 @@ def _create_forward_test(db: sqlite3.Cursor, fav: dict) -> None:
             fav.get("target_pct", 1.0),
             fav.get("stop_pct", 0.5),
             window_minutes,
+            fav.get("delta"),
             entry_ts,
             now_iso,
         ),
@@ -429,7 +432,7 @@ def _create_forward_test(db: sqlite3.Cursor, fav: dict) -> None:
 def _update_forward_tests(db: sqlite3.Cursor) -> None:
     db.execute(
         """SELECT id, ticker, direction, interval, created_at, entry_price,
-                  target_pct, stop_pct, window_minutes, status
+                  target_pct, stop_pct, window_minutes, status, option_delta
                FROM forward_tests
                WHERE status IN ('queued','running')"""
     )
@@ -532,9 +535,11 @@ def _update_forward_tests(db: sqlite3.Cursor) -> None:
                 if stop_time and stop_time <= expire_ts
                 else None
             )
+            delta = row.get("option_delta")
+            option_roi_proxy = roi / delta if delta else None
             db.execute(
                 """UPDATE forward_tests
-                       SET roi_forward=?, dd_forward=?, status=?, hit_forward=?, roi_1=?, roi_3=?, roi_5=?, roi_expiry=?, mae=?, mfe=?, time_to_hit=?, time_to_stop=?, last_run_at=?, next_run_at=?, updated_at=?
+                       SET roi_forward=?, dd_forward=?, status=?, hit_forward=?, roi_1=?, roi_3=?, roi_5=?, roi_expiry=?, mae=?, mfe=?, time_to_hit=?, time_to_stop=?, option_roi_proxy=?, last_run_at=?, next_run_at=?, updated_at=?
                        WHERE id=?""",
                 (
                     roi,
@@ -549,6 +554,7 @@ def _update_forward_tests(db: sqlite3.Cursor) -> None:
                     mfe,
                     t_hit,
                     t_stop,
+                    option_roi_proxy,
                     now_et().isoformat(),
                     now_et().isoformat(),
                     now_iso,
@@ -580,7 +586,7 @@ def forward_page(request: Request, db=Depends(get_db)):
         _update_forward_tests(db)
         db.execute(
             """SELECT ft.id AS ft_id, ft.fav_id, ft.ticker, ft.direction, ft.interval,
-                      ft.roi_forward, ft.hit_forward, ft.dd_forward, ft.status, ft.created_at, ft.rule
+                      ft.roi_forward, ft.option_roi_proxy, ft.hit_forward, ft.dd_forward, ft.status, ft.created_at, ft.rule
                    FROM forward_tests ft
                    ORDER BY ft.id DESC"""
         )

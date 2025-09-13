@@ -25,4 +25,4 @@ def test_forward_tests_table_exists(tmp_path):
     cur.execute("PRAGMA table_info(forward_tests)")
     cols = {r[1] for r in cur.fetchall()}
     conn.close()
-    assert {"status", "roi_1", "roi_expiry"}.issubset(cols)
+    assert {"status", "roi_1", "roi_expiry", "option_roi_proxy"}.issubset(cols)
