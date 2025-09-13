@@ -10,6 +10,8 @@ from threading import Thread
 from typing import Any, Callable, Dict, Optional, Union
 from uuid import uuid4
 
+import certifi  # noqa: F401
+import pandas as pd  # noqa: F401
 from fastapi import APIRouter, Depends, Form, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
