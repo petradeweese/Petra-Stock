@@ -13,6 +13,7 @@ class Settings:
     http_max_concurrency: int = int(os.getenv("HTTP_MAX_CONCURRENCY", "10"))
     job_timeout: int = int(os.getenv("JOB_TIMEOUT", "30"))
     metrics_enabled: bool = _bool("METRICS_ENABLED", "false")
+    fav_scan_freq_min: int = int(os.getenv("FAV_SCAN_FREQ_MIN", "15"))
 
 
 settings = Settings()

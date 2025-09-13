@@ -3,17 +3,14 @@ import atexit
 import json
 import logging
 import os
-import smtplib
 import sqlite3
-import ssl
 import time
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
-from email.message import EmailMessage
 from threading import Thread
 from typing import Any, Callable, Dict, Optional, Union
 from uuid import uuid4
 
-import certifi
+from services.emailer import send_email
 import pandas as pd
 from fastapi import APIRouter, Depends, Form, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -304,40 +301,9 @@ def _sort_rows(rows, sort_key):
 def _send_email(
     st: sqlite3.Row, subject: str, body: str, html_body: Optional[str] = None
 ) -> None:
-    """Send an email using settings stored in the database.
+    """Send an email using settings stored in the database."""
 
-    This helper mirrors the logic used by the desktop application: the
-    configured SMTP user/password are expected to work with Gmail.  The
-    function silently returns if mandatory settings are missing so the
-    scanner can proceed without failing.
-    """
-
-    user = (st["smtp_user"] or "").strip()
-    pwd = (st["smtp_pass"] or "").replace(" ", "").strip()
-    recips = [r.strip() for r in (st["recipients"] or "").split(",") if r.strip()]
-    if not user or not pwd or not recips:
-        return
-
-    msg = EmailMessage()
-    msg["Subject"] = subject
-    msg["From"] = user
-    msg["To"] = ", ".join(recips)
-    msg.set_content(body)
-    if html_body:
-        msg.add_alternative(html_body, subtype="html")
-
-    ctx = ssl.create_default_context(cafile=certifi.where())
-
-    try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=ctx, timeout=20) as server:
-            server.login(user, pwd)
-            server.send_message(msg)
-    except ssl.SSLError:
-        with smtplib.SMTP("smtp.gmail.com", 587, timeout=20) as server:
-            server.ehlo()
-            server.starttls(context=ctx)
-            server.login(user, pwd)
-            server.send_message(msg)
+    send_email(st, subject, body, html_body)
 
 
 @router.get("/", response_class=HTMLResponse)
@@ -364,9 +330,15 @@ def favorites_page(request: Request, db=Depends(get_db)):
         f["avg_dd_pct"] = f.get("dd_pct_snapshot")
         if f.get("rule_snapshot"):
             f["rule"] = f.get("rule_snapshot")
+    st = get_settings(db)
     return templates.TemplateResponse(
         "favorites.html",
-        {"request": request, "favorites": favs, "active_tab": "favorites"},
+        {
+            "request": request,
+            "favorites": favs,
+            "active_tab": "favorites",
+            "st": st,
+        },
     )
 
 
@@ -568,6 +540,21 @@ def favorites_delete_duplicates(db=Depends(get_db)):
     return RedirectResponse(url="/favorites", status_code=302)
 
 
+@router.post("/favorites/update/{fav_id}")
+def favorites_update(
+    fav_id: int,
+    alerts_enabled: int = Form(0),
+    cooldown_minutes: int = Form(30),
+    db=Depends(get_db),
+):
+    db.execute(
+        "UPDATE favorites SET alerts_enabled=?, cooldown_minutes=? WHERE id=?",
+        (int(bool(alerts_enabled)), int(cooldown_minutes), fav_id),
+    )
+    db.connection.commit()
+    return RedirectResponse(url="/favorites", status_code=302)
+
+
 @router.post("/favorites/add")
 async def favorites_add(request: Request, db=Depends(get_db)):
     payload = await request.json()
@@ -642,12 +629,13 @@ def settings_save(
     recipients: str = Form(""),
     scheduler_enabled: int = Form(1),
     throttle_minutes: int = Form(60),
+    fav_cooldown_minutes: int = Form(30),
     db=Depends(get_db),
 ):
     db.execute(
         """
         UPDATE settings
-           SET smtp_user=?, smtp_pass=?, recipients=?, scheduler_enabled=?, throttle_minutes=?
+           SET smtp_user=?, smtp_pass=?, recipients=?, scheduler_enabled=?, throttle_minutes=?, fav_cooldown_minutes=?
          WHERE id=1
         """,
         (
@@ -656,6 +644,7 @@ def settings_save(
             recipients.strip(),
             int(scheduler_enabled),
             int(throttle_minutes),
+            int(fav_cooldown_minutes),
         ),
     )
     db.connection.commit()
