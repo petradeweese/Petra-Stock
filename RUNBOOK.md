@@ -4,7 +4,7 @@
 - `python scripts/backfill_polygon.py SYMBOLS.txt`
 - Progress is checkpointed to `backfill_checkpoint.json` so reruns resume.
 - Use `--dry-run` to estimate time/requests without inserting.
-- To re-ingest a symbol/day, remove rows from `bars_15m` and rerun with `--symbol` or `--start`/`--end`.
+- To re-ingest a symbol/day, remove rows from `bars` and rerun with `--symbol` or `--start`/`--end`.
 
 The backfill and nightly jobs honor the Polygon rate limit specified via
 `POLY_RPS` and `POLY_BURST` (default 0.08 rps and burst 1 – 5 requests/minute).

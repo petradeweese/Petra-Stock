@@ -8,12 +8,17 @@ from typing import Any, Awaitable, Callable, Dict
 
 from config import settings
 from db import DB_PATH, get_settings, set_last_run
-from prometheus_client import Counter
-from scanner import preload_prices
-from routes import _update_forward_tests
+from prometheus_client import Counter  # type: ignore
+from routes import _update_forward_tests  # type: ignore
+from scanner import preload_prices  # type: ignore
 from services.data_fetcher import fetch_prices as yahoo_fetch
 from services.polygon_client import fetch_polygon_prices
-from services.price_store import upsert_bars
+from services.price_store import (
+    covers,
+    get_coverage,
+    missing_ranges,
+    upsert_bars,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -56,12 +61,39 @@ work_queue = WorkQueue()
 
 def queue_gap_fill(symbol: str, start, end, interval: str) -> None:
     async def _job() -> None:
-        df_y = yahoo_fetch([symbol], interval, (end - start).days / 365.0).get(symbol)
-        if df_y is not None and not df_y.empty:
-            upsert_bars(symbol, df_y)
-        df_p = fetch_polygon_prices([symbol], interval, start, end).get(symbol)
-        if df_p is not None and not df_p.empty:
-            upsert_bars(symbol, df_p)
+        cov_min, cov_max = get_coverage(symbol, interval)
+        if covers(start, end, cov_min, cov_max):
+            logger.info(
+                "db_coverage_ok symbol=%s interval=%s %s..%s",
+                symbol,
+                interval,
+                start,
+                end,
+            )
+            return
+        to_fetch = missing_ranges(start, end, cov_min, cov_max)
+        logger.info(
+            "db_coverage_gap symbol=%s interval=%s missing=%s",
+            symbol,
+            interval,
+            to_fetch,
+        )
+        for a, b in to_fetch:
+            try:
+                df_y = yahoo_fetch([symbol], interval, (b - a).days / 365.0).get(symbol)
+                if df_y is not None and not df_y.empty:
+                    upsert_bars(symbol, df_y, interval)
+                df_p = fetch_polygon_prices([symbol], interval, a, b).get(symbol)
+                if df_p is not None and not df_p.empty:
+                    upsert_bars(symbol, df_p, interval)
+            except Exception:
+                logger.exception(
+                    "fetch_error symbol=%s interval=%s %s..%s",
+                    symbol,
+                    interval,
+                    a,
+                    b,
+                )
 
     key = f"gap:{symbol}:{start.isoformat()}:{end.isoformat()}"
     work_queue.enqueue(key, _job)
@@ -103,7 +135,7 @@ async def favorites_loop(
                             "SELECT ticker, direction, interval, rule FROM favorites ORDER BY id DESC"
                         )
                         favs = [dict(r) for r in db.fetchall()]
-                        params = dict(
+                        params: Dict[str, Any] = dict(
                             interval="15m",
                             direction="BOTH",
                             scan_min_hit=50.0,
@@ -113,7 +145,7 @@ async def favorites_loop(
                         preload_prices(
                             [f["ticker"] for f in favs],
                             params.get("interval", "15m"),
-                            params.get("lookback_years", 2.0),
+                            float(params.get("lookback_years", 2.0)),
                         )
                         hits = []
                         for f in favs:

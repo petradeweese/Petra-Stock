@@ -6,10 +6,10 @@ database.  Symbols are read from a newline-delimited text file specified on the
 command line.
 """
 
-import time
 import datetime as dt
 import logging
 import sys
+import time
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -30,7 +30,7 @@ def run_once(symbols: list[str]) -> None:
     for sym in symbols:
         t0 = time.monotonic()
         df = polygon_client.fetch_polygon_prices([sym], "15m", start, end)[sym]
-        rows = upsert_bars(sym, df)
+        rows = upsert_bars(sym, df, "15m")
         logger.info(
             "nightly symbol=%s rows=%d duration=%.2fs",
             sym,
@@ -58,4 +58,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

@@ -49,8 +49,8 @@ def get_schema_status() -> dict:
     try:
         journal = conn.execute("PRAGMA journal_mode").fetchone()[0]
         synchronous = conn.execute("PRAGMA synchronous").fetchone()[0]
-        idx_list = conn.execute("PRAGMA index_list('bars_15m')").fetchall()
-        has_idx = any(r[1] == "idx_bars_symbol_ts" for r in idx_list)
+        idx_list = conn.execute("PRAGMA index_list('bars')").fetchall()
+        has_idx = any(r[1] == "idx_bars_sym_int_ts" for r in idx_list)
         return {
             "journal_mode": journal,
             "synchronous": synchronous,
@@ -206,18 +206,19 @@ SCHEMA = [
     "CREATE INDEX IF NOT EXISTS idx_run_results_run ON run_results(run_id);",
     # 15-minute bars for market data
     """
-    CREATE TABLE IF NOT EXISTS bars_15m (
+    CREATE TABLE IF NOT EXISTS bars (
         symbol TEXT NOT NULL,
+        interval TEXT NOT NULL,
         ts TIMESTAMPTZ NOT NULL,
         open REAL,
         high REAL,
         low REAL,
         close REAL,
         volume BIGINT,
-        PRIMARY KEY(symbol, ts)
+        PRIMARY KEY(symbol, interval, ts)
     );
     """,
-    "CREATE INDEX IF NOT EXISTS idx_bars_symbol_ts ON bars_15m(symbol, ts);",
+    "CREATE INDEX IF NOT EXISTS idx_bars_sym_int_ts ON bars(symbol, interval, ts);",
     # Scan tasks for cross-worker communication
     """
     CREATE TABLE IF NOT EXISTS scan_tasks (

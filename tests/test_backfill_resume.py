@@ -27,7 +27,7 @@ def test_backfill_resume(monkeypatch, tmp_path):
 
     called = []
 
-    def fake_upsert(sym, df):
+    def fake_upsert(sym, df, interval="15m"):
         called.append(sym)
         return 0
 

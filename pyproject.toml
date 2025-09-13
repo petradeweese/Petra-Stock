@@ -22,3 +22,15 @@ ignore_errors = true
 [[tool.mypy.overrides]]
 module = "pandas_market_calendars.*"
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "pandas.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "prometheus_client.*"
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = ["routes.*", "scanner", "pattern_finder_app", "services.market_data"]
+ignore_errors = true

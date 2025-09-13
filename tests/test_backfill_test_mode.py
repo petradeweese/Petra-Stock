@@ -35,7 +35,7 @@ def test_quick_test_mode(monkeypatch, caplog):
 
     saved = {}
 
-    def fake_upsert(sym, data):
+    def fake_upsert(sym, data, interval="15m"):
         saved["sym"] = sym
         saved["rows"] = len(data)
         return len(data)
