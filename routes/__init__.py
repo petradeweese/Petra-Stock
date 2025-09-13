@@ -144,13 +144,13 @@ def check_alert_filters(
             bid = opt.get("bid")
             ask = opt.get("ask")
             mid = opt.get("mid")
-            if mid is None and bid is not None and ask is not None:
+            if (mid is None or mid == 0) and bid is not None and ask is not None:
                 mid = (bid + ask) / 2.0
             if oi < oi_threshold:
                 flags.append("low_option_oi")
             if vol < volume_threshold:
                 flags.append("low_option_volume")
-            if bid is not None and ask is not None and mid:
+            if bid is not None and ask is not None and mid is not None and mid > 0:
                 spread = ask - bid
                 limit = spread_abs if mid < 1.25 else spread_pct * mid
                 if spread > limit:
