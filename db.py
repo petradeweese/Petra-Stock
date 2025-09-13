@@ -68,6 +68,7 @@ SCHEMA = [
         smtp_user TEXT,
         smtp_pass TEXT,
         recipients TEXT,
+        scanner_recipients TEXT,
         scheduler_enabled INTEGER DEFAULT 0,
         throttle_minutes INTEGER DEFAULT 60,
         last_boundary TEXT,
@@ -81,13 +82,14 @@ SCHEMA = [
         smtp_user,
         smtp_pass,
         recipients,
+        scanner_recipients,
         scheduler_enabled,
         throttle_minutes,
         last_boundary,
         last_run_at
       )
     VALUES
-      (1, '', '', '', 0, 60, '', '');
+      (1, '', '', '', '', 0, 60, '', '');
     """,
     # Favorites
     """
@@ -268,9 +270,19 @@ def get_db():
         conn.close()
 
 
-def get_settings(db: sqlite3.Cursor) -> sqlite3.Row:
+def _ensure_scanner_column(db: sqlite3.Cursor) -> None:
+    db.execute("PRAGMA table_info(settings)")
+    cols = [r[1] for r in db.fetchall()]
+    if "scanner_recipients" not in cols:
+        db.execute("ALTER TABLE settings ADD COLUMN scanner_recipients TEXT DEFAULT ''")
+        db.connection.commit()
+
+
+def get_settings(db: sqlite3.Cursor) -> dict:
+    _ensure_scanner_column(db)
     db.execute("SELECT * FROM settings WHERE id=1")
-    return db.fetchone()
+    row = db.fetchone()
+    return dict(row) if row else {}
 
 
 def set_last_run(boundary_iso: str, db: sqlite3.Cursor):

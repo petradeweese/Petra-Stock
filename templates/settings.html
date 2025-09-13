@@ -14,7 +14,11 @@
           <input name="smtp_pass" type="password" value="{{ st['smtp_pass'] or '' }}" />
         </div>
         <div>
-          <label>Recipients (comma-separated)</label>
+          <label>Scanner Results Recipients (comma-separated)</label>
+          <input name="scanner_recipients" value="{{ st['scanner_recipients'] or '' }}" />
+        </div>
+        <div>
+          <label>Favorites Alert Recipients (comma-separated)</label>
           <input name="recipients" value="{{ st['recipients'] or '' }}" />
         </div>
         <div>

@@ -7,6 +7,7 @@ and MMS message bodies according to the project specification.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from email.utils import parseaddr
 
 # Mapping of supported carriers to their email gateway domains.  The ``sms``
 # domain is used for short 160 character messages while ``mms`` allows longer
@@ -17,6 +18,13 @@ CARRIER_DOMAINS: dict[str, dict[str, str]] = {
     "mint": {"sms": "tmomail.net", "mms": "tmomail.net"},
     "tmobile": {"sms": "tmomail.net", "mms": "tmomail.net"},
     "verizon": {"sms": "vtext.com", "mms": "vzwpix.com"},
+}
+
+# Flat set of all carrier domains for quick membership tests
+_CARRIER_DOMAIN_SET = {
+    domain
+    for info in CARRIER_DOMAINS.values()
+    for domain in info.values()
 }
 
 def build_recipient(
@@ -85,3 +93,13 @@ def format_mms(details: AlertDetails) -> tuple[str, str]:
         + (f" | Support {details.support}" if details.support is not None else ""),
     ]
     return subject, "\n".join(body_lines)
+
+
+def is_carrier_address(address: str) -> bool:
+    """Return ``True`` if ``address`` appears to be an email-to-SMS/MMS gateway."""
+
+    _, email = parseaddr(address)
+    if "@" not in email:
+        return False
+    domain = email.split("@", 1)[1].lower()
+    return domain in _CARRIER_DOMAIN_SET
