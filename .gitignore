@@ -12,3 +12,5 @@ patternfinder.db*
 *.db*
 logs/
 
+.venv/
+.cache/
