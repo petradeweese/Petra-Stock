@@ -171,10 +171,14 @@ async def fetch_polygon_prices_async(
     timespan = "minute"
     out: Dict[str, pd.DataFrame] = {}
     for sym in symbols:
-    # Single full-range request; _fetch_single will paginate via next:
-    utc_start = start.astimezone(dt.timezone.utc)
-    utc_end = end.astimezone(dt.timezone.utc)
-    df = await _fetch_single(sym, utc_start, utc_end, multiplier, timespan)
-    out[sym] = df.sort_index() if not df.empty else pd.DataFrame(
-        columns=["Open", "High", "Low", "Close", "Volume"]
-    )
+        # Single full-range request; _fetch_single will paginate via next:
+        utc_start = start.astimezone(dt.timezone.utc)
+        utc_end = end.astimezone(dt.timezone.utc)
+        df = await _fetch_single(sym, utc_start, utc_end, multiplier, timespan)
+        out[sym] = df.sort_index() if not df.empty else pd.DataFrame(
+            columns=["Open", "High", "Low", "Close", "Volume"]
+        )
+    return out
+
+# Back-compat alias for legacy imports
+fetch_polygon_prices = fetch_polygon_prices_async
