@@ -2,12 +2,15 @@ import asyncio
 import datetime as dt
 import logging
 import os
+import random
 import time
 from typing import Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
+import httpx
 import pandas as pd
 
+from config import settings
 from services import http_client
 
 RUN_ID = os.getenv("RUN_ID", "")
@@ -90,8 +93,36 @@ async def _fetch_single(
     next_url: Optional[str] = url
     pages = 0
     t0 = time.monotonic()
+
+    async def _get_json(url: str) -> dict:
+        attempt = 0
+        while True:
+            status: Optional[int] = None
+            try:
+                return await http_client.get_json(url, headers=headers)
+            except httpx.HTTPStatusError as e:
+                status = e.response.status_code
+                if status not in (429,) and status < 500:
+                    raise
+                err: Exception = e
+            except httpx.RequestError as e:
+                status = getattr(getattr(e, "response", None), "status_code", None)
+                err = e
+            attempt += 1
+            if attempt >= settings.fetch_retry_max:
+                raise err
+            wait = min(
+                settings.fetch_retry_cap_ms,
+                settings.fetch_retry_base_ms * (2 ** (attempt - 1)),
+            )
+            wait += random.randint(0, settings.fetch_retry_base_ms)
+            logger.warning(
+                "retry attempt=%d status=%s wait_ms=%d", attempt, status, wait
+            )
+            await asyncio.sleep(wait / 1000)
+
     while next_url:
-        data = await http_client.get_json(next_url, headers=headers)
+        data = await _get_json(next_url)
         pages += 1
         if not data:
             break
@@ -170,11 +201,37 @@ async def fetch_polygon_prices_async(
     multiplier = 15
     timespan = "minute"
     out: Dict[str, pd.DataFrame] = {}
+    chunk = dt.timedelta(days=7)
     for sym in symbols:
-    # Single full-range request; _fetch_single will paginate via next:
-    utc_start = start.astimezone(dt.timezone.utc)
-    utc_end = end.astimezone(dt.timezone.utc)
-    df = await _fetch_single(sym, utc_start, utc_end, multiplier, timespan)
-    out[sym] = df.sort_index() if not df.empty else pd.DataFrame(
-        columns=["Open", "High", "Low", "Close", "Volume"]
-    )
+        dfs: List[pd.DataFrame] = []
+        ny_start = start.astimezone(NY_TZ)
+        ny_start = dt.datetime(
+            ny_start.year, ny_start.month, ny_start.day, tzinfo=NY_TZ
+        )
+        ny_end = end.astimezone(NY_TZ)
+        ny_end = dt.datetime(ny_end.year, ny_end.month, ny_end.day, tzinfo=NY_TZ)
+        if ny_end <= ny_start:
+            ny_end = ny_start + dt.timedelta(days=1)
+
+        cur = ny_start
+        while cur < ny_end:
+            nxt = min(cur + chunk, ny_end)
+            utc_start = cur.astimezone(dt.timezone.utc)
+            utc_end = nxt.astimezone(dt.timezone.utc)
+            dfs.append(
+                await _fetch_single(sym, utc_start, utc_end, multiplier, timespan)
+            )
+            cur = nxt
+
+        if dfs:
+            out[sym] = pd.concat(dfs).sort_index()
+        else:  # pragma: no cover - defensive
+            out[sym] = pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
+    return out
+
+
+def fetch_polygon_prices(
+    symbols: List[str], interval: str, start: dt.datetime, end: dt.datetime
+) -> Dict[str, pd.DataFrame]:
+    """Synchronous wrapper around ``fetch_polygon_prices_async``."""
+    return asyncio.run(fetch_polygon_prices_async(symbols, interval, start, end))

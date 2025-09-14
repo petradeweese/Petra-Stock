@@ -52,6 +52,11 @@ Copy `.env.example` to `.env` and adjust:
 - `POLY_RPS` / `POLY_BURST` – Polygon rate limit settings
 - `DB_CACHE_TTL` – in-process DB cache TTL
 - `POLYGON_INCLUDE_PREPOST` – include pre/post market bars when true
+- `CLAMP_MARKET_CLOSED` – clamp backfills to last market close (default true)
+- `BACKFILL_CHUNK_DAYS` – days per backfill slice (default 1)
+- `FETCH_RETRY_MAX` – max retry attempts for Polygon fetches (default 4)
+- `FETCH_RETRY_BASE_MS` – base backoff in milliseconds (default 300)
+- `FETCH_RETRY_CAP_MS` – maximum backoff in milliseconds (default 5000)
 
 ## Backfill and ETL
 
@@ -75,3 +80,11 @@ Run the nightly ETL to heal recent gaps or fetch missing bars manually using
 ## Rotate API Key
 
 Update `POLYGON_API_KEY` in your environment or `.env` file and restart the process.
+
+## Changelog
+
+- Add market-closed clamp, chunked backfill and bounded Polygon retries.
+
+## Deployment Notes
+
+Set any new environment variables as needed and restart the `petra` service.

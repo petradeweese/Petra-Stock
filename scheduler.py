@@ -3,7 +3,7 @@ import asyncio
 import logging
 import random
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Awaitable, Callable, Dict
 
 from config import settings
@@ -13,12 +13,8 @@ from routes import _update_forward_tests  # type: ignore
 from scanner import preload_prices  # type: ignore
 from services.data_fetcher import fetch_prices as yahoo_fetch
 from services.polygon_client import fetch_polygon_prices
-from services.price_store import (
-    covers,
-    get_coverage,
-    missing_ranges,
-    upsert_bars,
-)
+from services.price_store import covers, get_coverage, missing_ranges, upsert_bars
+from utils import clamp_market_closed
 
 logger = logging.getLogger(__name__)
 
@@ -61,39 +57,63 @@ work_queue = WorkQueue()
 
 def queue_gap_fill(symbol: str, start, end, interval: str) -> None:
     async def _job() -> None:
+        if settings.clamp_market_closed:
+            new_end, clamped = clamp_market_closed(start, end)
+            if clamped:
+                logger.info(
+                    "clamp reason=market_closed end=%s requested_end=%s",
+                    new_end.isoformat(),
+                    end.isoformat(),
+                )
+                if new_end <= start:
+                    return
+                end_local = new_end
+            else:
+                end_local = end
+        else:
+            end_local = end
         cov_min, cov_max = get_coverage(symbol, interval)
-        if covers(start, end, cov_min, cov_max):
+        if covers(start, end_local, cov_min, cov_max):
             logger.info(
                 "db_coverage_ok symbol=%s interval=%s %s..%s",
                 symbol,
                 interval,
                 start,
-                end,
+                end_local,
             )
             return
-        to_fetch = missing_ranges(start, end, cov_min, cov_max)
+        to_fetch = missing_ranges(start, end_local, cov_min, cov_max)
         logger.info(
             "db_coverage_gap symbol=%s interval=%s missing=%s",
             symbol,
             interval,
             to_fetch,
         )
+        chunk = timedelta(days=settings.backfill_chunk_days)
         for a, b in to_fetch:
-            try:
-                df_y = yahoo_fetch([symbol], interval, (b - a).days / 365.0).get(symbol)
-                if df_y is not None and not df_y.empty:
-                    upsert_bars(symbol, df_y, interval)
-                df_p = fetch_polygon_prices([symbol], interval, a, b).get(symbol)
-                if df_p is not None and not df_p.empty:
-                    upsert_bars(symbol, df_p, interval)
-            except Exception:
-                logger.exception(
-                    "fetch_error symbol=%s interval=%s %s..%s",
-                    symbol,
-                    interval,
-                    a,
-                    b,
-                )
+            cur = a
+            while cur < b:
+                nxt = min(cur + chunk, b)
+                try:
+                    df_y = yahoo_fetch(
+                        [symbol], interval, (nxt - cur).days / 365.0
+                    ).get(symbol)
+                    if df_y is not None and not df_y.empty:
+                        upsert_bars(symbol, df_y, interval)
+                    df_p = fetch_polygon_prices([symbol], interval, cur, nxt).get(
+                        symbol
+                    )
+                    if df_p is not None and not df_p.empty:
+                        upsert_bars(symbol, df_p, interval)
+                except Exception:
+                    logger.exception(
+                        "fetch_error symbol=%s interval=%s %s..%s",
+                        symbol,
+                        interval,
+                        cur,
+                        nxt,
+                    )
+                cur = nxt
 
     key = f"gap:{symbol}:{start.isoformat()}:{end.isoformat()}"
     work_queue.enqueue(key, _job)
