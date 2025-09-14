@@ -180,13 +180,26 @@ async def fetch_polygon_prices_async(
         if ny_end <= ny_start:
             ny_end = ny_start + dt.timedelta(days=1)
 
+        # Break the requested window into week-long UTC intervals and fetch each
+        # chunk separately.  This structure mirrors the intent of a previous
+        # version of the function where a poorly-indented ``for`` loop caused an
+        # ``IndentationError`` at import time.  Building an explicit list of
+        # intervals keeps the control flow simple and makes the indentation
+        # unambiguous to the interpreter.
+
+        intervals: List[Tuple[dt.datetime, dt.datetime]] = []
         cur = ny_start
         while cur < ny_end:
             nxt = min(cur + chunk, ny_end)
-            utc_start = cur.astimezone(dt.timezone.utc)
-            utc_end = nxt.astimezone(dt.timezone.utc)
-            dfs.append(await _fetch_single(sym, utc_start, utc_end, multiplier, timespan))
+            intervals.append((cur, nxt))
             cur = nxt
+
+        for start_window, end_window in intervals:
+            utc_start = start_window.astimezone(dt.timezone.utc)
+            utc_end = end_window.astimezone(dt.timezone.utc)
+            dfs.append(
+                await _fetch_single(sym, utc_start, utc_end, multiplier, timespan)
+            )
 
         if dfs:
             out[sym] = pd.concat(dfs).sort_index()
