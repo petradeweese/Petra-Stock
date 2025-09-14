@@ -45,8 +45,11 @@ def market_is_open(ts: Optional[datetime] = None) -> bool:
         schedule = _XNYS.schedule(start_date=ts.date(), end_date=ts.date())
         if schedule.empty:
             return False
-        open_dt = schedule.at[ts.date(), "market_open"].to_pydatetime().astimezone(TZ)
-        close_dt = schedule.at[ts.date(), "market_close"].to_pydatetime().astimezone(TZ)
+        row = schedule.iloc[0]
+        if getattr(row, "name", None).date() != ts.date():
+            return False
+        open_dt = row["market_open"].to_pydatetime().astimezone(TZ)
+        close_dt = row["market_close"].to_pydatetime().astimezone(TZ)
         return open_dt <= ts <= close_dt
 
     # Fallback: assume regular hours and no holidays
