@@ -197,8 +197,8 @@ async def favorites_loop(
                         # TODO: email YES hits in a readable format
                         # TODO: archive favorites 15m scan results only if there are YES hits
                         set_last_run(boundary.isoformat(), db)
-        except Exception as e:
-            logger.error("scheduler error: %r", e)
+        except Exception:
+            logger.exception("scheduler error")
         elapsed = asyncio.get_event_loop().time() - start_time
         await asyncio.sleep(max(0, 60 - elapsed))
 
@@ -224,8 +224,8 @@ async def forward_tests_loop(
                     conn.row_factory = sqlite3.Row
                     db = conn.cursor()
                     _update_forward_tests(db)
-        except Exception as e:
-            logger.error("forward tests loop error: %r", e)
+        except Exception:
+            logger.exception("forward tests loop error")
         elapsed = asyncio.get_event_loop().time() - start_time
         await asyncio.sleep(max(0, 60 - elapsed))
 
