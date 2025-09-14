@@ -48,25 +48,21 @@ except Exception:
 def _normalize_window(
     start: dt.datetime, end: dt.datetime
 ) -> Tuple[dt.datetime, dt.datetime, int, int]:
-    """Align the requested window to NY midnight boundaries and return UTC ms."""
+    """Return NY/UTC representations of the exact requested window."""
     if start.tzinfo is None:
         start = start.replace(tzinfo=dt.timezone.utc)
     if end.tzinfo is None:
         end = end.replace(tzinfo=dt.timezone.utc)
 
-    ny_start = start.astimezone(NY_TZ)
-    ny_end = end.astimezone(NY_TZ)
-    ny_start = dt.datetime(ny_start.year, ny_start.month, ny_start.day, tzinfo=NY_TZ)
-    ny_end = dt.datetime(ny_end.year, ny_end.month, ny_end.day, tzinfo=NY_TZ)
+    if end <= start:
+        end = start + dt.timedelta(minutes=1)
 
-    if ny_end <= ny_start:
-        ny_end = ny_start + dt.timedelta(days=1)
-
-    utc_start = ny_start.astimezone(dt.timezone.utc)
-    utc_end = ny_end.astimezone(dt.timezone.utc)
+    utc_start = start.astimezone(dt.timezone.utc)
+    utc_end = end.astimezone(dt.timezone.utc)
     start_ms = int(utc_start.timestamp() * 1000)
     end_ms = int(utc_end.timestamp() * 1000)
-
+    ny_start = utc_start.astimezone(NY_TZ)
+    ny_end = utc_end.astimezone(NY_TZ)
     return ny_start, ny_end, start_ms, end_ms
 
 
@@ -204,27 +200,22 @@ async def fetch_polygon_prices_async(
     chunk = dt.timedelta(days=7)
     for sym in symbols:
         dfs: List[pd.DataFrame] = []
-        ny_start = start.astimezone(NY_TZ)
-        ny_start = dt.datetime(
-            ny_start.year, ny_start.month, ny_start.day, tzinfo=NY_TZ
-        )
-        ny_end = end.astimezone(NY_TZ)
-        ny_end = dt.datetime(ny_end.year, ny_end.month, ny_end.day, tzinfo=NY_TZ)
-        if ny_end <= ny_start:
-            ny_end = ny_start + dt.timedelta(days=1)
-
-        cur = ny_start
-        while cur < ny_end:
-            nxt = min(cur + chunk, ny_end)
-            utc_start = cur.astimezone(dt.timezone.utc)
-            utc_end = nxt.astimezone(dt.timezone.utc)
-            dfs.append(
-                await _fetch_single(sym, utc_start, utc_end, multiplier, timespan)
+        cur = start
+        while cur < end:
+            nxt = min(cur + chunk, end)
+            logger.info(
+                "provider_range symbol=%s start=%s end=%s",
+                sym,
+                cur.isoformat(),
+                nxt.isoformat(),
             )
+            dfs.append(await _fetch_single(sym, cur, nxt, multiplier, timespan))
             cur = nxt
 
         if dfs:
-            out[sym] = pd.concat(dfs).sort_index()
+            df = pd.concat(dfs).sort_index()
+            df = df[~df.index.duplicated(keep="first")]
+            out[sym] = df
         else:  # pragma: no cover - defensive
             out[sym] = pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
     return out
