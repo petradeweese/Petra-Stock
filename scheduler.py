@@ -44,8 +44,12 @@ class WorkQueue:
                 try:
                     await asyncio.wait_for(fn(), timeout=settings.job_timeout)
                     job_success.inc()
-                except Exception:
-                    logger.exception("job failed key=%s", key)
+                except Exception as e:
+                    import traceback as _tb
+
+                    logger.error(
+                        "job failed key=%s err=%r\n%s", key, e, _tb.format_exc()
+                    )
                     job_failure.inc()
             finally:
                 self.keys.discard(key)
@@ -197,8 +201,10 @@ async def favorites_loop(
                         # TODO: email YES hits in a readable format
                         # TODO: archive favorites 15m scan results only if there are YES hits
                         set_last_run(boundary.isoformat(), db)
-        except Exception:
-            logger.exception("scheduler error")
+        except Exception as e:
+            import traceback as _tb
+
+            logger.error("scheduler error err=%r\n%s", e, _tb.format_exc())
         elapsed = asyncio.get_event_loop().time() - start_time
         await asyncio.sleep(max(0, 60 - elapsed))
 
@@ -224,8 +230,10 @@ async def forward_tests_loop(
                     conn.row_factory = sqlite3.Row
                     db = conn.cursor()
                     _update_forward_tests(db)
-        except Exception:
-            logger.exception("forward tests loop error")
+        except Exception as e:
+            import traceback as _tb
+
+            logger.error("forward tests loop error err=%r\n%s", e, _tb.format_exc())
         elapsed = asyncio.get_event_loop().time() - start_time
         await asyncio.sleep(max(0, 60 - elapsed))
 
