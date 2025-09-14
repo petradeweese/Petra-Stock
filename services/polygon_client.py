@@ -170,46 +170,11 @@ async def fetch_polygon_prices_async(
     multiplier = 15
     timespan = "minute"
     out: Dict[str, pd.DataFrame] = {}
-    chunk = dt.timedelta(days=7)
     for sym in symbols:
-        dfs: List[pd.DataFrame] = []
-        ny_start = start.astimezone(NY_TZ)
-        ny_start = dt.datetime(ny_start.year, ny_start.month, ny_start.day, tzinfo=NY_TZ)
-        ny_end = end.astimezone(NY_TZ)
-        ny_end = dt.datetime(ny_end.year, ny_end.month, ny_end.day, tzinfo=NY_TZ)
-        if ny_end <= ny_start:
-            ny_end = ny_start + dt.timedelta(days=1)
-
-        # Break the requested window into week-long UTC intervals and fetch each
-        # chunk separately.  This structure mirrors the intent of a previous
-        # version of the function where a poorly-indented ``for`` loop caused an
-        # ``IndentationError`` at import time.  Building an explicit list of
-        # intervals keeps the control flow simple and makes the indentation
-        # unambiguous to the interpreter.
-
-        intervals: List[Tuple[dt.datetime, dt.datetime]] = []
-        cur = ny_start
-        while cur < ny_end:
-            nxt = min(cur + chunk, ny_end)
-            intervals.append((cur, nxt))
-            cur = nxt
-
-        for start_window, end_window in intervals:
-            utc_start = start_window.astimezone(dt.timezone.utc)
-            utc_end = end_window.astimezone(dt.timezone.utc)
-            dfs.append(
-                await _fetch_single(sym, utc_start, utc_end, multiplier, timespan)
-            )
-
-        if dfs:
-            out[sym] = pd.concat(dfs).sort_index()
-        else:  # pragma: no cover - defensive
-            out[sym] = pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
-    return out
-
-
-def fetch_polygon_prices(
-    symbols: List[str], interval: str, start: dt.datetime, end: dt.datetime
-) -> Dict[str, pd.DataFrame]:
-    """Synchronous wrapper around ``fetch_polygon_prices_async``."""
-    return asyncio.run(fetch_polygon_prices_async(symbols, interval, start, end))
+    # Single full-range request; _fetch_single will paginate via next:
+    utc_start = start.astimezone(dt.timezone.utc)
+    utc_end = end.astimezone(dt.timezone.utc)
+    df = await _fetch_single(sym, utc_start, utc_end, multiplier, timespan)
+    out[sym] = df.sort_index() if not df.empty else pd.DataFrame(
+        columns=["Open", "High", "Low", "Close", "Volume"]
+    )
