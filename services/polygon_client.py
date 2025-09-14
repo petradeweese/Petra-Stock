@@ -171,23 +171,32 @@ async def fetch_polygon_prices_async(
     timespan = "minute"
     out: Dict[str, pd.DataFrame] = {}
     chunk = dt.timedelta(days=7)
+
+    # Pre-compute the week-long NY-aligned intervals once; the same windows
+    # apply to every symbol.  Doing this up front keeps the nested loop that
+    # follows straightforward and avoids any potential indentation pitfalls.
+    ny_start = start.astimezone(NY_TZ)
+    ny_start = dt.datetime(ny_start.year, ny_start.month, ny_start.day, tzinfo=NY_TZ)
+    ny_end = end.astimezone(NY_TZ)
+    ny_end = dt.datetime(ny_end.year, ny_end.month, ny_end.day, tzinfo=NY_TZ)
+    if ny_end <= ny_start:
+        ny_end = ny_start + dt.timedelta(days=1)
+
+    intervals: List[Tuple[dt.datetime, dt.datetime]] = []
+    cur = ny_start
+    while cur < ny_end:
+        nxt = min(cur + chunk, ny_end)
+        intervals.append((cur, nxt))
+        cur = nxt
+
     for sym in symbols:
         dfs: List[pd.DataFrame] = []
-        ny_start = start.astimezone(NY_TZ)
-        ny_start = dt.datetime(ny_start.year, ny_start.month, ny_start.day, tzinfo=NY_TZ)
-        ny_end = end.astimezone(NY_TZ)
-        ny_end = dt.datetime(ny_end.year, ny_end.month, ny_end.day, tzinfo=NY_TZ)
-        if ny_end <= ny_start:
-            ny_end = ny_start + dt.timedelta(days=1)
-
-        cur = ny_start
-        while cur < ny_end:
-            nxt = min(cur + chunk, ny_end)
-            utc_start = cur.astimezone(dt.timezone.utc)
-            utc_end = nxt.astimezone(dt.timezone.utc)
-            dfs.append(await _fetch_single(sym, utc_start, utc_end, multiplier, timespan))
-            cur = nxt
-
+        for start_window, end_window in intervals:
+            utc_start = start_window.astimezone(dt.timezone.utc)
+            utc_end = end_window.astimezone(dt.timezone.utc)
+            dfs.append(
+                await _fetch_single(sym, utc_start, utc_end, multiplier, timespan)
+            )
         if dfs:
             out[sym] = pd.concat(dfs).sort_index()
         else:  # pragma: no cover - defensive
