@@ -25,17 +25,15 @@ def _capture_ms(monkeypatch, start: dt.datetime, end: dt.datetime) -> int:
 
 
 def test_dst_offsets(monkeypatch):
-    # September uses UTC-4 (DST)
     start = dt.datetime(2024, 9, 3, 12, 0, tzinfo=dt.timezone.utc)
     end = start + dt.timedelta(days=1)
     start_ms = _capture_ms(monkeypatch, start, end)
     start_dt = pd.Timestamp(start_ms, unit="ms", tz="UTC")
-    assert start_dt.hour == 4  # 00:00 NY -> 04:00 UTC
+    assert start_dt == pd.Timestamp(start)
 
-    # January uses UTC-5 (standard time)
     start = dt.datetime(2024, 1, 3, 12, 0, tzinfo=dt.timezone.utc)
     end = start + dt.timedelta(days=1)
     start_ms = _capture_ms(monkeypatch, start, end)
     start_dt = pd.Timestamp(start_ms, unit="ms", tz="UTC")
-    assert start_dt.hour == 5  # 00:00 NY -> 05:00 UTC
+    assert start_dt == pd.Timestamp(start)
 

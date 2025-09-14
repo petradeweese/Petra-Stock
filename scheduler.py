@@ -11,8 +11,7 @@ from db import DB_PATH, get_settings, set_last_run
 from prometheus_client import Counter  # type: ignore
 from routes import _update_forward_tests  # type: ignore
 from scanner import preload_prices  # type: ignore
-from services.data_fetcher import fetch_prices as yahoo_fetch
-from services.polygon_client import fetch_polygon_prices
+from services.polygon_client import fetch_polygon_prices_async
 from services.price_store import covers, get_coverage, missing_ranges, upsert_bars
 from utils import clamp_market_closed
 
@@ -102,26 +101,32 @@ def queue_gap_fill(symbol: str, start, end, interval: str) -> None:
             cur = a
             while cur < b:
                 nxt = min(cur + chunk, b)
+                logger.info(
+                    "fetch_call symbol=%s requested_start=%s requested_end=%s",
+                    symbol,
+                    cur.isoformat(),
+                    nxt.isoformat(),
+                )
                 try:
-                    df_y = yahoo_fetch(
-                        [symbol], interval, (nxt - cur).days / 365.0
-                    ).get(symbol)
-                    if df_y is not None and not df_y.empty:
-                        upsert_bars(symbol, df_y, interval)
-                    df_p = fetch_polygon_prices([symbol], interval, cur, nxt).get(
-                        symbol
+                    df_map = await fetch_polygon_prices_async(
+                        [symbol], interval, cur, nxt
                     )
+                    df_p = df_map.get(symbol)
                     if df_p is not None and not df_p.empty:
                         upsert_bars(symbol, df_p, interval)
+                        logger.info(
+                            "fetch_ok symbol=%s rows=%d",
+                            symbol,
+                            len(df_p),
+                        )
+                    else:
+                        logger.info("fetch_empty symbol=%s", symbol)
                 except Exception as e:
                     import traceback as _tb
 
                     logger.error(
-                        "fetch_error symbol=%s interval=%s %s..%s err=%s msg=%s\n%s",
+                        "fetch_error symbol=%s err=%s msg=%s\n%s",
                         symbol,
-                        interval,
-                        cur,
-                        nxt,
                         type(e).__name__,
                         e,
                         _tb.format_exc(),
