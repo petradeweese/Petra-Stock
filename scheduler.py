@@ -48,7 +48,11 @@ class WorkQueue:
                     import traceback as _tb
 
                     logger.error(
-                        "job failed key=%s err=%r\n%s", key, e, _tb.format_exc()
+                        "job failed key=%s err=%s msg=%s\n%s",
+                        key,
+                        type(e).__name__,
+                        e,
+                        _tb.format_exc(),
                     )
                     job_failure.inc()
             finally:
@@ -109,13 +113,18 @@ def queue_gap_fill(symbol: str, start, end, interval: str) -> None:
                     )
                     if df_p is not None and not df_p.empty:
                         upsert_bars(symbol, df_p, interval)
-                except Exception:
-                    logger.exception(
-                        "fetch_error symbol=%s interval=%s %s..%s",
+                except Exception as e:
+                    import traceback as _tb
+
+                    logger.error(
+                        "fetch_error symbol=%s interval=%s %s..%s err=%s msg=%s\n%s",
                         symbol,
                         interval,
                         cur,
                         nxt,
+                        type(e).__name__,
+                        e,
+                        _tb.format_exc(),
                     )
                 cur = nxt
 
@@ -194,9 +203,15 @@ async def favorites_loop(
                                     e.args[0],
                                 )
                                 continue
-                            except Exception:
-                                logger.exception(
-                                    "favorite scan failed ticker=%s", ticker
+                            except Exception as e:
+                                import traceback as _tb
+
+                                logger.error(
+                                    "favorite scan failed ticker=%s err=%s msg=%s\n%s",
+                                    ticker,
+                                    type(e).__name__,
+                                    e,
+                                    _tb.format_exc(),
                                 )
                         # TODO: email YES hits in a readable format
                         # TODO: archive favorites 15m scan results only if there are YES hits
@@ -204,7 +219,12 @@ async def favorites_loop(
         except Exception as e:
             import traceback as _tb
 
-            logger.error("scheduler error err=%r\n%s", e, _tb.format_exc())
+            logger.error(
+                "scheduler error err=%s msg=%s\n%s",
+                type(e).__name__,
+                e,
+                _tb.format_exc(),
+            )
         elapsed = asyncio.get_event_loop().time() - start_time
         await asyncio.sleep(max(0, 60 - elapsed))
 
@@ -233,7 +253,12 @@ async def forward_tests_loop(
         except Exception as e:
             import traceback as _tb
 
-            logger.error("forward tests loop error err=%r\n%s", e, _tb.format_exc())
+            logger.error(
+                "forward tests loop error err=%s msg=%s\n%s",
+                type(e).__name__,
+                e,
+                _tb.format_exc(),
+            )
         elapsed = asyncio.get_event_loop().time() - start_time
         await asyncio.sleep(max(0, 60 - elapsed))
 
