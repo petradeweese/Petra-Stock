@@ -7,6 +7,7 @@ import smtplib
 import sqlite3
 import ssl
 import time
+from datetime import timedelta
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from email.message import EmailMessage
 from threading import Thread
@@ -127,7 +128,8 @@ CREATE TABLE IF NOT EXISTS scan_tasks (
     state TEXT,
     message TEXT,
     ctx TEXT,
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    started_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT
 );
 """
 
@@ -140,11 +142,16 @@ def _get_conn() -> sqlite3.Connection:
 
 
 def _task_create(task_id: str, total: int) -> None:
+    _task_gc()
     conn = _get_conn()
     try:
+        now_iso = now_et().isoformat()
         conn.execute(
-            "INSERT INTO scan_tasks (id, total, done, percent, state) VALUES (?, ?, 0, 0.0, 'running')",
-            (task_id, total),
+            (
+                "INSERT INTO scan_tasks (id, total, done, percent, state, started_at, updated_at) "
+                "VALUES (?, ?, 0, 0.0, 'queued', ?, ?)"
+            ),
+            (task_id, total, now_iso, now_iso),
         )
         conn.commit()
     finally:
@@ -156,8 +163,8 @@ def _task_update(task_id: str, **fields: Any) -> None:
         return
     conn = _get_conn()
     try:
-        cols = []
-        vals: list[Any] = []
+        cols = ["updated_at=?"]
+        vals: list[Any] = [now_et().isoformat()]
         for k, v in fields.items():
             cols.append(f"{k}=?")
             if k == "ctx" and v is not None:
@@ -175,7 +182,10 @@ def _task_get(task_id: str) -> Optional[Dict[str, Any]]:
     conn = _get_conn()
     try:
         cur = conn.execute(
-            "SELECT total, done, percent, state, message, ctx FROM scan_tasks WHERE id=?",
+            (
+                "SELECT total, done, percent, state, message, ctx, started_at, updated_at "
+                "FROM scan_tasks WHERE id=?"
+            ),
             (task_id,),
         )
         row = cur.fetchone()
@@ -183,7 +193,7 @@ def _task_get(task_id: str) -> Optional[Dict[str, Any]]:
         conn.close()
     if not row:
         return None
-    total, done, percent, state, message, ctx_json = row
+    total, done, percent, state, message, ctx_json, started_at, updated_at = row
     return {
         "total": total,
         "done": done,
@@ -191,6 +201,8 @@ def _task_get(task_id: str) -> Optional[Dict[str, Any]]:
         "state": state,
         "message": message,
         "ctx": json.loads(ctx_json) if ctx_json else None,
+        "started_at": started_at,
+        "updated_at": updated_at,
     }
 
 
@@ -198,6 +210,16 @@ def _task_delete(task_id: str) -> None:
     conn = _get_conn()
     try:
         conn.execute("DELETE FROM scan_tasks WHERE id=?", (task_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _task_gc(ttl_hours: int = 48) -> None:
+    cutoff = (now_et() - timedelta(hours=ttl_hours)).isoformat()
+    conn = _get_conn()
+    try:
+        conn.execute("DELETE FROM scan_tasks WHERE started_at < ?", (cutoff,))
         conn.commit()
     finally:
         conn.close()
@@ -924,14 +946,17 @@ async def scanner_run(request: Request):
         sort_key = ""
 
     task_id = uuid4().hex
-    logger.info("task %s started", task_id)
     _task_create(task_id, len(tickers))
 
     def _task():
+        start_ts = time.time()
+        _task_update(task_id, state="running")
+        logger.info("task_start id=%s total=%d", task_id, len(tickers))
+
         def prog(done: int, total: int, msg: str) -> None:
             pct = 0.0 if total == 0 else (done / total) * 100.0
             _task_update(task_id, done=done, total=total, percent=pct, state="running")
-            logger.info("task %s progress %d/%d", task_id, done, total)
+            logger.info("task_progress id=%s %d/%d", task_id, done, total)
 
         # Surface rate limit waits to the task table so the UI can show a
         # friendly "waiting" message during backoff.
@@ -947,18 +972,33 @@ async def scanner_run(request: Request):
 
         try:
             rows, skipped = _perform_scan(tickers, params, sort_key, progress_cb=prog)
+            duration = time.time() - start_ts
             ctx = {
                 "rows": rows,
                 "ran_at": now_et().strftime("%I:%M:%S %p").lstrip("0"),
                 "note": f"{scan_type} • {params.get('interval')} • {params.get('direction')} • window {params.get('window_value')} {params.get('window_unit')}",
                 "skipped_missing_data": skipped,
+                "summary": {
+                    "successes": len(rows),
+                    "empties": skipped,
+                    "errors": 0,
+                    "duration": duration,
+                },
+                "errors": [],
             }
             _task_update(
-                task_id, state="done", percent=100.0, done=len(tickers), ctx=ctx
+                task_id, state="succeeded", percent=100.0, done=len(tickers), ctx=ctx
             )
-            logger.info("task %s saved results", task_id)
+            logger.info(
+                "task_done id=%s duration=%.2fs successes=%d empties=%d errors=%d",
+                task_id,
+                duration,
+                len(rows),
+                skipped,
+                0,
+            )
         except Exception as e:
-            logger.error("scan task %s failed: %s", task_id, e)
+            logger.error("task_error id=%s error=%s", task_id, e)
             _task_update(task_id, state="failed", message=str(e))
         finally:
             http_client.set_wait_callback(None)
@@ -984,10 +1024,30 @@ async def scanner_progress(task_id: str):
     return JSONResponse(data, headers={"Cache-Control": "no-store"})
 
 
+@router.get("/scanner/status/{task_id}")
+async def scanner_status(task_id: str):
+    _task_gc()
+    task = _task_get(task_id)
+    if not task:
+        return JSONResponse({}, status_code=404)
+    data = {
+        "id": task_id,
+        "total": task.get("total"),
+        "completed": task.get("done"),
+        "percent": task.get("percent"),
+        "state": task.get("state"),
+        "message": task.get("message"),
+        "started_at": task.get("started_at"),
+        "updated_at": task.get("updated_at"),
+        "ctx": task.get("ctx"),
+    }
+    return JSONResponse(data, headers={"Cache-Control": "no-store"})
+
+
 @router.get("/scanner/results/{task_id}", response_class=HTMLResponse)
 async def scanner_results(request: Request, task_id: str):
     task = _task_get(task_id)
-    if not task or task.get("state") != "done":
+    if not task or task.get("state") != "succeeded":
         return HTMLResponse("Not ready", status_code=404)
     ctx = (task.get("ctx") or {}).copy()
     ctx["request"] = request
