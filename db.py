@@ -229,7 +229,8 @@ SCHEMA = [
         state TEXT,
         message TEXT,
         ctx TEXT,
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        started_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT
     );
     """,
 ]

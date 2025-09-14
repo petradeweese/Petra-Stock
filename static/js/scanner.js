@@ -176,14 +176,14 @@
 
       const poll = async function(){
         try{
-          const res = await fetch(`/scanner/progress/${taskId}?t=${Date.now()}`, {cache: 'no-store'});
+          const res = await fetch(`/scanner/status/${taskId}?t=${Date.now()}`, {cache: 'no-store'});
           const data = await res.json();
           last = Date.now();
           progressFill.style.width = (data.percent || 0) + '%';
           progressText.textContent = Math.floor(data.percent || 0) + '%';
           if(data.state === 'running'){
-            pollTimer = setTimeout(poll, 1000);
-          }else if(data.state === 'done'){
+            pollTimer = setTimeout(poll, 2000);
+          }else if(data.state === 'succeeded'){
             progressFill.style.width = '100%';
             progressText.textContent = '100%';
             try{

@@ -45,17 +45,17 @@ def test_scanner_progress_and_results(monkeypatch):
     assert res.status_code == 200
     task_id = res.json()["task_id"]
 
-    first = client.get(f"/scanner/progress/{task_id}").json()["percent"]
+    first = client.get(f"/scanner/status/{task_id}").json()["percent"]
     assert first < 100
 
     final = None
     for _ in range(50):
-        data = client.get(f"/scanner/progress/{task_id}").json()
+        data = client.get(f"/scanner/status/{task_id}").json()
         final = data["percent"]
-        if data["state"] == "done":
+        if data["state"] == "succeeded":
             break
         time.sleep(0.02)
-    assert data["state"] == "done"
+    assert data["state"] == "succeeded"
     assert final == 100
 
     html = client.get(f"/scanner/results/{task_id}")
