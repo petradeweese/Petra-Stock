@@ -6,8 +6,8 @@ Exchange (XNYS) holidays and special sessions.  If the package is unavailable
 the function falls back to a simplified weekend/regular-hours check.
 """
 
-from datetime import datetime, time, timezone
-from typing import Optional
+from datetime import datetime, time, timedelta, timezone
+from typing import Optional, Tuple
 from zoneinfo import ZoneInfo
 
 try:  # pragma: no cover - optional dependency
@@ -56,3 +56,32 @@ def market_is_open(ts: Optional[datetime] = None) -> bool:
     open_dt = datetime.combine(ts.date(), OPEN_TIME, tzinfo=TZ)
     close_dt = datetime.combine(ts.date(), CLOSE_TIME, tzinfo=TZ)
     return open_dt <= ts <= close_dt
+
+
+def last_trading_close(ts: Optional[datetime] = None) -> datetime:
+    """Return the most recent market close at or before ``ts``."""
+
+    ts = ts or now_et()
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    ts_et = ts.astimezone(TZ)
+    day = ts_et.date()
+    while True:
+        midday = datetime.combine(day, time(12, 0), tzinfo=TZ)
+        if market_is_open(midday):
+            close_dt = datetime.combine(day, CLOSE_TIME, tzinfo=TZ)
+            if ts_et >= close_dt:
+                return close_dt.astimezone(timezone.utc)
+        day -= timedelta(days=1)
+
+
+def clamp_market_closed(start: datetime, end: datetime) -> Tuple[datetime, bool]:
+    """Clamp ``end`` to the last trading close when market is closed.
+
+    Returns a tuple of (new_end, was_clamped).
+    """
+
+    if market_is_open(end):
+        return end, False
+    last_close = last_trading_close(end)
+    return last_close, True
