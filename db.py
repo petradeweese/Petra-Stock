@@ -303,7 +303,7 @@ def row_to_dict(
     if row is None:
         return {}
     if hasattr(row, "keys"):
-        return {k: row[k] for k in row.keys()}
+        return {k: row[k] for k in row.keys()}  # type: ignore[index]
     if cursor is not None and getattr(cursor, "description", None):
         cols = [c[0] for c in cursor.description]
         return {col: row[idx] for idx, col in enumerate(cols)}
