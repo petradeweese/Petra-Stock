@@ -1,3 +1,4 @@
+import json
 import sqlite3
 
 from fastapi import FastAPI
@@ -14,7 +15,8 @@ def _setup_app(tmp_path):
     conn = sqlite3.connect(db.DB_PATH)
     cur = conn.cursor()
     cur.execute(
-        "INSERT INTO favorites(ticker,direction,interval,rule,lookback_years,min_support,support_snapshot) VALUES('AAA','UP','15m','r',1.5,30,45)"
+        "INSERT INTO favorites(ticker,direction,interval,rule,lookback_years,min_support,support_snapshot) VALUES('AAA','UP','15m','r',1.5,30,?)",
+        (json.dumps({"count": 45, "lookback_years": 1.5}),),
     )
     conn.commit()
     app = FastAPI()
