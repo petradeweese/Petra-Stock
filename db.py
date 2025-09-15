@@ -2,7 +2,7 @@ import logging
 import os
 import sqlite3
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping, Optional, Sequence
 
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
@@ -281,20 +281,36 @@ def _ensure_scanner_column(db: sqlite3.Cursor) -> None:
         db.connection.commit()
 
 
-def row_to_dict(row: Mapping[str, Any] | sqlite3.Row | None) -> dict[str, Any]:
-    """Convert a database row into a plain dict."""
+def row_to_dict(
+    row: Mapping[str, Any] | sqlite3.Row | Sequence[Any] | None,
+    cursor: sqlite3.Cursor | None = None,
+) -> dict[str, Any]:
+    """Convert a database row into a plain dict.
+
+    The DB API used by the application varies between environments.  When the
+    underlying driver returns simple tuples (e.g. via ``raw_connection`` in
+    SQLAlchemy), ``row`` will not expose ``keys`` like ``sqlite3.Row`` does.  In
+    those cases we can derive the column names from ``cursor.description``.
+    """
+
     if row is None:
         return {}
     if hasattr(row, "keys"):
         return {k: row[k] for k in row.keys()}
-    return dict(row)
+    if cursor is not None and getattr(cursor, "description", None):
+        cols = [c[0] for c in cursor.description]
+        return {col: row[idx] for idx, col in enumerate(cols)}
+    try:
+        return dict(row)
+    except Exception:
+        return {str(i): v for i, v in enumerate(row)}
 
 
 def get_settings(db: sqlite3.Cursor) -> dict:
     _ensure_scanner_column(db)
     db.execute("SELECT * FROM settings WHERE id=1")
     row = db.fetchone()
-    return row_to_dict(row)
+    return row_to_dict(row, db)
 
 
 def set_last_run(boundary_iso: str, db: sqlite3.Cursor):

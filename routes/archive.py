@@ -51,7 +51,7 @@ def archive_page(request: Request, db=Depends(get_db)):
         "SELECT id, started_at, scan_type, params_json, universe, "
         "finished_at, hit_count FROM runs ORDER BY id DESC LIMIT 200"
     )
-    runs = [row_to_dict(r) for r in db.fetchall()]
+    runs = [row_to_dict(r, db) for r in db.fetchall()]
     for r in runs:
         try:
             params = json.loads(r.get("params_json") or "{}")
@@ -223,7 +223,7 @@ def results_from_archive(request: Request, run_id: int, db=Depends(get_db)):
         """,
         (run_id,),
     )
-    rows = [row_to_dict(r) for r in db.fetchall()]
+    rows = [row_to_dict(r, db) for r in db.fetchall()]
     rows.sort(
         key=lambda r: (r["avg_roi_pct"], r["hit_pct"], r["support"], r["stability"]),
         reverse=True,
