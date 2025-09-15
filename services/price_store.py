@@ -100,7 +100,7 @@ def get_prices_from_db(
         key = (sym, interval, start.isoformat(), end.isoformat())
         cached = _CACHE.get(key)
         if cached and cached[0] > time.monotonic():
-            logger.info("db_cache_hit symbol=%s", sym)
+            logger.debug("db_cache_hit symbol=%s", sym)
             results[sym] = cached[1]
             continue
         if conn is None:
@@ -176,6 +176,49 @@ def get_coverage(
             pd.to_datetime(min_ts, utc=True).to_pydatetime() if min_ts else None,
             pd.to_datetime(max_ts, utc=True).to_pydatetime() if max_ts else None,
         )
+    finally:
+        if close_conn:
+            conn.close()
+
+
+def bulk_coverage(
+    symbols: List[str], interval: str, start: datetime, end: datetime, conn=None
+) -> Dict[str, Tuple[Optional[datetime], Optional[datetime], int]]:
+    """Return coverage stats for multiple symbols in one query."""
+    if not symbols:
+        return {}
+    close_conn = False
+    if conn is None:
+        conn = _open_conn()
+        close_conn = True
+    try:
+        placeholders = ",".join(["?"] * len(symbols))
+        cur = conn.execute(
+            (
+                f"SELECT symbol, MIN(ts) AS min_ts, MAX(ts) AS max_ts, COUNT(*) AS cnt "
+                f"FROM {BARS_TABLE} WHERE interval=? AND ts>=? AND ts<=? "
+                f"AND symbol IN ({placeholders}) GROUP BY symbol"
+            ),
+            [interval, start.isoformat(), end.isoformat(), *symbols],
+        )
+        rows = cur.fetchall()
+        out: Dict[str, Tuple[Optional[datetime], Optional[datetime], int]] = {}
+        for row in rows:
+            if isinstance(row, sqlite3.Row):
+                sym = row["symbol"]
+                min_ts = row["min_ts"]
+                max_ts = row["max_ts"]
+                cnt = row["cnt"]
+            else:
+                sym, min_ts, max_ts, cnt = row
+            out[sym] = (
+                pd.to_datetime(min_ts, utc=True).to_pydatetime() if min_ts else None,
+                pd.to_datetime(max_ts, utc=True).to_pydatetime() if max_ts else None,
+                int(cnt or 0),
+            )
+        for sym in symbols:
+            out.setdefault(sym, (None, None, 0))
+        return out
     finally:
         if close_conn:
             conn.close()

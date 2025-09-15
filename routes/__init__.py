@@ -172,6 +172,10 @@ def _get_conn() -> sqlite3.Connection:
     return conn
 
 
+_TASK_MEM: dict[str, dict[str, Any]] = {}
+_TASK_WRITE_TS: dict[str, float] = {}
+
+
 def _task_create(task_id: str, total: int) -> None:
     _task_gc()
     conn = _get_conn()
@@ -187,9 +191,20 @@ def _task_create(task_id: str, total: int) -> None:
         conn.commit()
     finally:
         conn.close()
+    _TASK_MEM[task_id] = {
+        "total": total,
+        "done": 0,
+        "percent": 0.0,
+        "state": "queued",
+        "message": "",
+        "ctx": None,
+        "started_at": now_iso,
+        "updated_at": now_iso,
+    }
+    _TASK_WRITE_TS[task_id] = time.monotonic()
 
 
-def _task_update(task_id: str, **fields: Any) -> None:
+def _task_update_db(task_id: str, fields: dict[str, Any]) -> None:
     if not fields:
         return
     conn = _get_conn()
@@ -209,7 +224,33 @@ def _task_update(task_id: str, **fields: Any) -> None:
         conn.close()
 
 
+def _task_update(task_id: str, **fields: Any) -> None:
+    if not fields:
+        return
+    now_iso = now_et().isoformat()
+    task = _TASK_MEM.get(task_id)
+    if task is not None:
+        task.update(fields)
+        task["updated_at"] = now_iso
+    last = _TASK_WRITE_TS.get(task_id, 0.0)
+    need_persist = False
+    if task is not None:
+        done = task.get("done")
+        if isinstance(done, int) and done % 10 == 0:
+            need_persist = True
+    if time.monotonic() - last >= 0.5:
+        need_persist = True
+    if fields.get("state") in {"succeeded", "failed"}:
+        need_persist = True
+    if need_persist:
+        _task_update_db(task_id, task if task is not None else fields)
+        _TASK_WRITE_TS[task_id] = time.monotonic()
+
+
 def _task_get(task_id: str) -> Optional[Dict[str, Any]]:
+    task = _TASK_MEM.get(task_id)
+    if task is not None:
+        return task
     conn = _get_conn()
     try:
         cur = conn.execute(
@@ -225,7 +266,7 @@ def _task_get(task_id: str) -> Optional[Dict[str, Any]]:
     if not row:
         return None
     total, done, percent, state, message, ctx_json, started_at, updated_at = row
-    return {
+    task = {
         "total": total,
         "done": done,
         "percent": percent,
@@ -235,6 +276,9 @@ def _task_get(task_id: str) -> Optional[Dict[str, Any]]:
         "started_at": started_at,
         "updated_at": updated_at,
     }
+    _TASK_MEM[task_id] = task
+    _TASK_WRITE_TS[task_id] = time.monotonic()
+    return task
 
 
 def _task_delete(task_id: str) -> None:
@@ -244,6 +288,8 @@ def _task_delete(task_id: str) -> None:
         conn.commit()
     finally:
         conn.close()
+    _TASK_MEM.pop(task_id, None)
+    _TASK_WRITE_TS.pop(task_id, None)
 
 
 def _task_gc(ttl_hours: int = 48) -> None:
@@ -254,6 +300,10 @@ def _task_gc(ttl_hours: int = 48) -> None:
         conn.commit()
     finally:
         conn.close()
+    to_drop = [tid for tid, t in _TASK_MEM.items() if t.get("started_at", "") < cutoff]
+    for tid in to_drop:
+        _TASK_MEM.pop(tid, None)
+        _TASK_WRITE_TS.pop(tid, None)
 
 
 def _shutdown_executor() -> None:

@@ -67,7 +67,7 @@ def queue_gap_fill(symbol: str, start, end, interval: str) -> None:
         if settings.clamp_market_closed:
             new_end, clamped = clamp_market_closed(start, end)
             if clamped:
-                logger.info(
+                logger.debug(
                     "clamp reason=market_closed end=%s requested_end=%s",
                     new_end.isoformat(),
                     end.isoformat(),
@@ -81,7 +81,7 @@ def queue_gap_fill(symbol: str, start, end, interval: str) -> None:
             end_local = end
         cov_min, cov_max = get_coverage(symbol, interval)
         if covers(start, end_local, cov_min, cov_max):
-            logger.info(
+            logger.debug(
                 "db_coverage_ok symbol=%s interval=%s %s..%s",
                 symbol,
                 interval,
