@@ -709,7 +709,7 @@ def scanner_page(request: Request):
 @router.get("/favorites", response_class=HTMLResponse)
 def favorites_page(request: Request, db=Depends(get_db)):
     db.execute("SELECT * FROM favorites ORDER BY id DESC")
-    favs = [row_to_dict(r) for r in db.fetchall()]
+    favs = [row_to_dict(r, db) for r in db.fetchall()]
     for f in favs:
         f["avg_roi_pct"] = f.get("roi_snapshot")
         f["hit_pct"] = f.get("hit_pct_snapshot")
@@ -824,7 +824,7 @@ def _update_forward_tests(db: sqlite3.Cursor) -> None:
                FROM forward_tests
                WHERE status IN ('queued','running')"""
     )
-    rows = [row_to_dict(r) for r in db.fetchall()]
+    rows = [row_to_dict(r, db) for r in db.fetchall()]
     for row in rows:
         now_iso = now_et().isoformat()
         try:
@@ -960,7 +960,7 @@ def _update_forward_tests(db: sqlite3.Cursor) -> None:
 def forward_page(request: Request, db=Depends(get_db)):
     try:
         db.execute("SELECT * FROM favorites ORDER BY id DESC")
-        favs = [row_to_dict(r) for r in db.fetchall()]
+        favs = [row_to_dict(r, db) for r in db.fetchall()]
         for f in favs:
             db.execute(
                 "SELECT status FROM forward_tests WHERE fav_id=? ORDER BY id DESC LIMIT 1",
@@ -976,7 +976,7 @@ def forward_page(request: Request, db=Depends(get_db)):
                    FROM forward_tests ft
                    ORDER BY ft.id DESC"""
         )
-        tests = [row_to_dict(r) for r in db.fetchall()]
+        tests = [row_to_dict(r, db) for r in db.fetchall()]
         ctx = {"request": request, "tests": tests, "active_tab": "forward"}
     except Exception:
         logger.exception("Failed to load forward page")

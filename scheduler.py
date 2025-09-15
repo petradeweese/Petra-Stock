@@ -190,7 +190,7 @@ async def favorites_loop(
                         db.execute(
                             "SELECT ticker, direction, interval, rule FROM favorites ORDER BY id DESC"
                         )
-                        favs = [row_to_dict(r) for r in db.fetchall()]
+                        favs = [row_to_dict(r, db) for r in db.fetchall()]
                         params: Dict[str, Any] = dict(
                             interval="15m",
                             direction="BOTH",
