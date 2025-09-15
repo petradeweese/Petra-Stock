@@ -46,7 +46,8 @@ def market_is_open(ts: Optional[datetime] = None) -> bool:
         if schedule.empty:
             return False
         row = schedule.iloc[0]
-        if getattr(row, "name", None).date() != ts.date():
+        name = getattr(row, "name", None)
+        if name is None or name.date() != ts.date():
             return False
         open_dt = row["market_open"].to_pydatetime().astimezone(TZ)
         close_dt = row["market_close"].to_pydatetime().astimezone(TZ)
