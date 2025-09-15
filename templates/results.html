@@ -25,6 +25,7 @@
           <th class="num">DD%</th>
           <th class="num">Stability</th>
           <th>Rule</th>
+          <th>Fav</th>
         </tr>
       </thead>
       <tbody>
@@ -46,6 +47,7 @@
           <td class="num">{{ '{:.0f}'.format(r.avg_dd_pct * 100 if r.avg_dd_pct is not none and r.avg_dd_pct <= 1 else r.avg_dd_pct) }}</td>
           <td class="num">{{ '{:.2f}'.format(r.get('stability', 0)) }}</td>
           <td class="rule-td" title="{{ r.rule }}">{{ r.rule }}</td>
+          <td><button class="btn-fav" title="Add to Favorites">⭐</button></td>
         </tr>
         {% endfor %}
       </tbody>
@@ -152,6 +154,11 @@
       rule_snapshot: tr.dataset.rule || '',
       settings_json_snapshot: getSettings()
     };
+    if (e.target?.closest('button.btn-fav')) {
+      e.stopPropagation();
+      addFavorite(payload);
+      return;
+    }
     addFavorite(payload);
   });
 

@@ -149,8 +149,8 @@
     });
   }
 
-  function startPolling(taskId){
-    localStorage.setItem('scanTaskId', taskId);
+  function startPolling(taskId, silent){
+    localStorage.setItem('scanTaskInfo', JSON.stringify({taskId, silent}));
     let last = Date.now();
     const baseDelay = window.SCAN_STATUS_POLL_MS || 2000;
     let delay = baseDelay;
@@ -189,10 +189,10 @@
           }catch(e){
             showToast('Failed to load results', false);
           }
-          localStorage.removeItem('scanTaskId');
+          localStorage.removeItem('scanTaskInfo');
           stopProgress();
         }else{
-          localStorage.removeItem('scanTaskId');
+          localStorage.removeItem('scanTaskInfo');
           stopProgress();
           showToast('Scan failed', false);
         }
@@ -209,8 +209,9 @@
     if(!form) return;
     form.addEventListener('submit', async function(ev){
       ev.preventDefault();
-      startProgress();
       const fd = new FormData(form);
+      const silent = fd.get('silent') === 'true';
+      if(!silent) startProgress();
       let taskId = '';
       try{
         const res = await fetch(form.action, {method:'POST', body: fd});
@@ -222,7 +223,7 @@
         showToast('Failed to start scan', false);
         return;
       }
-      startPolling(taskId);
+      startPolling(taskId, silent);
     });
   }
 
@@ -241,10 +242,15 @@
   document.addEventListener('DOMContentLoaded', function(){
     bindResultsDelegates();
     runScanner();
-    const existing = localStorage.getItem('scanTaskId');
+    const existing = localStorage.getItem('scanTaskInfo');
     if(existing){
-      startProgress();
-      startPolling(existing);
+      try{
+        const info = JSON.parse(existing);
+        if(!info.silent){
+          startProgress();
+          startPolling(info.taskId, false);
+        }
+      }catch(e){ localStorage.removeItem('scanTaskInfo'); }
     }
   });
 })();

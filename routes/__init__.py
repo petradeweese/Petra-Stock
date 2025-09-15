@@ -45,6 +45,7 @@ from utils import TZ, now_et
 
 from .archive import _format_rule_summary as _format_rule_summary
 from .archive import router as archive_router
+from .overnight import router as overnight_router
 
 router = APIRouter()
 templates = Jinja2Templates(directory="templates")
@@ -106,6 +107,7 @@ def check_guardrails(
 
 
 router.include_router(archive_router)
+router.include_router(overnight_router)
 
 
 @router.get("/history")

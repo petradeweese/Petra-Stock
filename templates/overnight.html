@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}Overnight{% endblock %}
+{% block content %}
+<h1>Overnight</h1>
+<p id="window-info"></p>
+<div class="prefs">
+  <label>Start <input type="time" id="win-start"></label>
+  <label>End <input type="time" id="win-end"></label>
+  <button id="save-prefs">Save Window</button>
+</div>
+<div class="queue-builder">
+  <table id="queue-table">
+    <thead><tr><th>#</th><th>Pattern</th><th>Universe</th><th>Settings</th><th></th></tr></thead>
+    <tbody id="queue-body"></tbody>
+  </table>
+  <button id="add-item">Add scanner</button>
+  <button id="save-batch">Save Batch</button>
+  <button id="start-now">Start Now</button>
+  <p class="notice">Items run one-by-one. The next starts only after the previous completes.</p>
+</div>
+<hr/>
+<div id="batches"></div>
+{% endblock %}
+{% block extra_body %}
+<script src="/static/js/overnight.js"></script>
+{% endblock %}
