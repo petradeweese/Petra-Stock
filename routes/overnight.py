@@ -5,14 +5,16 @@ import logging
 from datetime import datetime
 from uuid import uuid4
 
-from fastapi import APIRouter, Body, Depends
-from fastapi import Request
+from fastapi import APIRouter, Body, Depends, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.templating import Jinja2Templates
 
 from db import get_db, row_to_dict
 from services.overnight import get_runner_state
 from services.scanner_params import coerce_scan_params
+
+# ruff: noqa: E501
+
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +62,9 @@ def create_batch(payload: dict = Body(...), db=Depends(get_db)):
             (item_id, batch_id, idx, json.dumps(item)),
         )
     db.connection.commit()
-    return {"batch_id": batch_id, "queued": len(raw_items)}
+    return JSONResponse(
+        {"batch_id": batch_id, "queued": len(raw_items)}, status_code=201
+    )
 
 
 @router.get("", response_class=HTMLResponse)
