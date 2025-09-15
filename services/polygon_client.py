@@ -224,5 +224,21 @@ async def fetch_polygon_prices_async(
 def fetch_polygon_prices(
     symbols: List[str], interval: str, start: dt.datetime, end: dt.datetime
 ) -> Dict[str, pd.DataFrame]:
-    """Synchronous wrapper around ``fetch_polygon_prices_async``."""
-    return asyncio.run(fetch_polygon_prices_async(symbols, interval, start, end))
+    """Synchronous wrapper around :func:`fetch_polygon_prices_async`.
+
+    ``asyncio.run`` raises ``RuntimeError`` when invoked from an active event
+    loop.  Older code paths may call this helper from within an async context,
+    so guard against that situation and provide a clearer error message.  The
+    async variant should be used directly when already inside an event loop.
+    """
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        # No running loop – safe to use asyncio.run.
+        return asyncio.run(fetch_polygon_prices_async(symbols, interval, start, end))
+
+    raise RuntimeError(
+        "fetch_polygon_prices() cannot be called from a running event loop; "
+        "use fetch_polygon_prices_async() instead",
+    )

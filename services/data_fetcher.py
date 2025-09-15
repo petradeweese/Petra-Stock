@@ -271,7 +271,15 @@ def fetch_prices(
     # Fetch tickers in batches to avoid overwhelming the Yahoo Finance API.
     for i in range(0, len(to_download), YF_BATCH_SIZE):
         batch = to_download[i : i + YF_BATCH_SIZE]
-        fetched = asyncio.run(_download_batch(batch, period, interval))
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            fetched = asyncio.run(_download_batch(batch, period, interval))
+        else:
+            raise RuntimeError(
+                "fetch_prices() cannot be invoked from a running event loop; "
+                "use _download_batch directly in async code",
+            )
         for t in batch:
             df = fetched.get(t, pd.DataFrame())
             df = normalize_price_df(df)

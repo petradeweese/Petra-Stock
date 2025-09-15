@@ -134,10 +134,41 @@ CREATE TABLE IF NOT EXISTS scan_tasks (
 """
 
 
+def _ensure_task_columns(conn: sqlite3.Connection) -> None:
+    """Ensure ``scan_tasks`` has ``started_at``/``updated_at`` columns.
+
+    Older databases created before these columns existed should still work.  We
+    perform a lightweight, idempotent check on each connection and add the
+    missing columns if needed.  Existing rows are backfilled so callers relying
+    on the timestamps do not crash.
+    """
+
+    cur = conn.execute("PRAGMA table_info(scan_tasks)")
+    cols = {r[1] for r in cur.fetchall()}
+    altered = False
+    if "started_at" not in cols:
+        conn.execute("ALTER TABLE scan_tasks ADD COLUMN started_at TEXT")
+        altered = True
+    if "updated_at" not in cols:
+        conn.execute("ALTER TABLE scan_tasks ADD COLUMN updated_at TEXT")
+        altered = True
+    if altered:
+        conn.execute(
+            "UPDATE scan_tasks SET started_at=COALESCE(started_at, CURRENT_TIMESTAMP), "
+            "updated_at=COALESCE(updated_at, started_at)"
+        )
+        conn.commit()
+
+
 def _get_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.execute(_TASK_TABLE_SQL)
     conn.commit()
+    try:
+        _ensure_task_columns(conn)
+    except Exception:
+        # best effort; existing scans may proceed even if this fails
+        pass
     return conn
 
 
