@@ -1,17 +1,67 @@
 {% extends 'base.html' %}
 {% block title %}Pattern Finder — Settings{% endblock %}
+{% block head_extra %}
+<style>
+  #fav-preview-modal {
+    position: fixed;
+    inset: 0;
+    background: rgba(7, 16, 30, 0.75);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 2000;
+  }
+  #fav-preview-modal.hidden { display: none; }
+  #fav-preview-modal .modal-content {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+    max-width: 520px;
+    width: min(92%, 520px);
+    box-shadow: 0 24px 60px rgba(0,0,0,.45);
+  }
+  #fav-preview-modal h3 { margin-top: 0; }
+  #fav-preview-body {
+    background: #070a12;
+    border-radius: 10px;
+    padding: 12px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 320px;
+    overflow-y: auto;
+  }
+  #fav-preview-meta { color: var(--muted); margin-bottom: .75rem; font-size: .95rem; }
+  #fav-preview-modal .actions { justify-content: flex-end; }
+  #fav-test-status { min-height: 1.5rem; }
+  .status-success { color: var(--pos); }
+  .status-error { color: var(--neg); }
+</style>
+{% endblock %}
 {% block content %}
   <div class="card">
     <h1 style="margin-top:0;">Settings</h1>
     <form action="/settings/save" method="post">
       <div class="grid">
         <div>
+          <label>SMTP Host</label>
+          <input name="smtp_host" value="{{ st['smtp_host'] or '' }}" placeholder="smtp.gmail.com" />
+        </div>
+        <div>
+          <label>SMTP Port</label>
+          <input name="smtp_port" type="number" step="1" value="{{ st['smtp_port'] or 587 }}" />
+        </div>
+        <div>
+          <label>Mail From</label>
+          <input name="mail_from" value="{{ st['mail_from'] or '' }}" placeholder="Petra Alerts &lt;petrastockalerts@gmail.com&gt;" />
+        </div>
+        <div>
           <label>SMTP User</label>
           <input name="smtp_user" value="{{ st['smtp_user'] or '' }}" />
         </div>
         <div>
           <label>SMTP Pass</label>
-          <input name="smtp_pass" type="password" value="{{ st['smtp_pass'] or '' }}" />
+          <input name="smtp_pass" type="password" value="{{ st['smtp_pass'] or '' }}" autocomplete="off" />
         </div>
         <div>
           <label>Scanner Results Recipients (comma-separated)</label>
@@ -33,6 +83,9 @@
           <input name="throttle_minutes" type="number" step="1" value="{{ st['throttle_minutes'] or 60 }}" />
         </div>
       </div>
+      {% if smtp_warning %}
+      <p class="note status-error" style="margin-top:.5rem;">SMTP configuration incomplete: {{ smtp_missing_label }}</p>
+      {% endif %}
 
   <div class="actions">
     <button type="submit">Save</button>
@@ -54,8 +107,8 @@
         <div>
           <label>Channel</label>
           <select id="fav-test-channel">
-            <option value="mms">MMS</option>
-            <option value="email">Email</option>
+            <option value="email" {% if smtp_configured %}selected{% endif %}>Email</option>
+            <option value="mms" {% if not smtp_configured %}selected{% endif %} {% if not twilio_configured %}disabled title="MMS requires Twilio configuration"{% endif %}>MMS</option>
           </select>
         </div>
         <div>
@@ -66,17 +119,147 @@
           </select>
         </div>
       </div>
-      <button id="fav-test-send" class="btn" style="margin-top:.5rem;">Send Test Alert</button>
+      <p id="fav-test-status" class="note" style="margin-top:.75rem;"></p>
+      <button id="fav-test-send" class="btn" style="margin-top:.25rem;">Send Test Alert</button>
+    </div>
+  </div>
+  <div id="fav-preview-modal" class="hidden">
+    <div class="modal-content">
+      <h3>Favorites Test Alert Preview</h3>
+      <div id="fav-preview-meta"></div>
+      <pre id="fav-preview-body"></pre>
+      <div class="actions" style="margin-top:1rem;">
+        <button id="fav-preview-cancel" type="button" class="btn">Cancel</button>
+        <button id="fav-preview-send" type="button">Send Alert</button>
+      </div>
     </div>
   </div>
 {% endblock %}
 {% block extra_body %}
 <script>
-  document.getElementById('fav-test-send')?.addEventListener('click', async ()=>{
-    const symbol = document.getElementById('fav-test-symbol').value || 'AAPL';
-    const channel = document.getElementById('fav-test-channel').value || 'mms';
-    const compact = document.getElementById('fav-test-compact').value === '1';
-    await fetch('/favorites/test_alert',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({symbol,channel,compact})});
-  });
+  (function(){
+    const sendBtn = document.getElementById('fav-test-send');
+    const symbolInput = document.getElementById('fav-test-symbol');
+    const channelInput = document.getElementById('fav-test-channel');
+    const compactInput = document.getElementById('fav-test-compact');
+    const statusEl = document.getElementById('fav-test-status');
+    const modal = document.getElementById('fav-preview-modal');
+    const modalBody = document.getElementById('fav-preview-body');
+    const modalMeta = document.getElementById('fav-preview-meta');
+    const modalSend = document.getElementById('fav-preview-send');
+    const modalCancel = document.getElementById('fav-preview-cancel');
+    let pendingPayload = null;
+
+    function setStatus(message, tone) {
+      if (!statusEl) return;
+      statusEl.textContent = message || '';
+      statusEl.classList.remove('status-error','status-success');
+      if (!message) {
+        statusEl.style.visibility = 'hidden';
+        return;
+      }
+      statusEl.style.visibility = 'visible';
+      if (tone === 'error') {
+        statusEl.classList.add('status-error');
+      } else if (tone === 'success') {
+        statusEl.classList.add('status-success');
+      }
+    }
+
+    function openModal(subject, body) {
+      modal?.classList.remove('hidden');
+      modalBody.textContent = body || '';
+      modalMeta.textContent = subject ? `Subject: ${subject}` : 'Subject: (none)';
+    }
+
+    function closeModal() {
+      modal?.classList.add('hidden');
+    }
+
+    async function fetchPreview(payload) {
+      const res = await fetch('/favorites/test_alert/preview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        const err = data.error || 'Unable to generate preview';
+        throw new Error(err);
+      }
+      return data;
+    }
+
+    async function sendAlert(payload) {
+      const res = await fetch('/favorites/test_alert', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        const err = data.error || 'Alert send failed';
+        throw new Error(err);
+      }
+      return data;
+    }
+
+    sendBtn?.addEventListener('click', async () => {
+      const symbol = (symbolInput?.value || 'AAPL').trim().toUpperCase();
+      const channel = channelInput?.value || 'mms';
+      const compact = (compactInput?.value || '0') === '1';
+      const payload = { symbol, channel, compact };
+      pendingPayload = payload;
+      setStatus('Generating preview…');
+      sendBtn.disabled = true;
+      try {
+        const preview = await fetchPreview(payload);
+        openModal(preview.subject || `Favorites Alert Test: ${symbol}`, preview.body || '');
+        setStatus('Preview ready — review before sending.');
+      } catch (err) {
+        setStatus(err.message || 'Failed to load preview', 'error');
+      } finally {
+        sendBtn.disabled = false;
+      }
+    });
+
+    modalSend?.addEventListener('click', async () => {
+      if (!pendingPayload) {
+        closeModal();
+        return;
+      }
+      modalSend.disabled = true;
+      sendBtn.disabled = true;
+      setStatus('Sending alert…');
+      try {
+        const result = await sendAlert(pendingPayload);
+        const msgId = result.message_id ? `message-id ${result.message_id}` : 'sent';
+        setStatus(`Sent (${msgId})`, 'success');
+      } catch (err) {
+        setStatus(err.message || 'Failed to send alert', 'error');
+      } finally {
+        modalSend.disabled = false;
+        sendBtn.disabled = false;
+        closeModal();
+        pendingPayload = null;
+      }
+    });
+
+    modalCancel?.addEventListener('click', () => {
+      closeModal();
+      pendingPayload = null;
+      setStatus('Preview cancelled');
+    });
+
+    modal?.addEventListener('click', (event) => {
+      if (event.target === modal) {
+        closeModal();
+        pendingPayload = null;
+        setStatus('Preview cancelled');
+      }
+    });
+
+    setStatus('');
+  })();
 </script>
 {% endblock %}

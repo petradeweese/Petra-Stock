@@ -65,8 +65,11 @@ SCHEMA = [
     """
     CREATE TABLE IF NOT EXISTS settings (
         id INTEGER PRIMARY KEY CHECK (id=1),
+        smtp_host TEXT,
+        smtp_port INTEGER DEFAULT 587,
         smtp_user TEXT,
         smtp_pass TEXT,
+        mail_from TEXT,
         recipients TEXT,
         scanner_recipients TEXT,
         scheduler_enabled INTEGER DEFAULT 0,
@@ -80,8 +83,11 @@ SCHEMA = [
     INSERT OR IGNORE INTO settings
       (
         id,
+        smtp_host,
+        smtp_port,
         smtp_user,
         smtp_pass,
+        mail_from,
         recipients,
         scanner_recipients,
         scheduler_enabled,
@@ -90,7 +96,7 @@ SCHEMA = [
         last_run_at
       )
     VALUES
-      (1, '', '', '', '', 0, 60, '', '');
+      (1, '', 587, '', '', '', '', '', 0, 60, '', '');
     """,
     # Favorites
     """
@@ -287,6 +293,15 @@ def _ensure_scanner_column(db: sqlite3.Cursor) -> None:
         db.execute(
             "ALTER TABLE settings ADD COLUMN greeks_profile_json TEXT DEFAULT '{}'"
         )
+        db.connection.commit()
+    if "smtp_host" not in cols:
+        db.execute("ALTER TABLE settings ADD COLUMN smtp_host TEXT DEFAULT ''")
+        db.connection.commit()
+    if "smtp_port" not in cols:
+        db.execute("ALTER TABLE settings ADD COLUMN smtp_port INTEGER DEFAULT 587")
+        db.connection.commit()
+    if "mail_from" not in cols:
+        db.execute("ALTER TABLE settings ADD COLUMN mail_from TEXT DEFAULT ''")
         db.connection.commit()
 
 
