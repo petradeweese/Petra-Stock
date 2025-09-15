@@ -22,7 +22,8 @@ def _add_run_id(record: logging.LogRecord) -> bool:
 
 logger.addFilter(_add_run_id)
 
-MAX_CONCURRENCY = settings.http_max_concurrency
+# Allow scanner-specific overrides while retaining the global default.
+MAX_CONCURRENCY = settings.scan_max_concurrency or settings.http_max_concurrency
 # Allow more retries by default so transient rate limits have a chance to recover.
 # Waits are capped at 64s but a high retry count lets the backoff continue for
 # several minutes when needed.
@@ -80,7 +81,7 @@ def get_client() -> httpx.AsyncClient:
     if _client is None:
         _client = httpx.AsyncClient(
             http2=True,
-            timeout=10.0,
+            timeout=settings.scan_http_timeout,
             limits=httpx.Limits(
                 max_connections=MAX_CONCURRENCY * 4,
                 max_keepalive_connections=MAX_CONCURRENCY * 2,

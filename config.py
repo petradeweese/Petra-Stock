@@ -19,5 +19,13 @@ class Settings:
     fetch_retry_base_ms: int = int(os.getenv("FETCH_RETRY_BASE_MS", "300"))
     fetch_retry_cap_ms: int = int(os.getenv("FETCH_RETRY_CAP_MS", "5000"))
 
+    # Scanner feature flags; all additive and safe to tweak at runtime.
+    scan_max_concurrency: int = int(os.getenv("SCAN_MAX_CONCURRENCY", "8"))
+    scan_rps: float = float(os.getenv("SCAN_RPS", "0"))
+    scan_http_timeout: float = float(os.getenv("SCAN_HTTP_TIMEOUT", "10"))
+    scan_status_poll_ms: int = int(os.getenv("SCAN_STATUS_POLL_MS", "2000"))
+    scan_progress_flush_items: int = int(os.getenv("SCAN_PROGRESS_FLUSH_ITEMS", "10"))
+    scan_progress_flush_ms: int = int(os.getenv("SCAN_PROGRESS_FLUSH_MS", "500"))
+
 
 settings = Settings()

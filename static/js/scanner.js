@@ -8,7 +8,7 @@
   let ctxRow = null; // current row element
   let pollTimer = null;
   let stillTimer = null;
-  let maxTimer = null;
+  let maxTimer = null; // legacy timeout (unused but kept for compatibility)
 
   function startProgress(){
     progressFill.style.width = '0%';
@@ -17,7 +17,6 @@
     overlay.style.display = 'grid';
     if(stillTimer) clearInterval(stillTimer);
     if(maxTimer) clearTimeout(maxTimer);
-    maxTimer = setTimeout(()=>{ stopProgress(); showToast('Scan timed out', false); }, 240000);
   }
 
   function stopProgress(){
@@ -150,6 +149,61 @@
     });
   }
 
+  function startPolling(taskId){
+    localStorage.setItem('scanTaskId', taskId);
+    let last = Date.now();
+    const baseDelay = window.SCAN_STATUS_POLL_MS || 2000;
+    let delay = baseDelay;
+    let lastUpdate = '';
+    stillTimer = setInterval(()=>{
+      if(Date.now()-last > 10000) progressStatus.textContent = 'still running...';
+    }, 5000);
+
+    const poll = async function(){
+      try{
+        const res = await fetch(`/scanner/status/${taskId}?t=${Date.now()}`, {cache: 'no-store'});
+        if(!res.ok) throw new Error('');
+        const data = await res.json();
+        last = Date.now();
+        progressFill.style.width = (data.percent || 0) + '%';
+        progressText.textContent = Math.floor(data.percent || 0) + '%';
+        progressStatus.textContent = data.message || '';
+        if(data.updated_at && data.updated_at !== lastUpdate){
+          delay = baseDelay;
+          lastUpdate = data.updated_at;
+        }
+        if(data.state === 'running' || data.state === 'queued'){
+          pollTimer = setTimeout(poll, delay);
+          delay = Math.min(delay * 1.5, 30000);
+        }else if(data.state === 'succeeded'){
+          progressFill.style.width = '100%';
+          progressText.textContent = '100%';
+          try{
+            const html = await fetch(`/scanner/results/${taskId}?t=${Date.now()}`, {cache: 'no-store'}).then(r=>{
+              if(!r.ok) throw new Error('');
+              return r.text();
+            });
+            const target = document.getElementById('scan-results');
+            if(target) target.innerHTML = html;
+            bindResultsDelegates();
+          }catch(e){
+            showToast('Failed to load results', false);
+          }
+          localStorage.removeItem('scanTaskId');
+          stopProgress();
+        }else{
+          localStorage.removeItem('scanTaskId');
+          stopProgress();
+          showToast('Scan failed', false);
+        }
+      }catch(e){
+        pollTimer = setTimeout(poll, delay);
+        delay = Math.min(delay * 1.5, 30000);
+      }
+    };
+    poll();
+  }
+
   function runScanner(){
     const form = document.getElementById('scan-form');
     if(!form) return;
@@ -168,46 +222,7 @@
         showToast('Failed to start scan', false);
         return;
       }
-
-      let last = Date.now();
-      stillTimer = setInterval(()=>{
-        if(Date.now()-last > 10000) progressStatus.textContent = 'still running...';
-      }, 5000);
-
-      const poll = async function(){
-        try{
-          const res = await fetch(`/scanner/status/${taskId}?t=${Date.now()}`, {cache: 'no-store'});
-          const data = await res.json();
-          last = Date.now();
-          progressFill.style.width = (data.percent || 0) + '%';
-          progressText.textContent = Math.floor(data.percent || 0) + '%';
-          if(data.state === 'running'){
-            pollTimer = setTimeout(poll, 2000);
-          }else if(data.state === 'succeeded'){
-            progressFill.style.width = '100%';
-            progressText.textContent = '100%';
-            try{
-              const html = await fetch(`/scanner/results/${taskId}?t=${Date.now()}`, {cache: 'no-store'}).then(r=>{
-                if(!r.ok) throw new Error('');
-                return r.text();
-              });
-              const target = document.getElementById('scan-results');
-              if(target) target.innerHTML = html;
-              bindResultsDelegates();
-            }catch(e){
-              showToast('Failed to load results', false);
-            }
-            stopProgress();
-          }else{
-            stopProgress();
-            showToast('Scan failed', false);
-          }
-        }catch(e){
-          stopProgress();
-          showToast('Scan failed', false);
-        }
-      };
-      poll();
+      startPolling(taskId);
     });
   }
 
@@ -226,6 +241,11 @@
   document.addEventListener('DOMContentLoaded', function(){
     bindResultsDelegates();
     runScanner();
+    const existing = localStorage.getItem('scanTaskId');
+    if(existing){
+      startProgress();
+      startPolling(existing);
+    }
   });
 })();
 

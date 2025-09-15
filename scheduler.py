@@ -1,8 +1,10 @@
 # ruff: noqa: E501
 import asyncio
 import logging
+import os
 import random
 import sqlite3
+import time
 from datetime import datetime, timedelta
 from typing import Any, Awaitable, Callable, Dict
 
@@ -64,10 +66,13 @@ work_queue = WorkQueue()
 
 def queue_gap_fill(symbol: str, start, end, interval: str) -> None:
     async def _job() -> None:
+        start_time = time.monotonic()
+        rows_total = 0
+        deadline = start_time + float(os.getenv("SCAN_SOFT_DEADLINE", "120"))
         if settings.clamp_market_closed:
             new_end, clamped = clamp_market_closed(start, end)
             if clamped:
-                logger.info(
+                logger.debug(
                     "clamp reason=market_closed end=%s requested_end=%s",
                     new_end.isoformat(),
                     end.isoformat(),
@@ -81,7 +86,7 @@ def queue_gap_fill(symbol: str, start, end, interval: str) -> None:
             end_local = end
         cov_min, cov_max = get_coverage(symbol, interval)
         if covers(start, end_local, cov_min, cov_max):
-            logger.info(
+            logger.debug(
                 "db_coverage_ok symbol=%s interval=%s %s..%s",
                 symbol,
                 interval,
@@ -100,6 +105,9 @@ def queue_gap_fill(symbol: str, start, end, interval: str) -> None:
         for a, b in to_fetch:
             cur = a
             while cur < b:
+                if time.monotonic() > deadline:
+                    logger.info("fetch_deadline symbol=%s", symbol)
+                    break
                 nxt = min(cur + chunk, b)
                 logger.info(
                     "fetch_call symbol=%s requested_start=%s requested_end=%s",
@@ -113,6 +121,7 @@ def queue_gap_fill(symbol: str, start, end, interval: str) -> None:
                     )
                     df_p = df_map.get(symbol)
                     if df_p is not None and not df_p.empty:
+                        rows_total += len(df_p)
                         upsert_bars(symbol, df_p, interval)
                         logger.info(
                             "fetch_ok symbol=%s rows=%d",
@@ -132,6 +141,15 @@ def queue_gap_fill(symbol: str, start, end, interval: str) -> None:
                         _tb.format_exc(),
                     )
                 cur = nxt
+
+        duration = time.monotonic() - start_time
+        logger.info(
+            "fetch_summary symbol=%s ranges=%d rows=%d duration=%.2f",
+            symbol,
+            len(to_fetch),
+            rows_total,
+            duration,
+        )
 
     key = f"gap:{symbol}:{start.isoformat()}:{end.isoformat()}"
     work_queue.enqueue(key, _job)
