@@ -32,8 +32,8 @@
           <td><strong>{{ f["ticker"] }}</strong></td>
           <td>{{ f["direction"] }}</td>
           <td>{{ f["interval"] }}</td>
-          <td>{{ '{:.1f}'.format(f['lookback_years']) if f['lookback_years'] is not none else '' }}</td>
-          <td>{{ f['support_snapshot'] or f['min_support'] }}</td>
+          <td>{{ f['lookback_display'] }}</td>
+          <td>{{ f['support_display'] }}</td>
           <td>{{ '{:.0f}'.format(f['avg_roi_pct']*100 if f['avg_roi_pct'] is not none and f['avg_roi_pct'] <= 1 else f['avg_roi_pct']) if f['avg_roi_pct'] is not none else '' }}</td>
           <td>{{ '{:.1f}'.format(f['hit_pct']) if f['hit_pct'] is not none else '' }}</td>
           <td>{{ '{:.0f}'.format(f['avg_dd_pct']*100 if f['avg_dd_pct'] is not none and f['avg_dd_pct'] <= 1 else f['avg_dd_pct']) if f['avg_dd_pct'] is not none else '' }}</td>

@@ -37,6 +37,7 @@ def test_forward_list_favorites_present(tmp_path, monkeypatch):
     assert res.status_code == 200
     data = res.json()
     assert len(data["favorites"]) == 2
+    assert {fav["lookback_years"] for fav in data["favorites"]} == {1.0}
     page = client.get("/forward")
     assert "AAA" in page.text and "BBB" in page.text
 

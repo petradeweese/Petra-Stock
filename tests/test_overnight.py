@@ -126,6 +126,8 @@ def test_overnight_page_has_full_form(tmp_path):
     text = res.text
     assert "Scan Type" in text
     assert "Delta (assumed)" in text
+    assert "Show finished" in text
+    assert "Clear finished" in text
 
 
 def test_overnight_add_remove_renumber(tmp_path):
@@ -404,6 +406,107 @@ def test_cancel_marks_remaining(tmp_path, monkeypatch):
     gen.close()
     assert order == ["T1"]
     assert [r[1] for r in rows] == ["complete", "canceled"]
+
+
+def test_overnight_filters_and_soft_delete(tmp_path):
+    app = _setup_app(tmp_path)
+    client = TestClient(app)
+    running = client.post("/overnight/batches", json={"items": [{"ticker": "RUN"}]})
+    complete = client.post("/overnight/batches", json={"items": [{"ticker": "DONE"}]})
+    canceled = client.post("/overnight/batches", json={"items": [{"ticker": "STOP"}]})
+    b_running = running.json()["batch_id"]
+    b_complete = complete.json()["batch_id"]
+    b_canceled = canceled.json()["batch_id"]
+
+    conn = sqlite3.connect(db.DB_PATH)
+    cur = conn.cursor()
+    cur.execute("UPDATE overnight_batches SET status='running' WHERE id=?", (b_running,))
+    cur.execute("UPDATE overnight_batches SET status='complete' WHERE id=?", (b_complete,))
+    cur.execute("UPDATE overnight_batches SET status='canceled' WHERE id=?", (b_canceled,))
+    conn.commit()
+    conn.close()
+
+    default = client.get("/overnight/batches").json()
+    assert [b["id"] for b in default["batches"]] == [b_running]
+    assert default["finished_count"] == 2
+
+    finished = client.get("/overnight/batches?include_finished=true").json()
+    statuses = {b["id"]: b["status"] for b in finished["batches"]}
+    assert statuses[b_running] == "running"
+    assert statuses[b_canceled] == "canceled"
+    assert statuses[b_complete] == "complete"
+
+    resp = client.delete(f"/overnight/batches/{b_complete}")
+    assert resp.status_code == 200
+    deleted_default = client.get("/overnight/batches").json()
+    assert deleted_default["finished_count"] == 1
+    assert [b["id"] for b in deleted_default["batches"]] == [b_running]
+
+    after_delete = client.get("/overnight/batches?include_finished=true").json()
+    after_ids = {b["id"] for b in after_delete["batches"]}
+    assert b_complete not in after_ids
+    assert b_canceled in after_ids
+
+    resp_conflict = client.delete(f"/overnight/batches/{b_running}")
+    assert resp_conflict.status_code == 409
+
+    cleared = client.post("/overnight/batches/clear_finished").json()
+    assert cleared["cleared"] == 1
+    after_clear = client.get("/overnight/batches").json()
+    assert after_clear["finished_count"] == 0
+
+    debug = client.get("/overnight/batches?include_deleted=true").json()
+    ids = {b["id"] for b in debug["batches"]}
+    assert {b_running, b_complete, b_canceled}.issubset(ids)
+
+    conn = sqlite3.connect(db.DB_PATH)
+    cur = conn.cursor()
+    cur.execute("SELECT deleted_at FROM overnight_batches WHERE id=?", (b_complete,))
+    assert cur.fetchone()[0]
+    cur.execute("SELECT deleted_at FROM overnight_batches WHERE id=?", (b_canceled,))
+    assert cur.fetchone()[0]
+    conn.close()
+
+
+def test_runner_skips_soft_deleted_batches(tmp_path):
+    app = _setup_app(tmp_path)
+    client = TestClient(app)
+    deleted = client.post("/overnight/batches", json={"items": [{"ticker": "OLD"}]})
+    active = client.post("/overnight/batches", json={"items": [{"ticker": "NEW"}]})
+    b_deleted = deleted.json()["batch_id"]
+    b_active = active.json()["batch_id"]
+
+    conn = sqlite3.connect(db.DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE overnight_batches SET status='paused', start_override=1, deleted_at='2024-01-01T00:00:00' WHERE id=?",
+        (b_deleted,),
+    )
+    cur.execute(
+        "UPDATE overnight_batches SET status='queued', start_override=1 WHERE id=?",
+        (b_active,),
+    )
+    conn.commit()
+    conn.close()
+
+    order: list[str] = []
+
+    def _scan(payload: dict, silent: bool) -> int:
+        order.append(payload["ticker"])
+        return 1
+
+    runner = OvernightRunner(_scan)
+    assert runner.run_ready(datetime.utcnow()) == b_active
+
+    conn = sqlite3.connect(db.DB_PATH)
+    cur = conn.cursor()
+    cur.execute("SELECT status FROM overnight_batches WHERE id=?", (b_deleted,))
+    assert cur.fetchone()[0] == "paused"
+    cur.execute("SELECT status FROM overnight_batches WHERE id=?", (b_active,))
+    assert cur.fetchone()[0] == "complete"
+    conn.close()
+
+    assert order == ["NEW"]
 
 
 def test_runner_state_endpoint(tmp_path):

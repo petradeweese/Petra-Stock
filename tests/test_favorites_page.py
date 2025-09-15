@@ -30,6 +30,6 @@ def test_favorites_list_shows_lookback_hits(tmp_path):
     text = res.text
     assert "Lookback" in text
     assert "Hits" in text
-    assert "1.5" in text
+    assert "1.5y" in text
     assert ">45<" in text
 
