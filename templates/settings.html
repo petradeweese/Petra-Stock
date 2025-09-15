@@ -108,7 +108,7 @@
           <label>Channel</label>
           <select id="fav-test-channel">
             <option value="email" {% if smtp_configured %}selected{% endif %}>Email</option>
-            <option value="mms" {% if not smtp_configured %}selected{% endif %} {% if not twilio_configured %}disabled title="MMS requires Twilio configuration"{% endif %}>MMS</option>
+            <option value="mms" {% if not smtp_configured %}selected{% endif %}>MMS</option>
           </select>
         </div>
         <div>
