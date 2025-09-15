@@ -100,10 +100,11 @@ def test_add_favorite_persists_lookback(tmp_path):
     assert lookback == 2.0
     assert min_support == 35
 
+    assert support_snapshot is not None
     support_data = json.loads(support_snapshot)
-    assert support_data["count"] == 40
-    assert support_data["lookback_years"] == 2.0
-    assert support_data["min_support"] == 35
+    assert support_data.get("count") == 40
+    assert support_data.get("lookback_years") == 2.0
+    assert support_data.get("min_support") == 35
 
     settings_data = json.loads(settings_snapshot)
     assert settings_data["lookback_years"] == "2.0"
