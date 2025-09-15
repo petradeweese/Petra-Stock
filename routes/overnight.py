@@ -12,6 +12,7 @@ from fastapi.templating import Jinja2Templates
 
 from db import get_db, row_to_dict
 from services.overnight import get_runner_state
+from services.scanner_params import coerce_scan_params
 
 logger = logging.getLogger(__name__)
 
@@ -41,15 +42,16 @@ MAX_PAYLOAD = 2000
 def create_batch(payload: dict = Body(...), db=Depends(get_db)):
     label = payload.get("label")
     note = payload.get("note")
-    items = payload.get("items", []) or []
-    if len(items) > MAX_ITEMS:
+    raw_items = payload.get("items", []) or []
+    if len(raw_items) > MAX_ITEMS:
         return JSONResponse({"error": "too_many_items"}, status_code=400)
     batch_id = str(uuid4())
     db.execute(
         "INSERT INTO overnight_batches(id,label,note,status) VALUES(?,?,?, 'queued')",
         (batch_id, label, note),
     )
-    for idx, item in enumerate(items, start=1):
+    for idx, raw in enumerate(raw_items, start=1):
+        item = coerce_scan_params(raw)
         if len(json.dumps(item)) > MAX_PAYLOAD:
             return JSONResponse({"error": "payload_too_large"}, status_code=400)
         item_id = str(uuid4())
@@ -58,7 +60,7 @@ def create_batch(payload: dict = Body(...), db=Depends(get_db)):
             (item_id, batch_id, idx, json.dumps(item)),
         )
     db.connection.commit()
-    return {"batch_id": batch_id, "queued": len(items)}
+    return {"batch_id": batch_id, "queued": len(raw_items)}
 
 
 @router.get("", response_class=HTMLResponse)
@@ -102,11 +104,11 @@ def batch_csv(batch_id: str, db=Depends(get_db)):
         (batch_id,),
     )
     rows = db.fetchall()
-    lines = ["position,pattern,universe,run_id"]
+    lines = ["position,scan_type,ticker,run_id"]
     for pos, payload, run_id in rows:
         obj = json.loads(payload)
         lines.append(
-            f"{pos},{obj.get('pattern','')},{obj.get('universe','')},{run_id or ''}"
+            f"{pos},{obj.get('scan_type','')},{obj.get('ticker','')},{run_id or ''}"
         )
     return "\n".join(lines)
 
@@ -141,6 +143,7 @@ def update_prefs(payload: dict = Body(...), db=Depends(get_db)):
 
 @router.post("/batches/{batch_id}/items")
 def append_item(batch_id: str, item: dict = Body(...), db=Depends(get_db)):
+    item = coerce_scan_params(item)
     if len(json.dumps(item)) > MAX_PAYLOAD:
         return JSONResponse({"error": "payload_too_large"}, status_code=400)
     cur = db.execute(

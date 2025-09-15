@@ -28,11 +28,14 @@ def test_sequential_order():
     batch_id = "b1"
     gen = get_db()
     db = next(gen)
-    db.execute("INSERT INTO overnight_batches(id,status) VALUES(?, 'queued')", (batch_id,))
+    db.execute(
+        "INSERT INTO overnight_batches(id,status,start_override) VALUES(?, 'queued', 1)",
+        (batch_id,),
+    )
     items = [
-        ("i1", 1, {"num": 1}),
-        ("i2", 2, {"num": 2}),
-        ("i3", 3, {"num": 3}),
+        ("i1", 1, {"ticker": "T1"}),
+        ("i2", 2, {"ticker": "T2"}),
+        ("i3", 3, {"ticker": "T3"}),
     ]
     for iid, pos, payload in items:
         db.execute(
@@ -41,11 +44,11 @@ def test_sequential_order():
         )
     db.connection.commit()
     gen.close()
-    order: list[int] = []
+    order: list[str] = []
 
     def _stub_scan(payload: dict, silent: bool) -> int:
-        order.append(payload["num"])
-        return payload["num"]
+        order.append(payload["ticker"])
+        return int(payload["ticker"][1:])
 
     runner = OvernightRunner(_stub_scan)
     runner.run_batch(batch_id)
@@ -56,38 +59,54 @@ def test_sequential_order():
         "SELECT position, status, run_id FROM overnight_items ORDER BY position",
     ).fetchall()
     gen.close()
-    assert order == [1, 2, 3]
+    assert order == ["T1", "T2", "T3"]
     assert [r[1] for r in rows] == ["complete", "complete", "complete"]
     assert [r[2] for r in rows] == [1, 2, 3]
 
 
-def test_payload_passthrough(tmp_path):
+def test_overnight_uses_scanner_payload(tmp_path):
     app = _setup_app(tmp_path)
     client = TestClient(app)
-    payload = {
-        "pattern": "p1",
-        "universe": "u1",
-        "settings": {"threshold": 5},
+    form = {
+        "scan_type": "single",
+        "ticker": "AAPL",
+        "interval": "15m",
+        "direction": "UP",
+        "target_pct": "1.5",
     }
-    res = client.post("/overnight/batches", json={"items": [payload]})
+    res = client.post("/overnight/batches", json={"items": [form]})
     batch_id = res.json()["batch_id"]
     captured: list[dict] = []
 
     def _scan(p: dict, silent: bool) -> int:
         captured.append(p)
-        return 777
+        return 1
 
     runner = OvernightRunner(_scan)
     runner.run_batch(batch_id)
-    assert captured[0] == payload
-    manual_id = _scan(payload, False)
-    gen = get_db()
-    db = next(gen)
-    run_id = db.execute(
-        "SELECT run_id FROM overnight_items WHERE batch_id=?", (batch_id,)
-    ).fetchone()[0]
-    gen.close()
-    assert manual_id == run_id
+    from services.scanner_params import coerce_scan_params
+    assert captured[0] == coerce_scan_params(form)
+
+
+def test_overnight_save_and_reload(tmp_path):
+    app = _setup_app(tmp_path)
+    client = TestClient(app)
+    form = {
+        "scan_type": "single",
+        "ticker": "MSFT",
+        "interval": "15m",
+        "direction": "DOWN",
+        "target_pct": "2.0",
+        "delta": "0.3",
+        "theta_day": "0.1",
+    }
+    res = client.post("/overnight/batches", json={"items": [form]})
+    batch_id = res.json()["batch_id"]
+    data = client.get(f"/overnight/batches/{batch_id}").json()
+    payload = json.loads(data["items"][0]["payload_json"])
+    from services.scanner_params import coerce_scan_params
+
+    assert payload == coerce_scan_params(form)
 
 
 def _setup_app(tmp_path):
@@ -99,22 +118,29 @@ def _setup_app(tmp_path):
     return app
 
 
-def test_add_remove_reorder(tmp_path):
+def test_overnight_page_has_full_form(tmp_path):
+    app = _setup_app(tmp_path)
+    client = TestClient(app)
+    res = client.get("/overnight")
+    assert res.status_code == 200
+    text = res.text
+    assert "Scan Type" in text
+    assert "Delta (assumed)" in text
+
+
+def test_overnight_add_remove_renumber(tmp_path):
     app = _setup_app(tmp_path)
     client = TestClient(app)
     payload = {
         "label": "b",
-        "items": [{"pattern": "a"}, {"pattern": "b"}],
+        "items": [{"scan_type": "scan150"}, {"scan_type": "scan150"}],
     }
     res = client.post("/overnight/batches", json=payload)
     batch_id = res.json()["batch_id"]
-    # append
-    client.post(f"/overnight/batches/{batch_id}/items", json={"pattern": "c"})
-    # delete middle item
+    client.post(f"/overnight/batches/{batch_id}/items", json={"scan_type": "scan150"})
     items = client.get(f"/overnight/batches/{batch_id}").json()["items"]
     second_id = items[1]["id"]
     client.delete(f"/overnight/items/{second_id}")
-    # reorder
     items = client.get(f"/overnight/batches/{batch_id}").json()["items"]
     mapping = [{"item_id": items[1]["id"], "position": 1}]
     client.post(f"/overnight/batches/{batch_id}/reorder", json=mapping)
@@ -126,9 +152,9 @@ def test_add_remove_reorder(tmp_path):
 def test_start_now(tmp_path, caplog):
     app = _setup_app(tmp_path)
     client = TestClient(app)
-    res1 = client.post("/overnight/batches", json={"items": [{"num": 1}]})
+    res1 = client.post("/overnight/batches", json={"items": [{"ticker": "T1"}]})
     b1 = res1.json()["batch_id"]
-    res2 = client.post("/overnight/batches", json={"items": [{"num": 2}]})
+    res2 = client.post("/overnight/batches", json={"items": [{"ticker": "T2"}]})
     b2 = res2.json()["batch_id"]
     conn = sqlite3.connect(db.DB_PATH)
     cur = conn.cursor()
@@ -144,16 +170,16 @@ def test_start_now(tmp_path, caplog):
     cur.execute("UPDATE overnight_batches SET status='complete' WHERE id=?", (b1,))
     conn.commit()
     conn.close()
-    order: list[int] = []
+    order: list[str] = []
 
     def _scan(p: dict, silent: bool) -> int:
-        order.append(p["num"])
-        return p["num"]
+        order.append(p["ticker"])
+        return int(p["ticker"][1:])
 
     runner = OvernightRunner(_scan)
     now = datetime(2024, 1, 1, 9, 0)
     runner.run_ready(now)
-    assert order == [2]
+    assert order == ["T2"]
     gen = get_db()
     conn_db = next(gen)
     val = conn_db.execute(
@@ -166,7 +192,7 @@ def test_start_now(tmp_path, caplog):
 def test_silent_mode(tmp_path):
     app = _setup_app(tmp_path)
     client = TestClient(app)
-    res = client.post("/overnight/batches", json={"items": [{"num": 1}]})
+    res = client.post("/overnight/batches", json={"items": [{"ticker": "T1"}]})
     batch_id = res.json()["batch_id"]
     overlay: list[bool] = []
 
@@ -174,7 +200,7 @@ def test_silent_mode(tmp_path):
         overlay.append(not silent)
         return 123
 
-    _scan({"num": 0}, False)
+    _scan({"ticker": "T0"}, False)
     runner = OvernightRunner(_scan)
     runner.run_batch(batch_id)
     assert overlay == [True, False]
@@ -234,7 +260,7 @@ def test_csv_export(tmp_path):
     app = _setup_app(tmp_path)
     client = TestClient(app)
     res = client.post(
-        "/overnight/batches", json={"items": [{"pattern": "p1", "universe": "u1"}]}
+        "/overnight/batches", json={"items": [{"scan_type": "single", "ticker": "XYZ"}]}
     )
     batch_id = res.json()["batch_id"]
     runner = OvernightRunner(lambda p, s: 42)
@@ -245,21 +271,21 @@ def test_csv_export(tmp_path):
     ).fetchone()[0]
     conn.close()
     csv_text = client.get(f"/overnight/batches/{batch_id}/csv").text
-    assert f"1,p1,u1,{run_id}" in csv_text
+    assert f"1,single,XYZ,{run_id}" in csv_text
 
 
 def test_window_close_mid_item(tmp_path):
     app = _setup_app(tmp_path)
     client = TestClient(app)
     res = client.post(
-        "/overnight/batches", json={"items": [{"num": 1}, {"num": 2}]}
+        "/overnight/batches", json={"items": [{"ticker": "T1"}, {"ticker": "T2"}]}
     )
     batch_id = res.json()["batch_id"]
-    order: list[int] = []
+    order: list[str] = []
 
     def _scan(p: dict, s: bool) -> int:
-        order.append(p["num"])
-        return p["num"]
+        order.append(p["ticker"])
+        return int(p["ticker"][1:])
 
     runner = OvernightRunner(_scan)
 
@@ -269,16 +295,16 @@ def test_window_close_mid_item(tmp_path):
     runner._get_window = fake_window  # type: ignore
     runner.run_batch(batch_id)
     gen = get_db()
-    db = next(gen)
-    rows = db.execute(
+    conn_db = next(gen)
+    rows = conn_db.execute(
         "SELECT position, status FROM overnight_items WHERE batch_id=? ORDER BY position",
         (batch_id,),
     ).fetchall()
-    batch_status = db.execute(
+    batch_status = conn_db.execute(
         "SELECT status FROM overnight_batches WHERE id=?", (batch_id,)
     ).fetchone()[0]
     gen.close()
-    assert order == [1]
+    assert order == ["T1"]
     assert rows[0][1] == "complete" and rows[1][1] == "queued"
     assert batch_status == "paused"
 
@@ -286,13 +312,13 @@ def test_window_close_mid_item(tmp_path):
 def test_pause_resume_cancel(tmp_path):
     app = _setup_app(tmp_path)
     client = TestClient(app)
-    res = client.post("/overnight/batches", json={"items": [{"num": 1}]})
+    res = client.post("/overnight/batches", json={"items": [{"ticker": "T1"}]})
     batch_id = res.json()["batch_id"]
-    order: list[int] = []
+    order: list[str] = []
 
     def _scan(p: dict, s: bool) -> int:
-        order.append(p["num"])
-        return p["num"]
+        order.append(p["ticker"])
+        return int(p["ticker"][1:])
 
     runner = OvernightRunner(_scan)
     now = datetime(2024, 1, 1, 2, 0)
@@ -300,8 +326,8 @@ def test_pause_resume_cancel(tmp_path):
     assert runner.run_ready(now) is None
     client.post(f"/overnight/batches/{batch_id}/resume")
     runner.run_ready(now)
-    assert order == [1]
-    res = client.post("/overnight/batches", json={"items": [{"num": 2}]})
+    assert order == ["T1"]
+    res = client.post("/overnight/batches", json={"items": [{"ticker": "T2"}]})
     b2 = res.json()["batch_id"]
     client.post(f"/overnight/batches/{b2}/cancel")
     status = client.get(f"/overnight/batches/{b2}").json()["batch"]["status"]
@@ -311,7 +337,7 @@ def test_pause_resume_cancel(tmp_path):
 def test_restart_resume_interrupted(tmp_path):
     app = _setup_app(tmp_path)
     client = TestClient(app)
-    res = client.post("/overnight/batches", json={"items": [{"num": 1}, {"num": 2}]})
+    res = client.post("/overnight/batches", json={"items": [{"ticker": "T1"}, {"ticker": "T2"}]})
     batch_id = res.json()["batch_id"]
     conn = sqlite3.connect(db.DB_PATH)
     cur = conn.cursor()
@@ -329,11 +355,11 @@ def test_restart_resume_interrupted(tmp_path):
     )
     conn.commit()
     conn.close()
-    order: list[int] = []
+    order: list[str] = []
 
     def _scan(p: dict, s: bool) -> int:
-        order.append(p["num"])
-        return p["num"]
+        order.append(p["ticker"])
+        return int(p["ticker"][1:])
 
     runner = OvernightRunner(_scan)
     runner.run_ready(datetime(2024, 1, 1, 2, 0))
@@ -344,36 +370,39 @@ def test_restart_resume_interrupted(tmp_path):
         (batch_id,),
     ).fetchall()
     conn.close()
-    assert order == [2]
+    assert order == ["T2"]
     assert rows[0][1] == "failed"
     assert rows[1][1] == "complete"
 
 
-def test_cancel_marks_remaining(tmp_path):
+def test_cancel_marks_remaining(tmp_path, monkeypatch):
     app = _setup_app(tmp_path)
     client = TestClient(app)
     res = client.post(
-        "/overnight/batches", json={"items": [{"num": 1}, {"num": 2}]}
+        "/overnight/batches", json={"items": [{"ticker": "T1"}, {"ticker": "T2"}]}
     )
     batch_id = res.json()["batch_id"]
-    order: list[int] = []
+    order: list[str] = []
 
     def _scan(p: dict, s: bool) -> int:
-        order.append(p["num"])
-        if p["num"] == 1:
+        order.append(p["ticker"])
+        if p["ticker"] == "T1":
             client.post(f"/overnight/batches/{batch_id}/cancel")
-        return p["num"]
+        return int(p["ticker"][1:])
 
+    import services.overnight as ov_mod
+
+    monkeypatch.setattr(ov_mod, "in_window", lambda *a, **k: True)
     runner = OvernightRunner(_scan)
     runner.run_batch(batch_id)
     gen = get_db()
-    db = next(gen)
-    rows = db.execute(
+    conn_db = next(gen)
+    rows = conn_db.execute(
         "SELECT position, status FROM overnight_items WHERE batch_id=? ORDER BY position",
         (batch_id,),
     ).fetchall()
     gen.close()
-    assert order == [1]
+    assert order == ["T1"]
     assert [r[1] for r in rows] == ["complete", "canceled"]
 
 
@@ -388,7 +417,7 @@ def test_runner_state_endpoint(tmp_path):
 def test_restart_resume_completed_run(tmp_path):
     app = _setup_app(tmp_path)
     client = TestClient(app)
-    res = client.post("/overnight/batches", json={"items": [{"num": 1}, {"num": 2}]})
+    res = client.post("/overnight/batches", json={"items": [{"ticker": "T1"}, {"ticker": "T2"}]})
     batch_id = res.json()["batch_id"]
     conn = sqlite3.connect(db.DB_PATH)
     cur = conn.cursor()
@@ -409,11 +438,11 @@ def test_restart_resume_completed_run(tmp_path):
     )
     conn.commit()
     conn.close()
-    order: list[int] = []
+    order: list[str] = []
 
     def _scan(p: dict, s: bool) -> int:
-        order.append(p["num"])
-        return p["num"]
+        order.append(p["ticker"])
+        return int(p["ticker"][1:])
 
     runner = OvernightRunner(_scan)
     runner.run_ready(datetime(2024, 1, 1, 2, 0))
@@ -424,7 +453,7 @@ def test_restart_resume_completed_run(tmp_path):
         (batch_id,),
     ).fetchall()
     conn.close()
-    assert order == [2]
+    assert order == ["T2"]
     assert rows[0][1] == "complete"
     assert rows[1][1] == "complete"
 
@@ -432,7 +461,7 @@ def test_restart_resume_completed_run(tmp_path):
 def test_telemetry_fields(tmp_path, caplog):
     app = _setup_app(tmp_path)
     client = TestClient(app)
-    res = client.post("/overnight/batches", json={"items": [{"num": 1}]})
+    res = client.post("/overnight/batches", json={"items": [{"ticker": "T1"}]})
     batch_id = res.json()["batch_id"]
 
     def _scan(p: dict, s: bool) -> int:

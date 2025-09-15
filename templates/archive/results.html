@@ -1,0 +1,22 @@
+{% extends 'base.html' %}
+{% block title %}Pattern Finder — Results{% endblock %}
+{% block content %}
+  {% if settings_items %}
+  <div class="card" style="margin-bottom:1rem;">
+    <div class="card-body">
+      <strong>Settings</strong>
+      <div class="grid" style="margin-top:.5rem;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));font-size:.85rem;">
+        {% for key, val in settings_items %}
+        <div><span class="muted">{{ key }}</span><br>{{ val }}</div>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+  {% endif %}
+  {% if rule_summary %}
+  <div class="card" style="margin-bottom:1rem;">
+    <div class="card-body"><strong>Rules:</strong> {{ rule_summary }}</div>
+  </div>
+  {% endif %}
+  {% include 'results.html' %}
+{% endblock %}

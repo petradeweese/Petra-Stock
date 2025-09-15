@@ -210,9 +210,10 @@ async def archive_run(request: Request, db=Depends(get_db)):
 @router.get("/results/{run_id}", response_class=HTMLResponse)
 def results_from_archive(request: Request, run_id: int, db=Depends(get_db)):
     db.execute("SELECT * FROM runs WHERE id=?", (run_id,))
-    run = db.fetchone()
-    if not run:
+    run_row = db.fetchone()
+    if not run_row:
         return HTMLResponse("Run not found", status_code=404)
+    run = row_to_dict(run_row, db)
 
     db.execute(
         """
@@ -232,7 +233,7 @@ def results_from_archive(request: Request, run_id: int, db=Depends(get_db)):
     rule_summary = ""
     ran_at = ""
     try:
-        params = json.loads(run["params_json"] or "{}")
+        params = json.loads(run.get("params_json") or "{}")
         rule_summary = _format_rule_summary(params)
         dt = datetime.fromisoformat(run["started_at"])
         if dt.tzinfo is None:
@@ -245,26 +246,23 @@ def results_from_archive(request: Request, run_id: int, db=Depends(get_db)):
 
     settings_items: List[Tuple[str, Any]] = []
     try:
-        settings = json.loads(run["settings_json"] or "{}")
+        settings = json.loads(run.get("settings_json") or "{}")
         for k, v in settings.items():
             settings_items.append((k.replace("_", " ").title(), v))
         settings_items.sort()
     except Exception:
         pass
 
-    return templates.TemplateResponse(
-        request,
-        "results_page.html",
-        {
-            "rows": rows,
-            "scan_type": run["scan_type"],
-            "universe_count": (
-                len((run["universe"] or "").split(",")) if run["universe"] else 0
-            ),
-            "run_id": run_id,
-            "active_tab": "archive",
-            "ran_at": ran_at,
-            "rule_summary": rule_summary,
-            "settings_items": settings_items,
-        },
-    )
+    ctx = {
+        "rows": rows,
+        "scan_type": run.get("scan_type"),
+        "universe_count": (
+            len((run.get("universe") or "").split(",")) if run.get("universe") else 0
+        ),
+        "run_id": run_id,
+        "active_tab": "archive",
+        "ran_at": ran_at,
+        "rule_summary": rule_summary,
+        "settings_items": settings_items,
+    }
+    return templates.TemplateResponse(request, "archive/results.html", ctx)

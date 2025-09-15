@@ -9,10 +9,7 @@
   <button id="save-prefs">Save Window</button>
 </div>
 <div class="queue-builder">
-  <table id="queue-table">
-    <thead><tr><th>#</th><th>Pattern</th><th>Universe</th><th>Settings</th><th></th></tr></thead>
-    <tbody id="queue-body"></tbody>
-  </table>
+  <div id="queue"></div>
   <button id="add-item">Add scanner</button>
   <button id="save-batch">Save Batch</button>
   <button id="start-now">Start Now</button>
@@ -20,6 +17,15 @@
 </div>
 <hr/>
 <div id="batches"></div>
+<template id="row-template">
+  <div class="ov-row">
+    <span class="pos"></span>
+    <form class="scan-form">
+      {% include '_scanner_form.html' %}
+    </form>
+    <button class="rm">🗑</button>
+  </div>
+</template>
 {% endblock %}
 {% block extra_body %}
 <script src="/static/js/overnight.js"></script>
