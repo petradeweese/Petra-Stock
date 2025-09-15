@@ -120,6 +120,7 @@ SCHEMA = [
         roi_snapshot REAL,
         hit_pct_snapshot REAL,
         dd_pct_snapshot REAL,
+        support_snapshot INTEGER,
         rule_snapshot TEXT,
         settings_json_snapshot TEXT,
         snapshot_at TEXT,

@@ -1,8 +1,9 @@
 (function(){
-  const tbody = document.getElementById('queue-body');
+  const queue = document.getElementById('queue');
   const addBtn = document.getElementById('add-item');
   const saveBtn = document.getElementById('save-batch');
   const startBtn = document.getElementById('start-now');
+  const tmpl = document.getElementById('row-template');
   const batchesDiv = document.getElementById('batches');
   const winStart = document.getElementById('win-start');
   const winEnd = document.getElementById('win-end');
@@ -11,55 +12,36 @@
   let windowNotice = '';
 
   function renumber(){
-    [...tbody.children].forEach((tr, idx) => {
-      const cell = tr.querySelector('td.pos');
+    [...queue.children].forEach((row, idx)=>{
+      const cell = row.querySelector('.pos');
       if(cell) cell.textContent = idx + 1;
     });
   }
 
-  function addRow(item={}){
-    const tr = document.createElement('tr');
-    tr.draggable = true;
-    tr.innerHTML = `<td class="pos"></td>
-      <td><input value="${item.pattern||''}"></td>
-      <td><input value="${item.universe||''}"></td>
-      <td><input value='${item.settings?JSON.stringify(item.settings):''}'></td>
-      <td><button class="rm">🗑</button></td>`;
-    tbody.appendChild(tr);
+  function addRow(values={}){
+    const node = tmpl.content.firstElementChild.cloneNode(true);
+    const form = node.querySelector('form');
+    Object.entries(values).forEach(([k,v])=>{
+      const el = form.elements[k];
+      if(el) el.value = v;
+    });
+    const emailDiv = form.querySelector('select[name="email_checkbox"]')?.closest('div');
+    if(emailDiv) emailDiv.style.display = 'none';
+    node.querySelector('.rm').addEventListener('click', ()=>{ node.remove(); renumber(); });
+    queue.appendChild(node);
     renumber();
   }
 
   addBtn?.addEventListener('click', ()=>addRow());
 
-  tbody.addEventListener('click', e=>{
-    if(e.target.classList.contains('rm')){
-      e.target.closest('tr').remove();
-      renumber();
-    }
-  });
-
-  let dragEl=null;
-  tbody.addEventListener('dragstart', e=>{dragEl=e.target;});
-  tbody.addEventListener('dragover', e=>{e.preventDefault();});
-  tbody.addEventListener('drop', e=>{
-    e.preventDefault();
-    const target = e.target.closest('tr');
-    if(dragEl && target && dragEl!==target){
-      tbody.insertBefore(dragEl, target.nextSibling);
-      renumber();
-    }
-  });
-
   saveBtn?.addEventListener('click', async ()=>{
-    const items=[...tbody.children].map(tr=>{
-      const tds=tr.children;
-      return {
-        pattern: tds[1].firstChild.value,
-        universe: tds[2].firstChild.value,
-        settings: JSON.parse(tds[3].firstChild.value || '{}')
-      };
+    const items = [...queue.querySelectorAll('form')].map(f=>{
+      const fd = new FormData(f);
+      return Object.fromEntries(fd.entries());
     });
-    await fetch('/overnight/batches',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({items})});
+    await fetch('/overnight/batches', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({items})});
+    queue.innerHTML='';
+    renumber();
     loadBatches();
   });
 
@@ -72,7 +54,7 @@
   batchesDiv.addEventListener('click', async e=>{
     const div = e.target.closest('.batch');
     if(!div) return;
-    const id=div.dataset.id;
+    const id = div.dataset.id;
     if(e.target.classList.contains('start')){
       const running = batchesDiv.querySelector('.batch.running');
       if(running && running!==div){
@@ -120,7 +102,7 @@
   }
 
   savePrefs?.addEventListener('click', async ()=>{
-    await fetch('/overnight/prefs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({window_start:winStart.value, window_end:winEnd.value})});
+    await fetch('/overnight/prefs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({window_start: winStart.value, window_end: winEnd.value})});
     const pref = await fetch('/overnight/prefs').then(r=>r.json());
     windowNotice = `${pref.window_start}-${pref.window_end}`;
     updateWinInfo(pref);

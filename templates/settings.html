@@ -34,13 +34,49 @@
         </div>
       </div>
 
-      <div class="actions">
-        <button type="submit">Save</button>
-        <p class="note">
-          Current boundary: <strong>{{ st['last_boundary'] or '—' }}</strong> &nbsp;•&nbsp;
-          Last run at: <strong>{{ st['last_run_at'] or '—' }}</strong>
-        </p>
-      </div>
+  <div class="actions">
+    <button type="submit">Save</button>
+    <p class="note">
+      Current boundary: <strong>{{ st['last_boundary'] or '—' }}</strong> &nbsp;•&nbsp;
+      Last run at: <strong>{{ st['last_run_at'] or '—' }}</strong>
+    </p>
+  </div>
     </form>
   </div>
+  <div class="card" style="margin-top:1rem;">
+    <div class="card-body">
+      <strong>Favorites Alerts</strong>
+      <div class="grid" style="margin-top:.5rem;">
+        <div>
+          <label>Symbol</label>
+          <input id="fav-test-symbol" value="AAPL" />
+        </div>
+        <div>
+          <label>Channel</label>
+          <select id="fav-test-channel">
+            <option value="mms">MMS</option>
+            <option value="email">Email</option>
+          </select>
+        </div>
+        <div>
+          <label>Compact</label>
+          <select id="fav-test-compact">
+            <option value="0">Verbose</option>
+            <option value="1">Compact</option>
+          </select>
+        </div>
+      </div>
+      <button id="fav-test-send" class="btn" style="margin-top:.5rem;">Send Test Alert</button>
+    </div>
+  </div>
+{% endblock %}
+{% block extra_body %}
+<script>
+  document.getElementById('fav-test-send')?.addEventListener('click', async ()=>{
+    const symbol = document.getElementById('fav-test-symbol').value || 'AAPL';
+    const channel = document.getElementById('fav-test-channel').value || 'mms';
+    const compact = document.getElementById('fav-test-compact').value === '1';
+    await fetch('/favorites/test_alert',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({symbol,channel,compact})});
+  });
+</script>
 {% endblock %}

@@ -35,6 +35,8 @@ from indices import SP100, TOP150, TOP250
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 from scanner import compute_scan_for_ticker
 from services import executor, favorites_alerts, price_store
+from services.scanner_params import coerce_scan_params
+from services.telemetry import log as log_telemetry
 from services.market_data import (
     expected_bar_count,
     fetch_prices,
@@ -198,6 +200,7 @@ def _ensure_task_columns(conn: sqlite3.Connection) -> None:
 
 def _get_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
     _execute_write(conn, _TASK_TABLE_SQL)
     conn.commit()
     try:
@@ -988,6 +991,24 @@ def forward_page(request: Request, db=Depends(get_db)):
                    ORDER BY ft.id DESC"""
         )
         tests = [row_to_dict(r, db) for r in db.fetchall()]
+        if not tests:
+            tests = [
+                {
+                    "ft_id": None,
+                    "fav_id": f["id"],
+                    "ticker": f["ticker"],
+                    "direction": f["direction"],
+                    "interval": f["interval"],
+                    "roi_forward": None,
+                    "option_roi_proxy": None,
+                    "hit_forward": None,
+                    "dd_forward": None,
+                    "status": "queued",
+                    "created_at": None,
+                    "rule": f.get("rule"),
+                }
+                for f in favs
+            ]
         ctx = {"tests": tests, "active_tab": "forward"}
     except Exception:
         logger.exception("Failed to load forward page")
@@ -997,6 +1018,13 @@ def forward_page(request: Request, db=Depends(get_db)):
             "error": "Unable to load forward tests",
         }
     return templates.TemplateResponse(request, "forward.html", ctx)
+
+
+@router.get("/api/forward/favorites")
+def api_forward_favorites(db=Depends(get_db)):
+    db.execute("SELECT * FROM favorites ORDER BY id DESC")
+    favs = [row_to_dict(r, db) for r in db.fetchall()]
+    return {"favorites": favs}
 
 
 @router.post("/favorites/delete/{fav_id}")
@@ -1031,6 +1059,7 @@ async def favorites_add(request: Request, db=Depends(get_db)):
     roi = payload.get("roi_snapshot")
     hit = payload.get("hit_pct_snapshot")
     dd = payload.get("dd_pct_snapshot")
+    support = payload.get("support_snapshot")
     rule_snap = payload.get("rule_snapshot") or rule
     settings = payload.get("settings_json_snapshot")
     try:
@@ -1045,20 +1074,40 @@ async def favorites_add(request: Request, db=Depends(get_db)):
             {"ok": False, "error": "missing ticker or rule"}, status_code=400
         )
 
+    lookback = None
+    min_support = None
     if isinstance(settings, dict):
+        lookback = settings.get("lookback_years")
+        min_support = settings.get("min_support")
         settings = json.dumps(settings)
+    else:
+        try:
+            sdict = json.loads(settings or "{}")
+            lookback = sdict.get("lookback_years")
+            min_support = sdict.get("min_support")
+        except Exception:
+            pass
+    try:
+        support = int(support)
+    except (TypeError, ValueError):
+        support = None
+
     db.execute(
         """INSERT INTO favorites(
                 ticker, direction, interval, rule, ref_avg_dd,
+                lookback_years, min_support, support_snapshot,
                 roi_snapshot, hit_pct_snapshot, dd_pct_snapshot,
                 rule_snapshot, settings_json_snapshot, snapshot_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             t,
             direction,
             interval,
             rule,
             ref_dd,
+            lookback,
+            min_support,
+            support,
             roi,
             hit,
             dd,
@@ -1073,17 +1122,32 @@ async def favorites_add(request: Request, db=Depends(get_db)):
 
 @router.post("/favorites/test_alert")
 def favorites_test_alert(payload: dict = Body(...)):
-    ticker = (payload.get("ticker") or "").upper()
-    direction = (payload.get("direction") or "UP").upper()
-    ok = favorites_alerts.enrich_and_send_test(ticker, direction)
-    resp = {
-        "status": "sent" if ok else "fallback_sent",
-        "ticker": ticker,
-        "direction": direction,
+    symbol = (payload.get("symbol") or payload.get("ticker") or "AAPL").upper()
+    channel = (payload.get("channel") or "mms").lower()
+    compact = bool(payload.get("compact"))
+    result = favorites_alerts.enrich_and_send_test(
+        symbol, "UP", channel=channel, compact=compact
+    )
+    if isinstance(result, tuple):
+        ok, body = result
+    else:
+        ok, body = bool(result), ""
+    log_telemetry(
+        {
+            "type": "favorites_test_alert",
+            "symbol": symbol,
+            "channel": channel,
+            "compact": compact,
+            "ok": ok,
+        }
+    )
+    return {
+        "ok": ok,
+        "symbol": symbol,
+        "channel": channel,
+        "compact": compact,
+        "body": body,
     }
-    if not ok:
-        resp["note"] = "data unavailable"
-    return resp
 
 
 @router.get("/settings", response_class=HTMLResponse)
@@ -1152,7 +1216,7 @@ def settings_save(
 @router.post("/scanner/run")
 async def scanner_run(request: Request):
     form = await request.form()
-    params = _coerce_scan_params(form)
+    params = coerce_scan_params(form)
 
     scan_type = params.get("scan_type", "scan150")
     single_ticker = (form.get("ticker") or "").strip().upper()
@@ -1340,40 +1404,3 @@ def scanner_parity(request: Request):
     )
 
 
-def _coerce_scan_params(form: dict) -> dict:
-    """Coerce scanner form fields into typed params (no silent hard-coding)."""
-
-    def F(k, cast=float, default=None):
-        v = form.get(k, None)
-        if v in (None, ""):
-            return default
-        try:
-            return cast(v)
-        except Exception:
-            return default
-
-    return {
-        "scan_type": (form.get("scan_type") or "scan150"),
-        "ticker": (form.get("ticker") or "").strip().upper(),
-        "interval": (form.get("interval") or "15m").strip(),
-        "direction": (form.get("direction") or "BOTH").strip().upper(),
-        "target_pct": F("target_pct", float, 1.0),
-        "stop_pct": F("stop_pct", float, 0.5),
-        "window_value": F("window_value", float, 4.0),
-        "window_unit": (form.get("window_unit") or "Hours").strip(),
-        "lookback_years": F("lookback_years", float, 2.0),
-        "max_tt_bars": F("max_tt_bars", int, 12),
-        "min_support": F("min_support", int, 20),
-        "delta_assumed": F("delta_assumed", float, 0.40),
-        "theta_per_day_pct": F("theta_per_day_pct", float, 0.20),
-        "atrz_gate": F("atrz_gate", float, 0.10),
-        "slope_gate_pct": F("slope_gate_pct", float, 0.02),
-        "use_regime": F("use_regime", int, 0),
-        "regime_trend_only": F("regime_trend_only", int, 0),
-        "vix_z_max": F("vix_z_max", float, 3.0),
-        "slippage_bps": F("slippage_bps", float, 7.0),
-        "vega_scale": F("vega_scale", float, 0.03),
-        "scan_min_hit": F("scan_min_hit", float, 50.0),
-        "scan_max_dd": F("scan_max_dd", float, 50.0),
-        "email_checkbox": (form.get("email_checkbox") or ""),
-    }

@@ -292,6 +292,30 @@ def enrich_and_send(hit: FavoriteHitStub, is_test: bool = False) -> bool:  # pra
         return False
 
 
-def enrich_and_send_test(ticker: str, direction: str) -> bool:
+def enrich_and_send_test(
+    ticker: str, direction: str, channel: str = "mms", compact: bool = False
+) -> tuple[bool, str]:
     fake_hit = FavoriteHitStub(ticker=ticker, direction=direction, pattern="Manual Test")
-    return enrich_and_send(fake_hit, is_test=True)
+    contract = options_provider.OptionContract(
+        occ="TEST",
+        side="call" if direction.upper() == "UP" else "put",
+        strike=0.0,
+        expiry=datetime.utcnow().date(),
+        bid=0.0,
+        ask=0.0,
+        mid=0.0,
+        last=0.0,
+        open_interest=0,
+        volume=0,
+        delta=0.0,
+        gamma=0.0,
+        theta=0.0,
+        vega=0.0,
+        spread_pct=0.0,
+        dte=0,
+        iv_rank=0.0,
+    )
+    checks = [Check("Delta", "Δ", 0.0, True)]
+    profile = {"compact_mms": compact, "include_symbols_in_alerts": True}
+    body = format_mms(fake_hit, contract, checks, profile)
+    return True, body
