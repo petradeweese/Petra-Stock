@@ -25,7 +25,9 @@ class Settings:
     scan_http_timeout: float = float(os.getenv("SCAN_HTTP_TIMEOUT", "10"))
     scan_status_poll_ms: int = int(os.getenv("SCAN_STATUS_POLL_MS", "2000"))
     scan_progress_flush_items: int = int(os.getenv("SCAN_PROGRESS_FLUSH_ITEMS", "10"))
-    scan_progress_flush_ms: int = int(os.getenv("SCAN_PROGRESS_FLUSH_MS", "500"))
+    scan_status_flush_ms: int = int(os.getenv("SCAN_STATUS_FLUSH_MS", "500"))
+    scan_fetch_concurrency: int = int(os.getenv("SCAN_FETCH_CONCURRENCY", "8"))
+    scan_coverage_batch_size: int = int(os.getenv("SCAN_COVERAGE_BATCH_SIZE", "200"))
 
 
 settings = Settings()

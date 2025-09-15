@@ -6,8 +6,12 @@ def test_perform_scan_progress_every(monkeypatch):
 
     # stub compute_scan_for_ticker
     monkeypatch.setattr(routes, "compute_scan_for_ticker", lambda t, p: {"ticker": t})
-    # no-op preload
-    monkeypatch.setattr(routes, "preload_prices", lambda t, i, l: None)
+    monkeypatch.setattr(
+        routes.price_store,
+        "bulk_coverage",
+        lambda symbols, interval, s, e: {sym: (s, e, 10**6) for sym in symbols},
+    )
+    monkeypatch.setattr(routes.price_store, "covers", lambda a, b, c, d: True)
 
     class ImmediateExecutor:
         def submit(self, fn, *args, **kwargs):

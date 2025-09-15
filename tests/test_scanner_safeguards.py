@@ -1,9 +1,12 @@
 import asyncio
 import datetime as dt
 import sqlite3
+import time
 
 import pandas as pd
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 import db
 import routes
@@ -147,3 +150,90 @@ def test_scan_parity(tmp_path, monkeypatch):
     after2 = sqlite3.connect(db_path).execute("SELECT COUNT(*) FROM bars").fetchone()[0]
     assert before == after1 == after2
     assert d1["AAPL"].index.equals(d2["AAPL"].index)
+
+
+def test_scan_no_gap_no_bar_writes(tmp_path, monkeypatch):
+    db_path = tmp_path / "bars.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE bars (
+            symbol TEXT,
+            interval TEXT,
+            ts TEXT,
+            open REAL,
+            high REAL,
+            low REAL,
+            close REAL,
+            volume INTEGER,
+            PRIMARY KEY(symbol, interval, ts)
+        )
+        """
+    )
+    start = dt.datetime(2024, 1, 1, 14, 30, tzinfo=dt.timezone.utc)
+    for i in range(2):
+        ts = (start + dt.timedelta(minutes=15 * i)).isoformat()
+        conn.execute(
+            "INSERT INTO bars VALUES(?,?,?,?,?,?,?,?)",
+            ("AAA", "15m", ts, 1, 1, 1, 1, 1),
+        )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(db, "DB_PATH", str(db_path))
+    monkeypatch.setattr(routes, "DB_PATH", str(db_path))
+    monkeypatch.setattr(price_store, "bulk_coverage", lambda syms, i, s, e, conn=None: {sym: (s, e, 2) for sym in syms})
+    monkeypatch.setattr(price_store, "covers", lambda a, b, c, d: True)
+    monkeypatch.setattr(market_data, "expected_bar_count", lambda s, e, i: 2)
+    monkeypatch.setattr(routes, "window_from_lookback", lambda lb: (start, start + dt.timedelta(minutes=30)))
+    monkeypatch.setattr(routes, "compute_scan_for_ticker", lambda t, p: {"ticker": t})
+
+    before = sqlite3.connect(db_path).execute("SELECT COUNT(*) FROM bars").fetchone()[0]
+    routes._perform_scan(["AAA"], {"interval": "15m", "lookback_years": 1.0}, "")
+    after = sqlite3.connect(db_path).execute("SELECT COUNT(*) FROM bars").fetchone()[0]
+    assert before == after
+
+
+def test_scanner_status_after_client_drop(monkeypatch):
+    monkeypatch.setattr(routes, "SP100", ["AAA"])
+
+    def fake_perform_scan(tickers, params, sort_key, progress_cb=None):
+        time.sleep(0.05)
+        return [{"ticker": tickers[0]}], 0, {"symbols_no_gap": 1, "symbols_gap": 0}
+
+    monkeypatch.setattr(routes, "_perform_scan", fake_perform_scan)
+
+    app = FastAPI()
+    app.include_router(routes.router)
+    client = TestClient(app)
+
+    res = client.post("/scanner/run", data={"scan_type": "sp100"})
+    task_id = res.json()["task_id"]
+    time.sleep(0.1)
+    data = client.get(f"/scanner/status/{task_id}").json()
+    assert data["state"] == "succeeded"
+
+
+def test_scanner_idempotent(monkeypatch):
+    tickers = ["AAA"]
+    state = {"first": True}
+
+    def fake_bulk(symbols, interval, s, e, conn=None):
+        if state.pop("first", False):
+            return {sym: (None, None, 0) for sym in symbols}
+        return {sym: (s, e, 10**6) for sym in symbols}
+
+    fetch_calls: list[str] = []
+
+    def fake_fetch(symbols, interval, lookback):
+        fetch_calls.append(symbols[0])
+
+    monkeypatch.setattr(price_store, "bulk_coverage", fake_bulk)
+    monkeypatch.setattr(price_store, "covers", lambda a, b, c, d: True)
+    monkeypatch.setattr(routes, "fetch_prices", fake_fetch)
+    monkeypatch.setattr(routes, "compute_scan_for_ticker", lambda t, p: {"ticker": t})
+
+    params = {"interval": "15m", "lookback_years": 1.0}
+    routes._perform_scan(tickers, params, "")
+    routes._perform_scan(tickers, params, "")
+    assert fetch_calls == ["AAA"]
