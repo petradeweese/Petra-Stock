@@ -18,7 +18,7 @@ from uuid import uuid4
 
 import certifi
 import pandas as pd
-from fastapi import APIRouter, Depends, Form, Request, Response
+from fastapi import APIRouter, Body, Depends, Form, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
@@ -34,7 +34,7 @@ from db import (
 from indices import SP100, TOP150, TOP250
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 from scanner import compute_scan_for_ticker
-from services import price_store, executor
+from services import price_store, executor, favorites_alerts
 from services.market_data import (
     expected_bar_count,
     fetch_prices,
@@ -1044,6 +1044,17 @@ async def favorites_add(request: Request, db=Depends(get_db)):
     )
     db.connection.commit()
     return {"ok": True}
+
+
+@router.post("/favorites/test_alert")
+def favorites_test_alert(payload: dict = Body(...)):
+    ticker = (payload.get("ticker") or "").upper()
+    direction = (payload.get("direction") or "UP").upper()
+    ok = favorites_alerts.enrich_and_send_test(ticker, direction)
+    resp = {"status": "sent" if ok else "fallback_sent", "ticker": ticker, "direction": direction}
+    if not ok:
+        resp["note"] = "data unavailable"
+    return resp
 
 
 @router.get("/settings", response_class=HTMLResponse)

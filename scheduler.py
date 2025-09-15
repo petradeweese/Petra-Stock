@@ -15,6 +15,7 @@ from routes import _update_forward_tests  # type: ignore
 from scanner import preload_prices  # type: ignore
 from services.polygon_client import fetch_polygon_prices_async
 from services.price_store import covers, get_coverage, missing_ranges, upsert_bars
+from services import favorites_alerts
 from utils import clamp_market_closed
 
 logger = logging.getLogger(__name__)
@@ -219,6 +220,23 @@ async def favorites_loop(
                                     and row.get("avg_roi_pct", 0) > 0
                                 ):
                                     hits.append(row)
+                                    try:
+                                        favorites_alerts.enrich_and_send(
+                                            favorites_alerts.FavoriteHitStub(
+                                                ticker=row.get("ticker", ticker),
+                                                direction=row.get("direction", "UP"),
+                                                pattern=row.get("rule", ""),
+                                                target_pct=row.get("target_pct", 0.0),
+                                                stop_pct=row.get("stop_pct", 0.0),
+                                                hit_pct=row.get("hit_pct", 0.0),
+                                                avg_roi_pct=row.get("avg_roi_pct", 0.0),
+                                                avg_dd_pct=row.get("avg_dd_pct", 0.0),
+                                            )
+                                        )
+                                    except Exception:
+                                        logger.exception(
+                                            "favorites alert failed ticker=%s", ticker
+                                        )
                             except KeyError as e:
                                 logger.warning(
                                     "favorite scan missing data ticker=%s date=%s",
@@ -236,7 +254,6 @@ async def favorites_loop(
                                     e,
                                     _tb.format_exc(),
                                 )
-                        # TODO: email YES hits in a readable format
                         # TODO: archive favorites 15m scan results only if there are YES hits
                         set_last_run(boundary.isoformat(), db)
         except Exception as e:
