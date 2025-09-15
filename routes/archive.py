@@ -82,7 +82,7 @@ def archive_page(request: Request, db=Depends(get_db)):
         except Exception:
             r["started_display"] = r["started_at"]
     return templates.TemplateResponse(
-        "archive.html", {"request": request, "runs": runs, "active_tab": "archive"}
+        request, "archive.html", {"runs": runs, "active_tab": "archive"}
     )
 
 
@@ -253,9 +253,9 @@ def results_from_archive(request: Request, run_id: int, db=Depends(get_db)):
         pass
 
     return templates.TemplateResponse(
+        request,
         "results_page.html",
         {
-            "request": request,
             "rows": rows,
             "scan_type": run["scan_type"],
             "universe_count": (

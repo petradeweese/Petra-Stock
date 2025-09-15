@@ -1,15 +1,15 @@
 import logging
+import os
 import sys
 from pathlib import Path
 
+os.environ["SCAN_EXECUTOR_MODE"] = "thread"
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 import routes
 
 
 def test_scanner_run_parallel_handles_errors(monkeypatch, caplog):
-    monkeypatch.setenv("SCAN_WORKERS", "2")
-
     tickers = ["AAA", "BAD", "CCC"]
 
     def fake_scan(ticker, params):

@@ -9,7 +9,7 @@ import sqlite3
 import ssl
 import statistics
 import time
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from concurrent.futures import as_completed
 from datetime import datetime, timedelta
 from email.message import EmailMessage
 from threading import Thread
@@ -34,7 +34,7 @@ from db import (
 from indices import SP100, TOP150, TOP250
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 from scanner import compute_scan_for_ticker
-from services import price_store
+from services import price_store, executor
 from services.market_data import (
     expected_bar_count,
     fetch_prices,
@@ -49,6 +49,7 @@ from .archive import router as archive_router
 router = APIRouter()
 templates = Jinja2Templates(directory="templates")
 logger = logging.getLogger(__name__)
+SCAN_BATCH_WRITES = os.getenv("SCAN_BATCH_WRITES", "1") not in {"0", "false", "no"}
 
 
 def _get_next_earnings(ticker: str):  # pragma: no cover - external service
@@ -150,9 +151,6 @@ if settings.metrics_enabled:
         return metrics()
 
 
-_scan_executor: Optional[Union[ThreadPoolExecutor, ProcessPoolExecutor]] = None
-
-
 _TASK_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS scan_tasks (
     id TEXT PRIMARY KEY,
@@ -181,13 +179,13 @@ def _ensure_task_columns(conn: sqlite3.Connection) -> None:
     cols = {r[1] for r in cur.fetchall()}
     altered = False
     if "started_at" not in cols:
-        conn.execute("ALTER TABLE scan_tasks ADD COLUMN started_at TEXT")
+        _execute_write(conn, "ALTER TABLE scan_tasks ADD COLUMN started_at TEXT")
         altered = True
     if "updated_at" not in cols:
-        conn.execute("ALTER TABLE scan_tasks ADD COLUMN updated_at TEXT")
+        _execute_write(conn, "ALTER TABLE scan_tasks ADD COLUMN updated_at TEXT")
         altered = True
     if altered:
-        conn.execute(
+        _execute_write(
             "UPDATE scan_tasks SET started_at=COALESCE(started_at, CURRENT_TIMESTAMP), "
             "updated_at=COALESCE(updated_at, started_at)"
         )
@@ -196,7 +194,7 @@ def _ensure_task_columns(conn: sqlite3.Connection) -> None:
 
 def _get_conn() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    conn.execute(_TASK_TABLE_SQL)
+    _execute_write(conn, _TASK_TABLE_SQL)
     conn.commit()
     try:
         _ensure_task_columns(conn)
@@ -210,12 +208,18 @@ _TASK_MEM: dict[str, dict[str, Any]] = {}
 _TASK_WRITE_TS: dict[str, float] = {}
 
 
+def _execute_write(conn: sqlite3.Connection, sql: str, params: tuple[Any, ...] = ()):
+    assert "bars" not in sql.lower(), "writes to bars table are not allowed"
+    return conn.execute(sql, params)
+
+
 def _task_create(task_id: str, total: int) -> None:
     _task_gc()
     conn = _get_conn()
     try:
         now_iso = now_et().isoformat()
-        conn.execute(
+        _execute_write(
+            conn,
             (
                 "INSERT INTO scan_tasks (id, total, done, percent, state, started_at, updated_at) "
                 "VALUES (?, ?, 0, 0.0, 'queued', ?, ?)"
@@ -252,7 +256,7 @@ def _task_update_db(task_id: str, fields: dict[str, Any]) -> None:
             else:
                 vals.append(v)
         vals.append(task_id)
-        conn.execute(f"UPDATE scan_tasks SET {', '.join(cols)} WHERE id=?", vals)
+        _execute_write(conn, f"UPDATE scan_tasks SET {', '.join(cols)} WHERE id=?", tuple(vals))
         conn.commit()
     finally:
         conn.close()
@@ -320,7 +324,7 @@ def _task_get(task_id: str) -> Optional[Dict[str, Any]]:
 def _task_delete(task_id: str) -> None:
     conn = _get_conn()
     try:
-        conn.execute("DELETE FROM scan_tasks WHERE id=?", (task_id,))
+        _execute_write(conn, "DELETE FROM scan_tasks WHERE id=?", (task_id,))
         conn.commit()
     finally:
         conn.close()
@@ -332,7 +336,7 @@ def _task_gc(ttl_hours: int = 48) -> None:
     cutoff = (now_et() - timedelta(hours=ttl_hours)).isoformat()
     conn = _get_conn()
     try:
-        conn.execute("DELETE FROM scan_tasks WHERE started_at < ?", (cutoff,))
+        _execute_write(conn, "DELETE FROM scan_tasks WHERE started_at < ?", (cutoff,))
         conn.commit()
     finally:
         conn.close()
@@ -352,48 +356,6 @@ def _task_flush_all() -> None:
 
 
 atexit.register(_task_flush_all)
-
-
-def _shutdown_executor() -> None:
-    global _scan_executor
-    if _scan_executor:
-        _scan_executor.shutdown()
-        _scan_executor = None
-
-
-def _get_scan_executor() -> Union[ThreadPoolExecutor, ProcessPoolExecutor]:
-    """Return a global executor reused across requests.
-
-    The scanner is CPU intensive, so by default we use a small
-    ``ProcessPoolExecutor`` to take advantage of multiple cores.  If the scan
-    function can't be pickled (e.g. during tests when monkeypatching with a
-    local function), we automatically fall back to a thread pool so the call
-    still succeeds.
-    """
-
-    global _scan_executor
-    if _scan_executor is None:
-        # Allow environment override while defaulting to a higher level of
-        # parallelism so large scans complete quickly without changing logic.
-        # The default of 16 workers mirrors common 16-core servers but can be
-        # tuned via the SCAN_WORKERS env var.  We cap at 32 to avoid runaway
-        # process counts on very large machines.
-        default_workers = 16
-        max_workers = int(os.getenv("SCAN_WORKERS", str(default_workers)))
-        max_workers = max(1, min(32, max_workers))
-        exec_type = os.getenv("SCAN_EXECUTOR", "process").lower()
-        Executor = ProcessPoolExecutor if exec_type == "process" else ThreadPoolExecutor
-        if Executor is ProcessPoolExecutor:
-            import pickle
-
-            try:  # pragma: no cover - only fails in tests
-                pickle.dumps(compute_scan_for_ticker)
-            except Exception:
-                Executor = ThreadPoolExecutor
-        logger.info("scan executor=%s workers=%d", Executor.__name__, max_workers)
-        _scan_executor = Executor(max_workers=max_workers)
-        atexit.register(_shutdown_executor)
-    return _scan_executor
 
 
 def _scan_single(t: str, params: dict) -> tuple[dict | None, float]:
@@ -464,26 +426,49 @@ def _perform_scan(
 
     rows: list[dict] = []
     skipped_missing_data = 0
-    ex = _get_scan_executor()
+    ex = executor.EXECUTOR
 
     future_to_ticker = {ex.submit(_scan_single, t, params): t for t in tickers}
     step = max(1, int(progress_every))
-    done = 0
     times: list[float] = []
-    for fut in as_completed(future_to_ticker):
+    buffer: list[dict] = []
+    seen: set[str] = set()
+    for i, fut in enumerate(as_completed(future_to_ticker), 1):
         ticker = future_to_ticker[fut]
         try:
             r, elapsed = fut.result()
             times.append(elapsed)
             if r is None:
                 skipped_missing_data += 1
-            elif r:
-                rows.append(r)
+            elif r and ticker not in seen:
+                seen.add(ticker)
+                if SCAN_BATCH_WRITES:
+                    buffer.append(r)
+                    if len(buffer) >= 50:
+                        rows.extend(buffer)
+                        buffer.clear()
+                else:
+                    rows.append(r)
         except Exception as e:
             logger.error("scan failed for %s: %s", ticker, e)
-        done += 1
-        if progress_cb and (done % step == 0 or done == total):
-            progress_cb(done, total, f"Scanning {done}/{total}")
+        if progress_cb and (i % step == 0 or i == total):
+            progress_cb(i, total, f"Scanning {i}/{total}")
+        if i % 10 == 0:
+            el = time.perf_counter() - start
+            logger.info(
+                "scan progress %d/%d elapsed=%.1fs avg_per_task=%.2fs",
+                i,
+                total,
+                el,
+                el / i,
+            )
+    if buffer:
+        rows.extend(buffer)
+    logger.info(
+        "scan complete %d symbols in %.1fs",
+        len(future_to_ticker),
+        time.perf_counter() - start,
+    )
 
     try:
         scan_min_hit = float(params.get("scan_min_hit", 0.0))
@@ -695,14 +680,14 @@ def send_weekly_digest(db: sqlite3.Cursor) -> None:
 @router.get("/", response_class=HTMLResponse)
 def home(request: Request):
     return templates.TemplateResponse(
-        "index.html", {"request": request, "active_tab": "scanner"}
+        request, "index.html", {"active_tab": "scanner"}
     )
 
 
 @router.get("/scanner", response_class=HTMLResponse)
 def scanner_page(request: Request):
     return templates.TemplateResponse(
-        "index.html", {"request": request, "active_tab": "scanner"}
+        request, "index.html", {"active_tab": "scanner"}
     )
 
 
@@ -717,8 +702,9 @@ def favorites_page(request: Request, db=Depends(get_db)):
         if f.get("rule_snapshot"):
             f["rule"] = f.get("rule_snapshot")
     return templates.TemplateResponse(
+        request,
         "favorites.html",
-        {"request": request, "favorites": favs, "active_tab": "favorites"},
+        {"favorites": favs, "active_tab": "favorites"},
     )
 
 
@@ -977,16 +963,15 @@ def forward_page(request: Request, db=Depends(get_db)):
                    ORDER BY ft.id DESC"""
         )
         tests = [row_to_dict(r, db) for r in db.fetchall()]
-        ctx = {"request": request, "tests": tests, "active_tab": "forward"}
+        ctx = {"tests": tests, "active_tab": "forward"}
     except Exception:
         logger.exception("Failed to load forward page")
         ctx = {
-            "request": request,
             "tests": [],
             "active_tab": "forward",
             "error": "Unable to load forward tests",
         }
-    return templates.TemplateResponse("forward.html", ctx)
+    return templates.TemplateResponse(request, "forward.html", ctx)
 
 
 @router.post("/favorites/delete/{fav_id}")
@@ -1065,14 +1050,14 @@ async def favorites_add(request: Request, db=Depends(get_db)):
 def settings_page(request: Request, db=Depends(get_db)):
     st = get_settings(db)
     return templates.TemplateResponse(
-        "settings.html", {"request": request, "st": st, "active_tab": "settings"}
+        request, "settings.html", {"st": st, "active_tab": "settings"}
     )
 
 
 @router.get("/info", response_class=HTMLResponse)
 def info_page(request: Request):
     return templates.TemplateResponse(
-        "info.html", {"request": request, "active_tab": "info"}
+        request, "info.html", {"active_tab": "info"}
     )
 
 
@@ -1257,10 +1242,9 @@ async def scanner_results(request: Request, task_id: str):
     if not task or task.get("state") != "succeeded":
         return HTMLResponse("Not ready", status_code=404)
     ctx = (task.get("ctx") or {}).copy()
-    ctx["request"] = request
     logger.info("task %s rendered", task_id)
     response = templates.TemplateResponse(
-        "results.html", ctx, headers={"Cache-Control": "no-store"}
+        request, "results.html", ctx, headers={"Cache-Control": "no-store"}
     )
     _task_delete(task_id)
     return response
@@ -1308,9 +1292,9 @@ def scanner_parity(request: Request):
     )
 
     return templates.TemplateResponse(
+        request,
         "results.html",
         {
-            "request": request,
             "rows": _sort_rows(rows, sort_key),
             "ran_at": now_et().strftime("%Y-%m-%d %H:%M"),
             "note": f"TOP150 parity run • kept {len(rows)}",

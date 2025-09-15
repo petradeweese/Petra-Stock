@@ -1,3 +1,4 @@
+import os
 import sqlite3
 import sys
 from pathlib import Path
@@ -6,6 +7,7 @@ import pandas as pd
 from starlette.requests import Request
 from pytest import approx
 
+os.environ["SCAN_EXECUTOR_MODE"] = "thread"
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 import db
@@ -60,7 +62,7 @@ def test_forward_tracking_only_future_bars(tmp_path, monkeypatch):
             self.template = type("T", (), {"name": name})
             self.context = context
 
-    def dummy_template_response(name, context):
+    def dummy_template_response(request, name, context):
         return DummyResponse(name, context)
 
     monkeypatch.setattr(routes.templates, "TemplateResponse", dummy_template_response)

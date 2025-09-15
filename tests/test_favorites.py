@@ -1,3 +1,4 @@
+import os
 import sqlite3
 import sys
 from pathlib import Path
@@ -5,6 +6,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+os.environ["SCAN_EXECUTOR_MODE"] = "thread"
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 import db
@@ -84,7 +86,11 @@ def test_favorites_snapshot_values(tmp_path, monkeypatch):
             self.template = type("T", (), {"name": name})
             self.context = context
 
-    monkeypatch.setattr(routes.templates, "TemplateResponse", lambda name, ctx: DummyResponse(name, ctx))
+    monkeypatch.setattr(
+        routes.templates,
+        "TemplateResponse",
+        lambda request, name, ctx: DummyResponse(name, ctx),
+    )
     request = Request({"type": "http"})
     resp = routes.favorites_page(request, db=cur)
     fav = resp.context["favorites"][0]

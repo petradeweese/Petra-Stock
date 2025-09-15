@@ -1,3 +1,5 @@
+import os
+os.environ["SCAN_EXECUTOR_MODE"] = "thread"
 import routes
 from concurrent.futures import Future
 
@@ -21,7 +23,7 @@ def test_perform_scan_progress_every(monkeypatch):
             except Exception as e:
                 fut.set_exception(e)
             return fut
-    monkeypatch.setattr(routes, "_get_scan_executor", lambda: ImmediateExecutor())
+    monkeypatch.setattr(routes.executor, "EXECUTOR", ImmediateExecutor())
 
     updates = []
 
