@@ -26,7 +26,15 @@ def test_favorites_test_alert_mms(tmp_path, monkeypatch):
 
     def fake_enrich(symbol, direction, channel="mms", compact=False):
         called.update({"symbol": symbol, "channel": channel, "compact": compact})
-        return True, {"subject": "Test Subject", "body": f"{symbol} {direction}\nWhy this contract: Δ 0.00"}
+        return True, {
+            "subject": "Test Subject",
+            "body": (
+                f"{symbol} {direction} | Picked: TEST\n\n"
+                "Greeks & IV:\n"
+                "• Delta (0.50) ❌ — too high; demo\n"
+                "\nTargets: 185 | Stop: 194 | Hit% 70 | ROI 12 | DD 8"
+            ),
+        }
 
     monkeypatch.setattr(routes.favorites_alerts, "enrich_and_send_test", fake_enrich)
     client, events = setup_app(tmp_path, monkeypatch)
@@ -36,7 +44,7 @@ def test_favorites_test_alert_mms(tmp_path, monkeypatch):
     )
     assert res.status_code == 200
     data = res.json()
-    assert "Why this contract" in data["body"]
+    assert "Greeks & IV" in data["body"]
     assert data["subject"] == "Test Subject"
     assert called["channel"] == "mms"
     assert events[-1] == {
@@ -205,3 +213,50 @@ def test_preview_returns_body_subject(tmp_path, monkeypatch):
         "body": "Example body",
     }
     assert events == []
+
+
+def test_favorites_test_alert_mms_real_layout(tmp_path, monkeypatch):
+    client, events = setup_app(tmp_path, monkeypatch)
+    res = client.post(
+        "/favorites/test_alert",
+        json={"symbol": "AAPL", "channel": "mms", "compact": False},
+    )
+    assert res.status_code == 200
+    data = res.json()
+    body = data["body"]
+    assert "AAPL UP | Picked:" in body
+    assert "Greeks & IV:" in body
+    assert "• Theta" in body
+    assert "✅" in body
+    assert "Feedback:" in body
+    assert "Delta too high →" in body
+    assert "Targets: 185" in body
+    assert events[-1] == {
+        "type": "favorites_test_alert",
+        "symbol": "AAPL",
+        "channel": "mms",
+        "compact": False,
+        "ok": True,
+    }
+
+
+def test_favorites_test_alert_mms_compact_only_failures(tmp_path, monkeypatch):
+    client, events = setup_app(tmp_path, monkeypatch)
+    res = client.post(
+        "/favorites/test_alert",
+        json={"symbol": "AAPL", "channel": "mms", "compact": True},
+    )
+    assert res.status_code == 200
+    body = res.json()["body"]
+    assert "• Theta" not in body
+    assert "• Vega" not in body
+    assert "• Delta" in body
+    assert "All checks passing" not in body
+    assert "Delta too high" in body
+    assert events[-1] == {
+        "type": "favorites_test_alert",
+        "symbol": "AAPL",
+        "channel": "mms",
+        "compact": True,
+        "ok": True,
+    }

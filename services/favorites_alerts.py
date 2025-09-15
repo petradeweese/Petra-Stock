@@ -8,6 +8,7 @@ logic described in the specification.
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, List, Optional
@@ -57,6 +58,14 @@ _FAIL_EXPLANATIONS = {
     "oi_low": "Open interest too low — Not enough contracts exist, liquidity is weak.",
     "volume_low": "Volume too low — Too few trades today, fills may be hard.",
     "dte_out": "DTE outside range — Expiration is not in your configured time window.",
+}
+
+_PASS_SUMMARIES = {
+    "Delta": "in preferred range.",
+    "Gamma": "responsive delta change.",
+    "Theta": "daily time decay.",
+    "Vega": "sensitivity to volatility shifts.",
+    "IV Rank": "within comfort zone.",
 }
 
 
@@ -226,20 +235,101 @@ def evaluate_contract(contract: options_provider.OptionContract, profile: Dict) 
     return checks
 
 
-def format_mms(
-    hit: FavoriteHitStub,
-    selection: options_provider.OptionContract,
-    checks: List[Check],
-    profile: Dict,
-    settings: Dict | None = None,
-) -> str:
-    """Return a formatted MMS body."""
+def _format_number(value) -> str:
+    if value is None:
+        return "—"
+    if isinstance(value, (int, float)):
+        if isinstance(value, float):
+            if not math.isfinite(value):
+                return str(value)
+            if abs(value) >= 100 or math.isclose(value, round(value)):
+                return f"{value:.0f}"
+            return f"{value:.2f}".rstrip("0").rstrip(".")
+        return str(value)
+    return str(value)
 
-    lines = [f"{hit.ticker} {hit.direction} {hit.pattern}"]
-    if selection:
-        lines.append(f"Contract {selection.occ}")
-    compact = bool(profile.get("compact_mms"))
-    include_symbols = bool(profile.get("include_symbols_in_alerts", True))
+
+def _split_explanation(text: str) -> tuple[str, str]:
+    if "—" in text:
+        head, tail = text.split("—", 1)
+        return head.strip(), tail.strip()
+    return text.strip(), ""
+
+
+def _format_feedback_reason(chk: Check) -> str:
+    explanation = chk.explanation or f"{chk.name} needs review"
+    reason, detail = _split_explanation(explanation)
+    if detail:
+        return f"{reason} → {detail}"
+    return reason
+
+
+def _format_greek_line(chk: Check, *, compact: bool) -> str | None:
+    if compact and chk.passed:
+        return None
+    value = _format_number(chk.value)
+    status = "✅" if chk.passed else "❌"
+    explanation = chk.explanation or ""
+    if chk.passed:
+        explanation = chk.explanation or _PASS_SUMMARIES.get(
+            chk.name, "within preferred range."
+        )
+    else:
+        if explanation:
+            reason, detail = _split_explanation(explanation)
+            short_reason = reason
+            if chk.name.lower() in reason.lower():
+                short_reason = reason[len(chk.name) :].strip()
+            short_reason = short_reason.lstrip("-—:").strip()
+            if detail:
+                if short_reason:
+                    explanation = f"{short_reason}; {detail}"
+                else:
+                    explanation = detail
+        if not explanation:
+            explanation = f"{chk.name} outside preferred range."
+    line = f"• {chk.name} ({value}) {status}"
+    if explanation:
+        line += f" — {explanation}"
+    return line
+
+
+def _format_targets_line(targets: Dict | None) -> str:
+    targets = targets or {}
+    target = _format_number(targets.get("target"))
+    stop = _format_number(targets.get("stop"))
+    hit = _format_number(targets.get("hit"))
+    roi = _format_number(targets.get("roi"))
+    dd = _format_number(targets.get("dd"))
+    return f"Targets: {target} | Stop: {stop} | Hit% {hit} | ROI {roi} | DD {dd}"
+
+
+def _format_picked(contract: options_provider.OptionContract | None) -> str:
+    if not contract:
+        return "No contract selected"
+    side = contract.side.title() if contract.side else "Contract"
+    expiry = contract.expiry.isoformat() if hasattr(contract.expiry, "isoformat") else str(contract.expiry)
+    price = contract.mid or contract.last or contract.bid or contract.ask or 0.0
+    price_str = _format_number(price)
+    return f"{contract.occ} {side}, Exp {expiry} @ ${price_str}"
+
+
+def _format_email_alert(
+    symbol: str,
+    direction: str,
+    contract: options_provider.OptionContract | None,
+    checks: List[Check],
+    *,
+    compact: bool,
+    include_symbols: bool,
+    pattern: str | None,
+) -> str:
+    header_parts = [symbol.upper(), direction.upper()]
+    if pattern:
+        header_parts.append(pattern)
+    lines = [" ".join(part for part in header_parts if part)]
+    if contract:
+        lines.append(f"Contract {contract.occ}")
     for chk in checks:
         if compact and chk.passed:
             continue
@@ -247,16 +337,94 @@ def format_mms(
         if include_symbols and chk.symbol:
             name = f"{name} ({chk.symbol})"
         status = "✅" if chk.passed else "❌"
-        line = f"{name}: {chk.value} {status}"
+        value = _format_number(chk.value)
+        line = f"{name}: {value} {status}"
         if chk.explanation and not chk.passed:
             line += f" — {chk.explanation}"
         lines.append(line)
-    if selection:
+    if contract:
+        spread = f"{contract.spread_pct:.1f}%" if contract.spread_pct is not None else "—"
         lines.append(
             "Why this contract: "
-            f"Δ {selection.delta:.2f} | DTE {selection.dte} | spread {selection.spread_pct:.1f}% | IVR {selection.iv_rank}"
+            f"Δ {contract.delta:.2f} | DTE {contract.dte} | spread {spread} | IVR {contract.iv_rank}"
         )
-    return "\n".join(lines)
+    return "\n".join(line for line in lines if line).strip()
+
+
+def _format_mms_alert(
+    symbol: str,
+    direction: str,
+    contract: options_provider.OptionContract | None,
+    checks: List[Check],
+    targets: Dict | None,
+    *,
+    compact: bool,
+    pattern: str | None,
+) -> str:
+    header = f"{symbol.upper()} {direction.upper()}"
+    picked = _format_picked(contract)
+    header_line = f"{header} | Picked: {picked}"
+    sections: List[List[str]] = [[header_line]]
+    if pattern:
+        sections[0].append(f"Setup: {pattern}")
+
+    greeks_lines = ["Greeks & IV:"]
+    for chk in checks:
+        line = _format_greek_line(chk, compact=compact)
+        if line:
+            greeks_lines.append(line)
+    if len(greeks_lines) == 1:
+        greeks_lines.append("• No checks evaluated")
+    sections.append(greeks_lines)
+
+    failing = [chk for chk in checks if not chk.passed]
+    feedback_lines: List[str] = []
+    if failing:
+        feedback_lines.append("Feedback:")
+        for chk in failing:
+            feedback_lines.append(f"• {_format_feedback_reason(chk)}")
+    elif not compact:
+        feedback_lines.append("Feedback:")
+        feedback_lines.append("• All checks passing ✅")
+    if feedback_lines:
+        sections.append(feedback_lines)
+
+    sections.append([_format_targets_line(targets)])
+    return "\n\n".join("\n".join(block) for block in sections if block)
+
+
+def format_favorites_alert(
+    symbol: str,
+    direction: str,
+    picked_contract: options_provider.OptionContract | None,
+    checks: List[Check],
+    targets: Dict | None,
+    *,
+    compact: bool,
+    channel: str,
+    pattern: str | None = None,
+    include_symbols: bool = True,
+) -> str:
+    channel = (channel or "mms").lower()
+    if channel == "email":
+        return _format_email_alert(
+            symbol,
+            direction,
+            picked_contract,
+            checks,
+            compact=compact,
+            include_symbols=include_symbols,
+            pattern=pattern,
+        )
+    return _format_mms_alert(
+        symbol,
+        direction,
+        picked_contract,
+        checks,
+        targets,
+        compact=compact,
+        pattern=pattern,
+    )
 
 
 def enrich_and_send(hit: FavoriteHitStub, is_test: bool = False) -> bool:  # pragma: no cover - orchestrator
@@ -278,7 +446,26 @@ def enrich_and_send(hit: FavoriteHitStub, is_test: bool = False) -> bool:  # pra
         if not sel.contract:
             return False
         checks = evaluate_contract(sel.contract, profile)
-        format_mms(hit, sel.contract, checks, profile)
+        targets = {
+            "target": hit.target_pct,
+            "stop": hit.stop_pct,
+            "hit": hit.hit_pct,
+            "roi": hit.avg_roi_pct,
+            "dd": hit.avg_dd_pct,
+        }
+        compact_pref = bool(profile.get("compact_mms"))
+        include_symbols = bool(profile.get("include_symbols_in_alerts", True))
+        _ = format_favorites_alert(
+            hit.ticker,
+            hit.direction,
+            sel.contract,
+            checks,
+            targets,
+            compact=compact_pref,
+            channel="mms",
+            pattern=hit.pattern,
+            include_symbols=include_symbols,
+        )
         log_telemetry(
             {
                 "type": "favorites_alert_test" if is_test else "favorites_alert",
@@ -295,28 +482,65 @@ def enrich_and_send(hit: FavoriteHitStub, is_test: bool = False) -> bool:  # pra
 def enrich_and_send_test(
     ticker: str, direction: str, channel: str = "mms", compact: bool = False
 ) -> tuple[bool, dict[str, str]]:
-    fake_hit = FavoriteHitStub(ticker=ticker, direction=direction, pattern="Manual Test")
+    symbol = (ticker or "AAPL").upper()
+    direction_norm = (direction or "UP").upper()
+    side = "call" if direction_norm == "UP" else "put"
+    today = datetime.utcnow().date()
     contract = options_provider.OptionContract(
-        occ="TEST",
-        side="call" if direction.upper() == "UP" else "put",
-        strike=0.0,
-        expiry=datetime.utcnow().date(),
-        bid=0.0,
-        ask=0.0,
-        mid=0.0,
-        last=0.0,
-        open_interest=0,
-        volume=0,
-        delta=0.0,
-        gamma=0.0,
-        theta=0.0,
-        vega=0.0,
-        spread_pct=0.0,
-        dte=0,
-        iv_rank=0.0,
+        occ=f"{symbol}TEST",
+        side=side,
+        strike=190.0,
+        expiry=today,
+        bid=3.9,
+        ask=4.5,
+        mid=4.2,
+        last=4.2,
+        open_interest=1250,
+        volume=480,
+        delta=0.78,
+        gamma=0.05,
+        theta=-0.18,
+        vega=0.28,
+        spread_pct=8.5,
+        dte=30,
+        iv_rank=88.0,
     )
-    checks = [Check("Delta", "Δ", 0.0, True)]
-    profile = {"compact_mms": compact, "include_symbols_in_alerts": True}
-    body = format_mms(fake_hit, contract, checks, profile)
-    subject = f"Favorites Alert Test: {ticker.upper()} {direction.upper()}"
+    checks = [
+        Check(
+            "Delta",
+            "Δ",
+            0.78,
+            False,
+            "Delta too high — moves almost 1:1 with stock; limited leverage.",
+        ),
+        Check(
+            "Gamma",
+            "Γ",
+            0.05,
+            False,
+            "Gamma too low — option won’t pick up delta fast enough.",
+        ),
+        Check("Theta", "Θ", -0.18, True, "daily time decay."),
+        Check("Vega", "ν", 0.28, True, "sensitivity to volatility changes."),
+        Check(
+            "IV Rank",
+            "IVR",
+            88.0,
+            False,
+            "IV Rank high — premiums rich vs. history; consider spreads.",
+        ),
+    ]
+    targets = {"target": 185.0, "stop": 194.0, "hit": 76, "roi": 19, "dd": 12}
+    body = format_favorites_alert(
+        symbol,
+        direction_norm,
+        contract,
+        checks,
+        targets,
+        compact=compact,
+        channel=channel,
+        pattern="Manual Test",
+        include_symbols=True,
+    )
+    subject = f"Favorites Alert Test: {symbol} {direction_norm}"
     return True, {"subject": subject, "body": body}
