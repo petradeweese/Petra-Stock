@@ -1,5 +1,6 @@
 import asyncio
 import datetime as dt
+import os
 import sqlite3
 import time
 
@@ -8,6 +9,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+os.environ["SCAN_EXECUTOR_MODE"] = "thread"
 import db
 import routes
 import scheduler

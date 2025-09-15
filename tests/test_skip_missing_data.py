@@ -1,9 +1,11 @@
 import logging
+import os
 import sys
 from pathlib import Path
 
 import pandas as pd
 
+os.environ["SCAN_EXECUTOR_MODE"] = "thread"
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 import routes

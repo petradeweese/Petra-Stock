@@ -1,7 +1,9 @@
+import os
 import sys
 from pathlib import Path
 from starlette.requests import Request
 
+os.environ["SCAN_EXECUTOR_MODE"] = "thread"
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from routes import info_page, templates
@@ -13,7 +15,7 @@ def test_info_page_uses_template(monkeypatch):
             self.template = type("T", (), {"name": name})
             self.context = context
 
-    def dummy_template_response(name, context):
+    def dummy_template_response(request, name, context):
         return DummyResponse(name, context)
 
     monkeypatch.setattr(templates, "TemplateResponse", dummy_template_response)
