@@ -7,12 +7,21 @@
     {% if note %}<span class="muted"> • {{ note }}</span>{% endif %}
     {% if skip_md %}<span class="muted"> • skipped {{ skip_md }} missing data</span>{% endif %}
     <span style="flex:1 1 auto"></span>
+    <button id="btn-remove-archived" class="btn" type="button" aria-pressed="false">Remove Archived</button>
     <button id="btn-archive" class="btn" title="Save this run and rows to Archive">💾 Save to Archive</button>
   </div>
 
   {% if safe_rows|length == 0 %}
-    <div class="card-body"><div class="muted">{% if skip_md > 0 %}All tickers were skipped due to missing data.{% else %}No results.{% endif %}</div></div>
+    <div class="card-body">
+      {% if error %}
+      <div class="error-banner">{{ error }}</div>
+      {% endif %}
+      <div class="muted">{% if skip_md > 0 %}All tickers were skipped due to missing data.{% else %}No results.{% endif %}</div>
+    </div>
   {% else %}
+  {% if error %}
+  <div class="card-body"><div class="error-banner">{{ error }}</div></div>
+  {% endif %}
   <div class="card-body" style="overflow:auto;">
     <table class="table" id="results-table">
       <thead>
@@ -38,7 +47,8 @@
             data-supp="{{ r.support }}"
             data-dd="{{ '%.6f'|format(r.avg_dd_pct) }}"
             data-stab="{{ '%.6f'|format(r.get('stability', 0)) }}"
-            data-rule="{{ r.rule|e }}">
+            data-rule="{{ r.rule|e }}"
+            data-archived="{{ 'true' if r.get('archived') else 'false' }}">
           <td>{{ r.ticker }}</td>
           <td>{{ r.direction }}</td>
           <td class="num roi {% if r.avg_roi_pct > 0 %}pos{% elif r.avg_roi_pct < 0 %}neg{% endif %}">{{ '{:.0f}'.format(r.avg_roi_pct * 100 if r.avg_roi_pct is not none and r.avg_roi_pct <= 1 else r.avg_roi_pct) }}</td>
@@ -64,8 +74,51 @@
   const addBtn = document.getElementById('ctx-add-fav');
   const toast = document.getElementById('toast');
   const archiveBtn = document.getElementById('btn-archive');
+  const removeArchivedBtn = document.getElementById('btn-remove-archived');
 
   let ctxPayload = null; // {ticker, direction, rule}
+
+  const HIDE_ARCHIVED_KEY = 'resultsHideArchived';
+
+  function shouldHideArchived(){
+    return localStorage.getItem(HIDE_ARCHIVED_KEY) === '1';
+  }
+
+  function setHideArchived(val){
+    localStorage.setItem(HIDE_ARCHIVED_KEY, val ? '1' : '0');
+  }
+
+  function updateArchivedButton(active){
+    if(!removeArchivedBtn) return;
+    removeArchivedBtn.textContent = active ? 'Show Archived' : 'Remove Archived';
+    removeArchivedBtn.classList.toggle('toggle-active', active);
+    removeArchivedBtn.setAttribute('aria-pressed', active ? 'true' : 'false');
+    removeArchivedBtn.title = active ? 'Show archived results' : 'Hide archived results';
+  }
+
+  function applyArchivedFilter(active){
+    if(!tbl) return;
+    tbl.querySelectorAll('tbody tr.row-hover').forEach(tr => {
+      const isArchived = (tr.dataset.archived || '').toLowerCase() === 'true';
+      if(active && isArchived){
+        tr.style.display = 'none';
+      }else{
+        tr.style.display = '';
+      }
+    });
+  }
+
+  if(removeArchivedBtn){
+    let hideArchived = shouldHideArchived();
+    updateArchivedButton(hideArchived);
+    applyArchivedFilter(hideArchived);
+    removeArchivedBtn.addEventListener('click', () => {
+      hideArchived = !shouldHideArchived();
+      setHideArchived(hideArchived);
+      updateArchivedButton(hideArchived);
+      applyArchivedFilter(hideArchived);
+    });
+  }
 
   function showMenu(x, y) {
     menu.style.left = x + 'px';

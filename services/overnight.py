@@ -1,13 +1,46 @@
 import json
 import logging
 import time
-from datetime import datetime, time as dt_time
+from datetime import datetime, time as dt_time, timedelta, timezone
 from threading import Thread
 from typing import Callable, Optional
 
 from db import get_db
+from utils import TZ, last_trading_close, market_is_open
 
 logger = logging.getLogger(__name__)
+
+
+PREMARKET_OPEN = dt_time(4, 0)
+
+
+class OvernightScanError(Exception):
+    """Raised when an overnight scan fails to complete."""
+
+    def __init__(self, message: str, *, meta: Optional[dict] = None) -> None:
+        super().__init__(message)
+        self.meta = meta or {}
+
+
+def resolve_overnight_window(now: datetime) -> tuple[datetime, datetime]:
+    """Return the previous close and pre-market open window in ET."""
+
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    now_et = now.astimezone(TZ)
+    last_close_utc = last_trading_close(now_et)
+    last_close_et = last_close_utc.astimezone(TZ)
+    next_day = last_close_et.date() + timedelta(days=1)
+    while True:
+        midday = datetime.combine(next_day, dt_time(12, 0), tzinfo=TZ)
+        if market_is_open(midday):
+            break
+        next_day += timedelta(days=1)
+    premarket_et = datetime.combine(next_day, PREMARKET_OPEN, tzinfo=TZ)
+    window_end = premarket_et
+    if now_et < last_close_et:
+        window_end = now_et
+    return last_close_et, window_end
 
 
 def _parse_hhmm(s: str) -> dt_time:
@@ -207,36 +240,138 @@ class OvernightRunner:
                 _RUNNER_STATE.update({"state": "running", "batch_id": batch_id, "position": db.execute("SELECT position FROM overnight_items WHERE id=?", (item_id,)).fetchone()[0]})
 
                 t0 = time.perf_counter()
-                run_id = self._scan_func(payload, True)
-                elapsed = int((time.perf_counter() - t0) * 1000)
+                scan_meta: dict = {}
+                try:
+                    result = self._scan_func(payload, True)
+                    elapsed = int((time.perf_counter() - t0) * 1000)
+                except OvernightScanError as exc:
+                    elapsed = int((time.perf_counter() - t0) * 1000)
+                    scan_meta = exc.meta or {}
+                    err_msg = str(exc)
+                    db.execute(
+                        """
+                        UPDATE overnight_items
+                        SET status='failed', finished_at=CURRENT_TIMESTAMP, error=?
+                        WHERE id=?
+                        """,
+                        (err_msg, item_id),
+                    )
+                    db.connection.commit()
+                    pos = db.execute(
+                        "SELECT position FROM overnight_items WHERE id=?",
+                        (item_id,),
+                    ).fetchone()[0]
+                    log_payload = {
+                        "type": "overnight_item",
+                        "batch_id": batch_id,
+                        "item_id": item_id,
+                        "position": pos,
+                        "status": "failed",
+                        "error": err_msg,
+                        "timings_ms": {"scan": elapsed, "queue_wait": queue_wait},
+                    }
+                    if scan_meta:
+                        meta_log = {k: v for k, v in scan_meta.items() if k != "run_id"}
+                        if meta_log:
+                            log_payload["meta"] = meta_log
+                    logger.error(json.dumps(log_payload))
+                    continue
+                except Exception as exc:
+                    elapsed = int((time.perf_counter() - t0) * 1000)
+                    err_msg = repr(exc)
+                    db.execute(
+                        """
+                        UPDATE overnight_items
+                        SET status='failed', finished_at=CURRENT_TIMESTAMP, error=?
+                        WHERE id=?
+                        """,
+                        (err_msg, item_id),
+                    )
+                    db.connection.commit()
+                    pos = db.execute(
+                        "SELECT position FROM overnight_items WHERE id=?",
+                        (item_id,),
+                    ).fetchone()[0]
+                    log_payload = {
+                        "type": "overnight_item",
+                        "batch_id": batch_id,
+                        "item_id": item_id,
+                        "position": pos,
+                        "status": "failed",
+                        "error": err_msg,
+                        "timings_ms": {"scan": elapsed, "queue_wait": queue_wait},
+                    }
+                    logger.exception("overnight scan unexpected error batch=%s item=%s", batch_id, item_id)
+                    logger.error(json.dumps(log_payload))
+                    continue
+
+                if isinstance(result, dict):
+                    run_id = result.get("run_id")
+                    scan_meta = result
+                else:
+                    run_id = result
+                    scan_meta = {"run_id": run_id}
+
+                if run_id is None:
+                    err_msg = "Scan returned no run_id"
+                    db.execute(
+                        """
+                        UPDATE overnight_items
+                        SET status='failed', finished_at=CURRENT_TIMESTAMP, error=?
+                        WHERE id=?
+                        """,
+                        (err_msg, item_id),
+                    )
+                    db.connection.commit()
+                    pos = db.execute(
+                        "SELECT position FROM overnight_items WHERE id=?",
+                        (item_id,),
+                    ).fetchone()[0]
+                    log_payload = {
+                        "type": "overnight_item",
+                        "batch_id": batch_id,
+                        "item_id": item_id,
+                        "position": pos,
+                        "status": "failed",
+                        "error": err_msg,
+                        "timings_ms": {"scan": elapsed, "queue_wait": queue_wait},
+                    }
+                    if scan_meta:
+                        meta_log = {k: v for k, v in scan_meta.items() if k != "run_id"}
+                        if meta_log:
+                            log_payload["meta"] = meta_log
+                    logger.error(json.dumps(log_payload))
+                    continue
 
                 db.execute(
                     """
                     UPDATE overnight_items
-                    SET status='complete', finished_at=CURRENT_TIMESTAMP, run_id=?
+                    SET status='complete', finished_at=CURRENT_TIMESTAMP, run_id=?, error=NULL
                     WHERE id=?
                     """,
                     (run_id, item_id),
                 )
                 db.connection.commit()
 
-                logger.info(
-                    json.dumps(
-                        {
-                            "type": "overnight_item",
-                            "batch_id": batch_id,
-                            "item_id": item_id,
-                            "position": db.execute(
-                                "SELECT position FROM overnight_items WHERE id=?",
-                                (item_id,),
-                            ).fetchone()[0],
-                            "status": "complete",
-                            "run_id": run_id,
-                            "silent": True,
-                            "timings_ms": {"scan": elapsed, "queue_wait": queue_wait},
-                        }
-                    )
-                )
+                pos = db.execute(
+                    "SELECT position FROM overnight_items WHERE id=?",
+                    (item_id,),
+                ).fetchone()[0]
+                log_payload = {
+                    "type": "overnight_item",
+                    "batch_id": batch_id,
+                    "item_id": item_id,
+                    "position": pos,
+                    "status": "complete",
+                    "run_id": run_id,
+                    "silent": True,
+                    "timings_ms": {"scan": elapsed, "queue_wait": queue_wait},
+                }
+                if scan_meta:
+                    meta_log = {k: v for k, v in scan_meta.items() if k != "run_id"}
+                    if meta_log:
+                        log_payload["meta"] = meta_log
+                logger.info(json.dumps(log_payload))
 
                 start, end = self._get_window(db)
                 if not in_window(datetime.utcnow(), start, end) and not batch_row[1]:

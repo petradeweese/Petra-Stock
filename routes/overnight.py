@@ -390,13 +390,28 @@ def cancel_batch(batch_id: str, db=Depends(get_db)):
 @router.get("/items/{item_id}/results")
 def item_results(item_id: str, db=Depends(get_db)):
     db.execute(
-        "SELECT run_id FROM overnight_items WHERE id=?",
+        "SELECT run_id, status, error FROM overnight_items WHERE id=?",
         (item_id,),
     )
     row = db.fetchone()
-    if not row or row["run_id"] is None:
-        return {"rows": []}
+    if not row:
+        return {"rows": [], "error": "not_found", "status": "missing"}
+    status = row["status"]
+    error_msg = row["error"]
     run_id = row["run_id"]
+    if status == "failed":
+        return {"rows": [], "status": status, "error": error_msg}
+    if run_id is None:
+        return {"rows": [], "status": status}
     db.execute("SELECT * FROM run_results WHERE run_id=?", (run_id,))
     rows = [row_to_dict(r, db) for r in db.fetchall()]
-    return {"run_id": run_id, "rows": rows}
+    meta = {}
+    db.execute("SELECT params_json FROM runs WHERE id=?", (run_id,))
+    run_meta = db.fetchone()
+    if run_meta:
+        try:
+            params = json.loads(run_meta["params_json"] or "{}")
+            meta = params.get("_meta", {}) or {}
+        except Exception:
+            meta = {}
+    return {"run_id": run_id, "rows": rows, "status": status, "meta": meta}

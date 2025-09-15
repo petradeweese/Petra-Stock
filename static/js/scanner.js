@@ -9,6 +9,7 @@
   let pollTimer = null;
   let stillTimer = null;
   let maxTimer = null; // legacy timeout (unused but kept for compatibility)
+  const HIDE_ARCHIVED_KEY = 'resultsHideArchived';
 
   function startProgress(){
     progressFill.style.width = '0%';
@@ -40,6 +41,48 @@
     toast.style.background  = ok ? '#0f3311' : '#2b0f0f';
     toast.hidden = false;
     setTimeout(()=>toast.hidden=true, 1800);
+  }
+
+  function shouldHideArchived(){
+    return localStorage.getItem(HIDE_ARCHIVED_KEY) === '1';
+  }
+
+  function setHideArchivedState(active){
+    localStorage.setItem(HIDE_ARCHIVED_KEY, active ? '1' : '0');
+  }
+
+  function updateArchivedToggle(btn, active){
+    if(!btn) return;
+    btn.textContent = active ? 'Show Archived' : 'Remove Archived';
+    btn.classList.toggle('toggle-active', active);
+    btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+    btn.title = active ? 'Show archived results' : 'Hide archived results';
+  }
+
+  function applyArchivedFilter(root, active){
+    const table = root?.querySelector('#results-table');
+    if(!table) return;
+    table.querySelectorAll('tbody tr.row-hover').forEach(tr => {
+      const isArchived = (tr.dataset.archived || '').toLowerCase() === 'true';
+      tr.style.display = active && isArchived ? 'none' : '';
+    });
+  }
+
+  function initArchivedToggle(root){
+    const btn = root?.querySelector('#btn-remove-archived') || document.getElementById('btn-remove-archived');
+    if(!btn) return;
+    updateArchivedToggle(btn, shouldHideArchived());
+    applyArchivedFilter(root || document, shouldHideArchived());
+    if(btn.dataset.removeArchivedBound === '1'){
+      return;
+    }
+    btn.addEventListener('click', () => {
+      const next = !shouldHideArchived();
+      setHideArchivedState(next);
+      updateArchivedToggle(btn, next);
+      applyArchivedFilter(root || document, next);
+    });
+    btn.dataset.removeArchivedBound = '1';
   }
 
   async function addFavoriteFromRow(tr){
@@ -84,6 +127,8 @@
   function bindResultsDelegates(){
     const root = document.getElementById('scan-results');
     if(!root) return;
+
+    initArchivedToggle(root);
 
     // Right-click on any results row
     root.addEventListener('contextmenu', function(e){

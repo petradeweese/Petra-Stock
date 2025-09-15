@@ -119,7 +119,24 @@ button:disabled { opacity:.5; cursor:default; box-shadow:none; }
   font-weight:400;
 }
 
+.btn.toggle-active {
+  background:#0f3311;
+  border-color:#1f6d3b;
+  color:#daf7e3;
+}
+
 .btn:hover { background:#1e1e1e; }
+
+.error-banner {
+  background:#2b0f0f;
+  border:1px solid #8b0000;
+  color:#ffd7d7;
+  padding:0.75rem 1rem;
+  border-radius:10px;
+  margin-bottom:0.75rem;
+  font-weight:600;
+  box-shadow:0 0 12px rgba(139,0,0,0.2);
+}
 
 .note, .muted { color:var(--muted); font-size:.95rem; }
 
