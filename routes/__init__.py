@@ -359,7 +359,14 @@ def _get_scan_executor() -> Union[ThreadPoolExecutor, ProcessPoolExecutor]:
 
     global _scan_executor
     if _scan_executor is None:
-        max_workers = max(1, int(os.getenv("SCAN_WORKERS", "3")))
+        # Allow environment override while defaulting to a higher level of
+        # parallelism so large scans complete quickly without changing logic.
+        # The default of 16 workers mirrors common 16-core servers but can be
+        # tuned via the SCAN_WORKERS env var.  We cap at 32 to avoid runaway
+        # process counts on very large machines.
+        default_workers = 16
+        max_workers = int(os.getenv("SCAN_WORKERS", str(default_workers)))
+        max_workers = max(1, min(32, max_workers))
         exec_type = os.getenv("SCAN_EXECUTOR", "process").lower()
         Executor = ProcessPoolExecutor if exec_type == "process" else ThreadPoolExecutor
         if Executor is ProcessPoolExecutor:
@@ -369,6 +376,7 @@ def _get_scan_executor() -> Union[ThreadPoolExecutor, ProcessPoolExecutor]:
                 pickle.dumps(compute_scan_for_ticker)
             except Exception:
                 Executor = ThreadPoolExecutor
+        logger.info("scan executor=%s workers=%d", Executor.__name__, max_workers)
         _scan_executor = Executor(max_workers=max_workers)
         atexit.register(_shutdown_executor)
     return _scan_executor
