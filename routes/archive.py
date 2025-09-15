@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 
-from db import get_db
+from db import get_db, row_to_dict
 from utils import TZ, now_et
 
 router = APIRouter()
@@ -48,9 +48,11 @@ def _format_rule_summary(params: Dict[str, Any]) -> str:
 @router.get("/archive", response_class=HTMLResponse)
 def archive_page(request: Request, db=Depends(get_db)):
     db.execute(
-        "SELECT id, started_at, scan_type, params_json, universe, finished_at, hit_count FROM runs ORDER BY id DESC LIMIT 200"
+        "SELECT id, started_at, scan_type, params_json, universe, "
+        "finished_at, hit_count FROM runs ORDER BY id DESC LIMIT 200"
     )
-    runs = [dict(r) for r in db.fetchall()]
+    cols = [c[0] for c in db.description]
+    runs = [row_to_dict(r, cols) for r in db.fetchall()]
     for r in runs:
         try:
             params = json.loads(r.get("params_json") or "{}")
@@ -80,7 +82,9 @@ def archive_page(request: Request, db=Depends(get_db)):
             r["started_display"] = f"{fmt}-{rule_summary}" if rule_summary else fmt
         except Exception:
             r["started_display"] = r["started_at"]
-    return templates.TemplateResponse("archive.html", {"request": request, "runs": runs, "active_tab": "archive"})
+    return templates.TemplateResponse(
+        "archive.html", {"request": request, "runs": runs, "active_tab": "archive"}
+    )
 
 
 @router.post("/archive/save")
@@ -101,18 +105,31 @@ async def archive_save(request: Request, db=Depends(get_db)):
 
         db.execute(
             """
-            INSERT INTO runs(started_at, scan_type, params_json, universe, finished_at, hit_count, settings_json)
+            INSERT INTO runs(
+                started_at, scan_type, params_json, universe, finished_at,
+                hit_count, settings_json
+            )
             VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (started, scan_type, settings_json, universe, finished, len(rows), settings_json),
+            (
+                started,
+                scan_type,
+                settings_json,
+                universe,
+                finished,
+                len(rows),
+                settings_json,
+            ),
         )
         run_id = db.lastrowid
 
         for r in rows:
             db.execute(
                 """
-                INSERT INTO run_results
-                  (run_id, ticker, direction, avg_roi_pct, hit_pct, support, avg_tt, avg_dd_pct, stability, rule)
+                INSERT INTO run_results(
+                    run_id, ticker, direction, avg_roi_pct, hit_pct, support,
+                    avg_tt, avg_dd_pct, stability, rule
+                )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
@@ -147,17 +164,33 @@ async def archive_run(request: Request, db=Depends(get_db)):
     settings_json = json.dumps(params)
     db.execute(
         """
-        INSERT INTO runs(started_at, scan_type, params_json, universe, finished_at, hit_count, settings_json)
+        INSERT INTO runs(
+            started_at, scan_type, params_json, universe, finished_at,
+            hit_count, settings_json
+        )
         VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
-        (started_at, scan_type, settings_json, ",".join(universe), now_et().isoformat(), len(rows), settings_json),
+        (
+            started_at,
+            scan_type,
+            settings_json,
+            ",".join(universe),
+            now_et().isoformat(),
+            len(rows),
+            settings_json,
+        ),
     )
     run_id = db.lastrowid
 
     for r in rows:
         db.execute(
-            """INSERT INTO run_results(run_id, ticker, direction, avg_roi_pct, hit_pct, support, avg_tt, avg_dd_pct, stability, rule)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            """
+            INSERT INTO run_results(
+                run_id, ticker, direction, avg_roi_pct, hit_pct, support,
+                avg_tt, avg_dd_pct, stability, rule
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
             (
                 run_id,
                 r.get("ticker"),
@@ -183,12 +216,20 @@ def results_from_archive(request: Request, run_id: int, db=Depends(get_db)):
         return HTMLResponse("Run not found", status_code=404)
 
     db.execute(
-        """SELECT ticker, direction, avg_roi_pct, hit_pct, support, avg_tt, avg_dd_pct, stability, rule
-           FROM run_results WHERE run_id=?""",
+        """
+        SELECT
+            ticker, direction, avg_roi_pct, hit_pct, support, avg_tt,
+            avg_dd_pct, stability, rule
+        FROM run_results WHERE run_id=?
+        """,
         (run_id,),
     )
-    rows = [dict(r) for r in db.fetchall()]
-    rows.sort(key=lambda r: (r["avg_roi_pct"], r["hit_pct"], r["support"], r["stability"]), reverse=True)
+    cols = [c[0] for c in db.description]
+    rows = [row_to_dict(r, cols) for r in db.fetchall()]
+    rows.sort(
+        key=lambda r: (r["avg_roi_pct"], r["hit_pct"], r["support"], r["stability"]),
+        reverse=True,
+    )
 
     rule_summary = ""
     ran_at = ""
@@ -219,7 +260,9 @@ def results_from_archive(request: Request, run_id: int, db=Depends(get_db)):
             "request": request,
             "rows": rows,
             "scan_type": run["scan_type"],
-            "universe_count": len((run["universe"] or "").split(",")) if run["universe"] else 0,
+            "universe_count": (
+                len((run["universe"] or "").split(",")) if run["universe"] else 0
+            ),
             "run_id": run_id,
             "active_tab": "archive",
             "ran_at": ran_at,
@@ -227,4 +270,3 @@ def results_from_archive(request: Request, run_id: int, db=Depends(get_db)):
             "settings_items": settings_items,
         },
     )
-

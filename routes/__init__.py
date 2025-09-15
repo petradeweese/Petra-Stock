@@ -23,7 +23,14 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from config import settings
-from db import DB_PATH, _ensure_scanner_column, get_db, get_schema_status, get_settings
+from db import (
+    DB_PATH,
+    _ensure_scanner_column,
+    get_db,
+    get_schema_status,
+    get_settings,
+    row_to_dict,
+)
 from indices import SP100, TOP150, TOP250
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 from scanner import compute_scan_for_ticker
@@ -96,6 +103,13 @@ def check_guardrails(
 
 
 router.include_router(archive_router)
+
+
+@router.get("/history")
+def history_redirect():
+    """Redirect legacy history link to archive."""
+    return RedirectResponse(url="/archive", status_code=308)
+
 
 scan_duration = Histogram("scan_duration_seconds", "Duration of /scanner/run requests")
 scan_tickers = Counter("scan_tickers_total", "Tickers processed by /scanner/run")
@@ -687,7 +701,8 @@ def scanner_page(request: Request):
 @router.get("/favorites", response_class=HTMLResponse)
 def favorites_page(request: Request, db=Depends(get_db)):
     db.execute("SELECT * FROM favorites ORDER BY id DESC")
-    favs = [dict(r) for r in db.fetchall()]
+    cols = [c[0] for c in db.description]
+    favs = [row_to_dict(r, cols) for r in db.fetchall()]
     for f in favs:
         f["avg_roi_pct"] = f.get("roi_snapshot")
         f["hit_pct"] = f.get("hit_pct_snapshot")
@@ -802,7 +817,8 @@ def _update_forward_tests(db: sqlite3.Cursor) -> None:
                FROM forward_tests
                WHERE status IN ('queued','running')"""
     )
-    rows = [dict(r) for r in db.fetchall()]
+    cols = [c[0] for c in db.description]
+    rows = [row_to_dict(r, cols) for r in db.fetchall()]
     for row in rows:
         now_iso = now_et().isoformat()
         try:
@@ -938,7 +954,8 @@ def _update_forward_tests(db: sqlite3.Cursor) -> None:
 def forward_page(request: Request, db=Depends(get_db)):
     try:
         db.execute("SELECT * FROM favorites ORDER BY id DESC")
-        favs = [dict(r) for r in db.fetchall()]
+        fav_cols = [c[0] for c in db.description]
+        favs = [row_to_dict(r, fav_cols) for r in db.fetchall()]
         for f in favs:
             db.execute(
                 "SELECT status FROM forward_tests WHERE fav_id=? ORDER BY id DESC LIMIT 1",
@@ -954,7 +971,8 @@ def forward_page(request: Request, db=Depends(get_db)):
                    FROM forward_tests ft
                    ORDER BY ft.id DESC"""
         )
-        tests = [dict(r) for r in db.fetchall()]
+        test_cols = [c[0] for c in db.description]
+        tests = [row_to_dict(r, test_cols) for r in db.fetchall()]
         ctx = {"request": request, "tests": tests, "active_tab": "forward"}
     except Exception:
         logger.exception("Failed to load forward page")

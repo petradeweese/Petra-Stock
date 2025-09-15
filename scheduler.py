@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 from typing import Any, Awaitable, Callable, Dict
 
 from config import settings
-from db import DB_PATH, get_settings, set_last_run
+from db import DB_PATH, get_settings, row_to_dict, set_last_run
 from prometheus_client import Counter  # type: ignore
 from routes import _update_forward_tests  # type: ignore
 from scanner import preload_prices  # type: ignore
@@ -190,7 +190,8 @@ async def favorites_loop(
                         db.execute(
                             "SELECT ticker, direction, interval, rule FROM favorites ORDER BY id DESC"
                         )
-                        favs = [dict(r) for r in db.fetchall()]
+                        cols = [c[0] for c in db.description]
+                        favs = [row_to_dict(r, cols) for r in db.fetchall()]
                         params: Dict[str, Any] = dict(
                             interval="15m",
                             direction="BOTH",

@@ -4,6 +4,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import pandas as pd
 
+from db import row_to_dict
 from services.market_data import (
     expected_bar_count,
     fetch_prices,
@@ -46,8 +47,8 @@ def _install_real_engine_adapter():
             _real_scan_single = None
             return
 
-        def _row_to_dict(row: dict, params: Dict[str, Any]) -> Dict[str, Any]:
-            out = dict(row)
+        def _row_to_dict(row: Any, params: Dict[str, Any]) -> Dict[str, Any]:
+            out = row_to_dict(row)
 
             def get(*keys, default=None):
                 for k in keys:

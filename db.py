@@ -2,7 +2,7 @@ import logging
 import os
 import sqlite3
 from pathlib import Path
-from typing import Optional
+from typing import Any, Mapping, Optional, Sequence, cast
 
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
@@ -281,11 +281,27 @@ def _ensure_scanner_column(db: sqlite3.Cursor) -> None:
         db.connection.commit()
 
 
+def row_to_dict(
+    row: Mapping[str, Any] | sqlite3.Row | Sequence[Any] | None,
+    keys: Sequence[str] | None = None,
+) -> dict[str, Any]:
+    """Convert a database row into a plain dict."""
+    if row is None:
+        return {}
+    if hasattr(row, "keys"):
+        mapping = cast(Mapping[str, Any], row)
+        return {k: mapping[k] for k in mapping.keys()}
+    if keys is not None:
+        return dict(zip(keys, row))
+    return dict(row)
+
+
 def get_settings(db: sqlite3.Cursor) -> dict:
     _ensure_scanner_column(db)
     db.execute("SELECT * FROM settings WHERE id=1")
     row = db.fetchone()
-    return dict(row) if row else {}
+    cols = [c[0] for c in db.description]
+    return row_to_dict(row, cols)
 
 
 def set_last_run(boundary_iso: str, db: sqlite3.Cursor):
