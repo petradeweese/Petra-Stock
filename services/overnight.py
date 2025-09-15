@@ -97,7 +97,7 @@ class OvernightRunner:
             row = db.execute(
                 """
                 SELECT id FROM overnight_batches
-                WHERE start_override=1 AND status IN ('queued','paused')
+                WHERE start_override=1 AND status IN ('queued','paused') AND deleted_at IS NULL
                 ORDER BY created_at
                 LIMIT 1
                 """,
@@ -107,7 +107,12 @@ class OvernightRunner:
                 if not in_window(now, start, end):
                     return None
                 row = db.execute(
-                    "SELECT id FROM overnight_batches WHERE status='queued' ORDER BY created_at LIMIT 1",
+                    """
+                    SELECT id FROM overnight_batches
+                    WHERE status='queued' AND deleted_at IS NULL
+                    ORDER BY created_at
+                    LIMIT 1
+                    """,
                 ).fetchone()
                 if not row:
                     return None
@@ -130,11 +135,14 @@ class OvernightRunner:
         try:
             while True:
                 batch_row = db.execute(
-                    "SELECT status, start_override FROM overnight_batches WHERE id=?",
+                    "SELECT status, start_override, deleted_at FROM overnight_batches WHERE id=?",
                     (batch_id,),
                 ).fetchone()
-                if not batch_row or batch_row[0] in ("canceled", "paused"):
-                    if batch_row and batch_row[0] == "canceled":
+                if not batch_row or batch_row[2]:
+                    _RUNNER_STATE.update({"state": "idle", "batch_id": None, "position": None})
+                    break
+                if batch_row[0] in ("canceled", "paused"):
+                    if batch_row[0] == "canceled":
                         db.execute(
                             "UPDATE overnight_batches SET start_override=0 WHERE id=?",
                             (batch_id,),

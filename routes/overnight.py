@@ -23,6 +23,10 @@ templates = Jinja2Templates(directory="templates")
 router = APIRouter(prefix="/overnight")
 
 
+ACTIVE_STATUSES: tuple[str, ...] = ("queued", "running", "paused")
+FINISHED_STATUSES: tuple[str, ...] = ("complete", "canceled", "failed")
+
+
 def _renumber(db, batch_id: str) -> None:
     rows = db.execute(
         "SELECT id FROM overnight_items WHERE batch_id=? ORDER BY position",
@@ -75,18 +79,46 @@ def overnight_page(request: Request):
 
 
 @router.get("/batches")
-def list_batches(db=Depends(get_db)):
-    db.execute(
-        """
-        SELECT b.*, 
+def list_batches(
+    include_finished: bool = False,
+    include_deleted: bool = False,
+    db=Depends(get_db),
+):
+    clauses: list[str] = []
+    params: list[object] = []
+    if not include_deleted:
+        clauses.append("b.deleted_at IS NULL")
+        statuses = ACTIVE_STATUSES + (FINISHED_STATUSES if include_finished else ())
+    else:
+        statuses = ()
+    if statuses:
+        placeholders = ",".join("?" for _ in statuses)
+        clauses.append(f"b.status IN ({placeholders})")
+        params.extend(statuses)
+    sql = """
+        SELECT b.*,
             (SELECT COUNT(*) FROM overnight_items i WHERE i.batch_id=b.id) AS items_total,
             (SELECT COUNT(*) FROM overnight_items i WHERE i.batch_id=b.id AND i.status='complete') AS items_done
         FROM overnight_batches b
-        ORDER BY created_at
-        """
-    )
+    """
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
+    sql += " ORDER BY created_at"
+    db.execute(sql, tuple(params))
     batches = [row_to_dict(r, db) for r in db.fetchall()]
-    return {"batches": batches, "runner": get_runner_state()}
+    db.execute(
+        """
+        SELECT COUNT(*) FROM overnight_batches
+        WHERE status IN (?,?,?) AND deleted_at IS NULL
+        """,
+        FINISHED_STATUSES,
+    )
+    finished_count = db.fetchone()[0]
+    return {
+        "batches": batches,
+        "runner": get_runner_state(),
+        "finished_count": finished_count,
+    }
 
 
 @router.get("/batches/{batch_id}")
@@ -99,6 +131,61 @@ def batch_detail(batch_id: str, db=Depends(get_db)):
     )
     items = [row_to_dict(r, db) for r in db.fetchall()]
     return {"batch": batch, "items": items}
+
+
+@router.delete("/batches/{batch_id}")
+def delete_batch(batch_id: str, db=Depends(get_db)):
+    row = db.execute(
+        "SELECT status, deleted_at FROM overnight_batches WHERE id=?",
+        (batch_id,),
+    ).fetchone()
+    if not row:
+        return JSONResponse({"error": "not_found"}, status_code=404)
+    status = row[0]
+    if row[1]:
+        return {"status": "already_deleted"}
+    if status not in FINISHED_STATUSES:
+        return JSONResponse({"error": "batch_active"}, status_code=409)
+    deleted_at = datetime.utcnow().isoformat()
+    db.execute(
+        "UPDATE overnight_batches SET deleted_at=? WHERE id=?",
+        (deleted_at, batch_id),
+    )
+    logger.info(
+        json.dumps(
+            {
+                "type": "overnight_delete_batch",
+                "batch_id": batch_id,
+                "status": status,
+                "deleted_at": deleted_at,
+            }
+        )
+    )
+    return {"status": "deleted"}
+
+
+@router.post("/batches/clear_finished")
+def clear_finished(db=Depends(get_db)):
+    deleted_at = datetime.utcnow().isoformat()
+    result = db.execute(
+        """
+        UPDATE overnight_batches
+        SET deleted_at=?
+        WHERE deleted_at IS NULL AND status IN (?,?,?)
+        """,
+        (deleted_at, *FINISHED_STATUSES),
+    )
+    cleared = result.rowcount or 0
+    logger.info(
+        json.dumps(
+            {
+                "type": "overnight_clear_finished",
+                "count": cleared,
+                "deleted_at": deleted_at,
+            }
+        )
+    )
+    return {"cleared": cleared}
 
 
 @router.get("/batches/{batch_id}/csv", response_class=PlainTextResponse)
@@ -147,6 +234,12 @@ def update_prefs(payload: dict = Body(...), db=Depends(get_db)):
 
 @router.post("/batches/{batch_id}/items")
 def append_item(batch_id: str, item: dict = Body(...), db=Depends(get_db)):
+    row = db.execute(
+        "SELECT deleted_at FROM overnight_batches WHERE id=?",
+        (batch_id,),
+    ).fetchone()
+    if not row or row[0]:
+        return JSONResponse({"error": "not_found"}, status_code=404)
     item = coerce_scan_params(item)
     if len(json.dumps(item)) > MAX_PAYLOAD:
         return JSONResponse({"error": "payload_too_large"}, status_code=400)
@@ -202,12 +295,16 @@ def reorder_items(batch_id: str, mapping: list[dict] = Body(...), db=Depends(get
 @router.post("/batches/{batch_id}/start_now")
 def start_now(batch_id: str, db=Depends(get_db)):
     cur = db.execute(
-        "SELECT start_override FROM overnight_batches WHERE id=?",
+        "SELECT start_override, deleted_at, status FROM overnight_batches WHERE id=?",
         (batch_id,),
     )
     row = cur.fetchone()
-    if row and row[0]:
+    if not row or row[1]:
+        return JSONResponse({"error": "not_found"}, status_code=404)
+    if row[0]:
         return {"status": "already_queued"}
+    if row[2] in FINISHED_STATUSES:
+        return JSONResponse({"error": "batch_finished"}, status_code=409)
     db.execute(
         "UPDATE overnight_batches SET start_override=1 WHERE id=?",
         (batch_id,),
@@ -223,7 +320,7 @@ def start_now(batch_id: str, db=Depends(get_db)):
         )
     )
     running = db.execute(
-        "SELECT id FROM overnight_batches WHERE status='running'",
+        "SELECT id FROM overnight_batches WHERE status='running' AND deleted_at IS NULL",
     ).fetchone()
     if running and running[0] != batch_id:
         db.connection.commit()
@@ -238,9 +335,14 @@ def start_now(batch_id: str, db=Depends(get_db)):
 
 @router.post("/batches/{batch_id}/pause")
 def pause_batch(batch_id: str, db=Depends(get_db)):
-    cur = db.execute("SELECT status FROM overnight_batches WHERE id=?", (batch_id,))
+    cur = db.execute(
+        "SELECT status, deleted_at FROM overnight_batches WHERE id=?",
+        (batch_id,),
+    )
     row = cur.fetchone()
-    if row and row[0] == "paused":
+    if not row or row[1]:
+        return JSONResponse({"error": "not_found"}, status_code=404)
+    if row[0] == "paused":
         return {"status": "paused"}
     db.execute(
         "UPDATE overnight_batches SET status='paused' WHERE id=?",
@@ -252,9 +354,14 @@ def pause_batch(batch_id: str, db=Depends(get_db)):
 
 @router.post("/batches/{batch_id}/resume")
 def resume_batch(batch_id: str, db=Depends(get_db)):
-    cur = db.execute("SELECT status FROM overnight_batches WHERE id=?", (batch_id,))
+    cur = db.execute(
+        "SELECT status, deleted_at FROM overnight_batches WHERE id=?",
+        (batch_id,),
+    )
     row = cur.fetchone()
-    if row and row[0] == "running":
+    if not row or row[1]:
+        return JSONResponse({"error": "not_found"}, status_code=404)
+    if row[0] == "running":
         return {"status": "running"}
     db.execute(
         "UPDATE overnight_batches SET status='queued' WHERE id=?",
@@ -266,6 +373,12 @@ def resume_batch(batch_id: str, db=Depends(get_db)):
 
 @router.post("/batches/{batch_id}/cancel")
 def cancel_batch(batch_id: str, db=Depends(get_db)):
+    row = db.execute(
+        "SELECT deleted_at FROM overnight_batches WHERE id=?",
+        (batch_id,),
+    ).fetchone()
+    if not row or row[0]:
+        return JSONResponse({"error": "not_found"}, status_code=404)
     db.execute(
         "UPDATE overnight_batches SET status='canceled', start_override=0 WHERE id=?",
         (batch_id,),

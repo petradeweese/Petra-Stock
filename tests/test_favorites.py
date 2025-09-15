@@ -1,3 +1,4 @@
+import json
 import os
 import sqlite3
 import sys
@@ -62,6 +63,50 @@ def test_add_favorite_ref_avg_dd(tmp_path):
     assert val == 0.05
     conn.close()
 
+
+def test_add_favorite_persists_lookback(tmp_path):
+    db.DB_PATH = str(tmp_path / "test.db")
+    db.init_db()
+
+    app = FastAPI()
+    app.include_router(routes.router)
+    client = TestClient(app)
+
+    payload = {
+        "ticker": "ZZZ",
+        "direction": "DOWN",
+        "rule": "r2",
+        "support_snapshot": 40,
+        "settings_json_snapshot": {
+            "lookback_years": "2.0",
+            "min_support": "35",
+        },
+    }
+
+    res = client.post("/favorites/add", json=payload)
+    assert res.status_code == 200
+    assert res.json()["ok"]
+
+    conn = sqlite3.connect(db.DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT lookback_years, min_support, support_snapshot, settings_json_snapshot FROM favorites WHERE ticker='ZZZ'"
+    )
+    row = cur.fetchone()
+    conn.close()
+
+    assert row is not None
+    lookback, min_support, support_snapshot, settings_snapshot = row
+    assert lookback == 2.0
+    assert min_support == 35
+
+    support_data = json.loads(support_snapshot)
+    assert support_data["count"] == 40
+    assert support_data["lookback_years"] == 2.0
+    assert support_data["min_support"] == 35
+
+    settings_data = json.loads(settings_snapshot)
+    assert settings_data["lookback_years"] == "2.0"
 
 def test_favorites_snapshot_values(tmp_path, monkeypatch):
     db.DB_PATH = str(tmp_path / "test.db")

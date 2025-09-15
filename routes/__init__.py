@@ -54,6 +54,73 @@ SCAN_BATCH_WRITES = os.getenv("SCAN_BATCH_WRITES", "1") not in {"0", "false", "n
 _perf_counter = time.perf_counter
 
 
+def _coerce_float(value: Any) -> float | None:
+    try:
+        if value in (None, ""):
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_int(value: Any) -> int | None:
+    try:
+        if value in (None, ""):
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_support_snapshot(raw: Any) -> tuple[int | None, dict[str, Any] | None]:
+    data: dict[str, Any] | None = None
+    if isinstance(raw, (str, bytes)):
+        try:
+            data = json.loads(raw)
+        except Exception:
+            data = None
+    elif isinstance(raw, dict):
+        data = raw
+
+    if isinstance(data, dict):
+        support_val = data.get("count")
+        if support_val is None:
+            support_val = data.get("support")
+        return _coerce_int(support_val), data
+
+    return _coerce_int(raw), None
+
+
+def _format_lookback(value: float | None) -> str:
+    if value is None:
+        return "—"
+    rounded = round(value)
+    if abs(value - rounded) < 1e-6:
+        return f"{int(rounded)}y"
+    return f"{value:.1f}y"
+
+
+def _normalize_favorite(row: dict[str, Any]) -> dict[str, Any]:
+    support_count, support_snapshot = _parse_support_snapshot(
+        row.get("support_snapshot")
+    )
+    lookback = _coerce_float(row.get("lookback_years"))
+    if lookback is None and isinstance(support_snapshot, dict):
+        lookback = _coerce_float(support_snapshot.get("lookback_years"))
+
+    min_support = _coerce_int(row.get("min_support"))
+    if support_count is None:
+        support_count = min_support
+
+    row["lookback_years"] = lookback
+    row["support_count"] = support_count
+    row["lookback_display"] = _format_lookback(lookback)
+    row["support_display"] = (
+        str(support_count) if support_count is not None else "—"
+    )
+    return row
+
+
 _SMTP_FIELD_LABELS = {
     "smtp_host": "SMTP host",
     "smtp_port": "SMTP port",
@@ -818,7 +885,7 @@ def scanner_page(request: Request):
 @router.get("/favorites", response_class=HTMLResponse)
 def favorites_page(request: Request, db=Depends(get_db)):
     db.execute("SELECT * FROM favorites ORDER BY id DESC")
-    favs = [row_to_dict(r, db) for r in db.fetchall()]
+    favs = [_normalize_favorite(row_to_dict(r, db)) for r in db.fetchall()]
     for f in favs:
         f["avg_roi_pct"] = f.get("roi_snapshot")
         f["hit_pct"] = f.get("hit_pct_snapshot")
@@ -1119,7 +1186,7 @@ def forward_page(request: Request, db=Depends(get_db)):
 @router.get("/api/forward/favorites")
 def api_forward_favorites(db=Depends(get_db)):
     db.execute("SELECT * FROM favorites ORDER BY id DESC")
-    favs = [row_to_dict(r, db) for r in db.fetchall()]
+    favs = [_normalize_favorite(row_to_dict(r, db)) for r in db.fetchall()]
     return {"favorites": favs}
 
 
@@ -1155,9 +1222,9 @@ async def favorites_add(request: Request, db=Depends(get_db)):
     roi = payload.get("roi_snapshot")
     hit = payload.get("hit_pct_snapshot")
     dd = payload.get("dd_pct_snapshot")
-    support = payload.get("support_snapshot")
+    support_raw = payload.get("support_snapshot")
     rule_snap = payload.get("rule_snapshot") or rule
-    settings = payload.get("settings_json_snapshot")
+    settings_raw = payload.get("settings_json_snapshot")
     try:
         ref_dd = float(ref_dd)
         if ref_dd > 1:
@@ -1170,23 +1237,43 @@ async def favorites_add(request: Request, db=Depends(get_db)):
             {"ok": False, "error": "missing ticker or rule"}, status_code=400
         )
 
+    settings_dict: dict[str, Any] = {}
+    settings_json: str | None = None
+    if isinstance(settings_raw, dict):
+        settings_dict = settings_raw
+        settings_json = json.dumps(settings_raw)
+    elif isinstance(settings_raw, str) and settings_raw:
+        try:
+            settings_dict = json.loads(settings_raw)
+            settings_json = json.dumps(settings_dict)
+        except Exception:
+            settings_json = settings_raw
+    elif settings_raw not in (None, ""):
+        settings_json = json.dumps(settings_raw)
+
     lookback = None
     min_support = None
-    if isinstance(settings, dict):
-        lookback = settings.get("lookback_years")
-        min_support = settings.get("min_support")
-        settings = json.dumps(settings)
+    if settings_dict:
+        params = coerce_scan_params(settings_dict)
+        lookback = params.get("lookback_years")
+        min_support = params.get("min_support")
     else:
-        try:
-            sdict = json.loads(settings or "{}")
-            lookback = sdict.get("lookback_years")
-            min_support = sdict.get("min_support")
-        except Exception:
-            pass
-    try:
-        support = int(support)
-    except (TypeError, ValueError):
-        support = None
+        lookback = payload.get("lookback_years")
+        min_support = payload.get("min_support")
+
+    lookback = _coerce_float(lookback)
+    min_support = _coerce_int(min_support)
+    support = _coerce_int(support_raw)
+
+    support_payload: dict[str, Any] = {}
+    if support is not None:
+        support_payload["count"] = support
+    if min_support is not None:
+        support_payload["min_support"] = min_support
+    if lookback is not None:
+        support_payload["lookback_years"] = lookback
+
+    support_snapshot = json.dumps(support_payload) if support_payload else None
 
     db.execute(
         """INSERT INTO favorites(
@@ -1203,16 +1290,23 @@ async def favorites_add(request: Request, db=Depends(get_db)):
             ref_dd,
             lookback,
             min_support,
-            support,
+            support_snapshot,
             roi,
             hit,
             dd,
             rule_snap,
-            settings,
+            settings_json,
             now_et().isoformat(),
         ),
     )
     db.connection.commit()
+    log_telemetry(
+        {
+            "type": "favorite_saved",
+            "symbol": t,
+            "lookback_years": lookback,
+        }
+    )
     return {"ok": True}
 
 
