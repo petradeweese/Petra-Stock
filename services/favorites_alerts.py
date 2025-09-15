@@ -85,17 +85,27 @@ def select_contract(ticker: str, side: str, profile: Dict) -> SelectionResult:
 
     chain = options_provider.get_chain(ticker)
     candidates = [c for c in chain if c.side.lower() == side.lower()]
-    candidates = [c for c in candidates if profile.get("dte_min", 0) <= c.dte <= profile.get("dte_max", 10_000)]
+    dte_min = profile.get("dte_min")
+    dte_max = profile.get("dte_max")
+    candidates = [
+        c
+        for c in candidates
+        if (dte_min is None or c.dte >= dte_min)
+        and (dte_max is None or c.dte <= dte_max)
+    ]
     target_delta = profile.get("target_delta", 0.0)
     rejects: List[Dict[str, str]] = []
     passes: List[options_provider.OptionContract] = []
     for c in candidates:
         reason = None
-        if c.open_interest < profile.get("min_open_interest", 0):
+        min_oi = profile.get("min_open_interest")
+        min_vol = profile.get("min_volume")
+        max_spread = profile.get("max_spread_pct")
+        if min_oi is not None and c.open_interest < min_oi:
             reason = "open interest too low"
-        elif c.volume < profile.get("min_volume", 0):
+        elif min_vol is not None and c.volume < min_vol:
             reason = "volume too low"
-        elif c.spread_pct > profile.get("max_spread_pct", float("inf")):
+        elif max_spread is not None and c.spread_pct > max_spread:
             reason = "spread too wide"
         if reason:
             rejects.append({"occ": c.occ, "reason": reason})
