@@ -8,6 +8,7 @@ from prometheus_client import Histogram
 from services.data_fetcher import fetch_prices as yahoo_fetch
 
 from .polygon_client import fetch_polygon_prices
+from . import price_store
 from .price_store import detect_gaps, get_prices_from_db
 from utils import TZ, OPEN_TIME, CLOSE_TIME, market_is_open
 
@@ -125,19 +126,39 @@ def get_prices(
             return yahoo_fetch(symbols, interval, lookback_years)
         if provider == "polygon":
             return fetch_polygon_prices(symbols, interval, start, end)
-    results = get_prices_from_db(symbols, start, end)
-    expected = expected_bar_count(start, end, interval)
-    for sym in symbols:
-        gaps = detect_gaps(sym, start, end)
-        if gaps:
-            from scheduler import queue_gap_fill
+    conn = None
+    try:
+        conn = price_store._open_conn() if hasattr(price_store, "_open_conn") else None
+        cov = price_store.bulk_coverage(symbols, interval, start, end, conn=conn)
+        expected = expected_bar_count(start, end, interval)
+        to_check: List[str] = []
+        for sym in symbols:
+            cmin, cmax, cnt = cov.get(sym, (None, None, 0))
+            if cnt >= expected and price_store.covers(start, end, cmin, cmax):
+                coverage_metric.observe(1.0)
+            else:
+                to_check.append(sym)
+        try:
+            results = get_prices_from_db(symbols, start, end, interval=interval, conn=conn)
+        except TypeError:  # backward compatibility
+            results = get_prices_from_db(symbols, start, end)
+        for sym in to_check:
+            try:
+                gaps = detect_gaps(sym, start, end, interval=interval, conn=conn)
+            except TypeError:
+                gaps = detect_gaps(sym, start, end)
+            if gaps:
+                from scheduler import queue_gap_fill
 
-            queue_gap_fill(sym, start, end, interval)
-        df = results.get(sym, pd.DataFrame())
-        bars = len(df)
-        ratio = bars / expected if expected else 0.0
-        coverage_metric.observe(ratio)
-    return results
+                queue_gap_fill(sym, start, end, interval)
+            df = results.get(sym, pd.DataFrame())
+            bars = len(df)
+            ratio = bars / expected if expected else 0.0
+            coverage_metric.observe(ratio)
+        return results
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def fetch_prices(

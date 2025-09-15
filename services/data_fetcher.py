@@ -223,13 +223,13 @@ def fetch_prices(
         mem = _MEM_CACHE.get(key)
         if mem is not None and not getattr(mem, "empty", True):
             results[t] = mem.copy()
-            logger.info("mem_cache_hit=%s", t)
+            logger.debug("mem_cache_hit=%s", t)
             continue
         end_dt = dt.datetime.utcnow().replace(tzinfo=dt.timezone.utc)
         start_dt = end_dt - dt.timedelta(days=int(lookback_years * 365))
         cov_min, cov_max = price_store.get_coverage(t, interval)
         if price_store.covers(start_dt, end_dt, cov_min, cov_max):
-            logger.info(
+            logger.debug(
                 "db_coverage_ok symbol=%s interval=%s %s..%s",
                 t,
                 interval,
@@ -271,7 +271,15 @@ def fetch_prices(
     # Fetch tickers in batches to avoid overwhelming the Yahoo Finance API.
     for i in range(0, len(to_download), YF_BATCH_SIZE):
         batch = to_download[i : i + YF_BATCH_SIZE]
-        fetched = asyncio.run(_download_batch(batch, period, interval))
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            fetched = asyncio.run(_download_batch(batch, period, interval))
+        else:
+            raise RuntimeError(
+                "fetch_prices() cannot be invoked from a running event loop; "
+                "use _download_batch directly in async code",
+            )
         for t in batch:
             df = fetched.get(t, pd.DataFrame())
             df = normalize_price_df(df)
