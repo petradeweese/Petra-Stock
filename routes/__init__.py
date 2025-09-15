@@ -1,16 +1,16 @@
 # ruff: noqa: E501
+import asyncio
 import atexit
 import json
 import logging
 import os
-import asyncio
 import smtplib
 import sqlite3
 import ssl
 import statistics
 import time
-from datetime import timedelta, datetime
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from datetime import datetime, timedelta
 from email.message import EmailMessage
 from threading import Thread
 from typing import Any, Callable, Dict, Optional, Union
@@ -23,7 +23,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from config import settings
-from db import DB_PATH, get_db, get_schema_status, get_settings, _ensure_scanner_column
+from db import DB_PATH, _ensure_scanner_column, get_db, get_schema_status, get_settings
 from indices import SP100, TOP150, TOP250
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 from scanner import compute_scan_for_ticker
@@ -31,12 +31,12 @@ from services import price_store
 from services.market_data import (
     expected_bar_count,
     fetch_prices,
-    window_from_lookback,
     get_prices,
+    window_from_lookback,
 )
 from utils import TZ, now_et
 
-from .archive import _format_rule_summary
+from .archive import _format_rule_summary as _format_rule_summary
 from .archive import router as archive_router
 
 router = APIRouter()
@@ -374,6 +374,12 @@ def _get_scan_executor() -> Union[ThreadPoolExecutor, ProcessPoolExecutor]:
     return _scan_executor
 
 
+def _scan_single(t: str, params: dict) -> tuple[dict | None, float]:
+    t0 = time.perf_counter()
+    res = compute_scan_for_ticker(t, params)
+    return res, time.perf_counter() - t0
+
+
 def _perform_scan(
     tickers: list[str],
     params: dict,
@@ -416,6 +422,7 @@ def _perform_scan(
 
     fetch_elapsed = 0.0
     if need_fetch:
+
         async def _fetch_all(symbols: list[str]) -> None:
             sem = asyncio.Semaphore(settings.scan_fetch_concurrency)
 
@@ -437,12 +444,7 @@ def _perform_scan(
     skipped_missing_data = 0
     ex = _get_scan_executor()
 
-    def _scan_single(t: str) -> tuple[dict | None, float]:
-        t0 = time.perf_counter()
-        res = compute_scan_for_ticker(t, params)
-        return res, time.perf_counter() - t0
-
-    future_to_ticker = {ex.submit(_scan_single, t): t for t in tickers}
+    future_to_ticker = {ex.submit(_scan_single, t, params): t for t in tickers}
     step = max(1, int(progress_every))
     done = 0
     times: list[float] = []
@@ -1065,6 +1067,7 @@ def settings_save(
 ):
     _ensure_scanner_column(db)
     from email.utils import parseaddr
+
     from services.notifications import is_carrier_address
 
     def _clean(raw: str, *, allow_sms: bool) -> str:
