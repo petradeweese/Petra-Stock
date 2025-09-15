@@ -72,7 +72,8 @@ SCHEMA = [
         scheduler_enabled INTEGER DEFAULT 0,
         throttle_minutes INTEGER DEFAULT 60,
         last_boundary TEXT,
-        last_run_at TEXT
+        last_run_at TEXT,
+        greeks_profile_json TEXT DEFAULT '{}'
     );
     """,
     """
@@ -121,7 +122,8 @@ SCHEMA = [
         dd_pct_snapshot REAL,
         rule_snapshot TEXT,
         settings_json_snapshot TEXT,
-        snapshot_at TEXT
+        snapshot_at TEXT,
+        greeks_override_json TEXT
     );
     """,
     # Forward test tracking
@@ -278,6 +280,11 @@ def _ensure_scanner_column(db: sqlite3.Cursor) -> None:
     cols = [r[1] for r in db.fetchall()]
     if "scanner_recipients" not in cols:
         db.execute("ALTER TABLE settings ADD COLUMN scanner_recipients TEXT DEFAULT ''")
+        db.connection.commit()
+    if "greeks_profile_json" not in cols:
+        db.execute(
+            "ALTER TABLE settings ADD COLUMN greeks_profile_json TEXT DEFAULT '{}'"
+        )
         db.connection.commit()
 
 
