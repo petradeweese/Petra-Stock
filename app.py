@@ -22,6 +22,7 @@ from routes import router
 from scanner import compute_scan_for_ticker
 from scheduler import setup_scheduler
 from services import http_client
+from services.overnight import start_background_runner
 from utils import market_is_open, now_et
 
 
@@ -65,6 +66,7 @@ def create_app() -> FastAPI:
 
     app.include_router(router)
     setup_scheduler(app, market_is_open, now_et, compute_scan_for_ticker)
+    start_background_runner(lambda payload, silent: 0)
 
     @app.on_event("shutdown")
     async def _shutdown():
