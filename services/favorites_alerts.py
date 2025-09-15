@@ -294,7 +294,7 @@ def enrich_and_send(hit: FavoriteHitStub, is_test: bool = False) -> bool:  # pra
 
 def enrich_and_send_test(
     ticker: str, direction: str, channel: str = "mms", compact: bool = False
-) -> tuple[bool, str]:
+) -> tuple[bool, dict[str, str]]:
     fake_hit = FavoriteHitStub(ticker=ticker, direction=direction, pattern="Manual Test")
     contract = options_provider.OptionContract(
         occ="TEST",
@@ -318,4 +318,5 @@ def enrich_and_send_test(
     checks = [Check("Delta", "Δ", 0.0, True)]
     profile = {"compact_mms": compact, "include_symbols_in_alerts": True}
     body = format_mms(fake_hit, contract, checks, profile)
-    return True, body
+    subject = f"Favorites Alert Test: {ticker.upper()} {direction.upper()}"
+    return True, {"subject": subject, "body": body}

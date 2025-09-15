@@ -4,19 +4,15 @@ import atexit
 import json
 import logging
 import os
-import smtplib
 import sqlite3
-import ssl
 import statistics
 import time
 from concurrent.futures import as_completed
 from datetime import datetime, timedelta
-from email.message import EmailMessage
 from threading import Thread
 from typing import Any, Callable, Dict, Optional
 from uuid import uuid4
 
-import certifi
 import pandas as pd
 from fastapi import APIRouter, Body, Depends, Form, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -35,6 +31,7 @@ from indices import SP100, TOP150, TOP250
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 from scanner import compute_scan_for_ticker
 from services import executor, favorites_alerts, price_store
+from services.notify import send_email_smtp
 from services.scanner_params import coerce_scan_params
 from services.telemetry import log as log_telemetry
 from services.market_data import (
@@ -56,6 +53,88 @@ SCAN_BATCH_WRITES = os.getenv("SCAN_BATCH_WRITES", "1") not in {"0", "false", "n
 
 _perf_counter = time.perf_counter
 
+
+_SMTP_FIELD_LABELS = {
+    "smtp_host": "SMTP host",
+    "smtp_port": "SMTP port",
+    "smtp_user": "SMTP user",
+    "smtp_pass": "SMTP password",
+    "mail_from": "Mail From",
+    "recipients": "Recipients",
+}
+
+
+def _smtp_config_status(settings_row: dict) -> tuple[dict[str, Any], list[str], bool]:
+    """Normalize SMTP settings and report missing fields."""
+
+    host = (settings_row.get("smtp_host") or "").strip()
+    try:
+        port = int(settings_row.get("smtp_port") or 0)
+    except (TypeError, ValueError):
+        port = 0
+    user = (settings_row.get("smtp_user") or "").strip()
+    password = (settings_row.get("smtp_pass") or "").strip()
+    mail_from = (settings_row.get("mail_from") or "").strip()
+    recipients = [
+        r.strip()
+        for r in (settings_row.get("recipients") or "").split(",")
+        if r.strip()
+    ]
+
+    missing: list[str] = []
+    if not host:
+        missing.append("smtp_host")
+    if port <= 0:
+        missing.append("smtp_port")
+    if not user:
+        missing.append("smtp_user")
+    if not password:
+        missing.append("smtp_pass")
+    if not mail_from:
+        missing.append("mail_from")
+    if not recipients:
+        missing.append("recipients")
+
+    has_any = any([host, user, password, mail_from]) or bool(recipients)
+
+    cfg = {
+        "host": host,
+        "port": port,
+        "user": user,
+        "password": password,
+        "mail_from": mail_from,
+        "recipients": recipients,
+    }
+    return cfg, missing, has_any
+
+
+def _format_missing_fields(missing: list[str]) -> str:
+    labels = [_SMTP_FIELD_LABELS.get(field, field) for field in missing]
+    return ", ".join(labels)
+
+
+
+def _extract_test_alert_message(result: Any) -> tuple[bool, str, str]:
+    ok = False
+    subject = ""
+    body = ""
+    payload: Optional[Any] = None
+    if isinstance(result, tuple):
+        ok = bool(result[0])
+        if len(result) > 1:
+            payload = result[1]
+    else:
+        ok = bool(result)
+        if ok:
+            payload = result
+    if isinstance(payload, dict):
+        subject = str(payload.get("subject") or "")
+        body = str(payload.get("body") or "")
+    elif isinstance(payload, str):
+        body = payload
+    elif payload is not None:
+        body = str(payload)
+    return ok, subject, body
 
 def _get_next_earnings(ticker: str):  # pragma: no cover - external service
     return None
@@ -610,38 +689,55 @@ def _send_email(
     scanner can proceed without failing.
     """
 
-    user = (st.get("smtp_user") or "").strip()
-    pwd = (st.get("smtp_pass") or "").replace(" ", "").strip()
-    recips = [r.strip() for r in (st.get(list_field) or "").split(",") if r.strip()]
+    cfg, missing, has_any = _smtp_config_status(st)
+    recips = cfg["recipients"] if list_field == "recipients" else [
+        r.strip()
+        for r in (st.get(list_field) or "").split(",")
+        if r.strip()
+    ]
     if not allow_sms:
         from services.notifications import is_carrier_address
 
         recips = [r for r in recips if not is_carrier_address(r)]
-    if not user or not pwd or not recips:
+    if list_field != "recipients":
+        missing = [m for m in missing if m != "recipients"]
+
+    if not recips:
+        if list_field == "recipients":
+            missing = [m for m in missing if m != "recipients"] + ["recipients"]
+        elif not has_any:
+            return
+        else:
+            missing = missing + [list_field]
+
+    if missing:
+        if has_any or list_field != "recipients":
+            logger.warning(
+                "SMTP configuration incomplete: %s",
+                _format_missing_fields(sorted(set(missing))),
+            )
         return
 
-    logger.info("sending email using %s list to %d recipients", list_field, len(recips))
-
-    msg = EmailMessage()
-    msg["Subject"] = subject
-    msg["From"] = user
-    msg["To"] = ", ".join(recips)
-    msg.set_content(body)
-    if html_body:
-        msg.add_alternative(html_body, subtype="html")
-
-    ctx = ssl.create_default_context(cafile=certifi.where())
-
-    try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=ctx, timeout=20) as server:
-            server.login(user, pwd)
-            server.send_message(msg)
-    except ssl.SSLError:
-        with smtplib.SMTP("smtp.gmail.com", 587, timeout=20) as server:
-            server.ehlo()
-            server.starttls(context=ctx)
-            server.login(user, pwd)
-            server.send_message(msg)
+    payload = html_body or body
+    result = send_email_smtp(
+        cfg["host"],
+        cfg["port"],
+        cfg["user"],
+        cfg["password"],
+        cfg["mail_from"] or cfg["user"],
+        recips,
+        subject,
+        payload,
+    )
+    if not result.get("ok"):
+        logger.warning("SMTP send failed: %s", result.get("error"))
+        return
+    logger.info(
+        "email sent via smtp list=%s recipients=%d message_id=%s",
+        list_field,
+        len(recips),
+        result.get("message_id"),
+    )
 
 
 def compile_weekly_digest(
@@ -1121,31 +1217,130 @@ async def favorites_add(request: Request, db=Depends(get_db)):
 
 
 @router.post("/favorites/test_alert")
-def favorites_test_alert(payload: dict = Body(...)):
+def favorites_test_alert(payload: dict = Body(...), db=Depends(get_db)):
     symbol = (payload.get("symbol") or payload.get("ticker") or "AAPL").upper()
     channel = (payload.get("channel") or "mms").lower()
     compact = bool(payload.get("compact"))
-    result = favorites_alerts.enrich_and_send_test(
-        symbol, "UP", channel=channel, compact=compact
+    ok, subject, body = _extract_test_alert_message(
+        favorites_alerts.enrich_and_send_test(
+            symbol, "UP", channel=channel, compact=compact
+        )
     )
-    if isinstance(result, tuple):
-        ok, body = result
-    else:
-        ok, body = bool(result), ""
-    log_telemetry(
-        {
-            "type": "favorites_test_alert",
-            "symbol": symbol,
-            "channel": channel,
-            "compact": compact,
-            "ok": ok,
-        }
+
+    base_telem = {
+        "type": "favorites_test_alert",
+        "symbol": symbol,
+        "channel": channel,
+        "compact": compact,
+    }
+
+    response = {
+        "ok": ok,
+        "symbol": symbol,
+        "channel": channel,
+        "compact": compact,
+        "subject": subject,
+        "body": body,
+    }
+
+    if channel == "email":
+        st = get_settings(db)
+        cfg, missing, _ = _smtp_config_status(st)
+        if not cfg["recipients"]:
+            missing = list(dict.fromkeys(missing + ["recipients"]))
+        if missing:
+            error = f"SMTP not configured: {_format_missing_fields(sorted(set(missing)))}"
+            log_telemetry(
+                {
+                    "type": "favorites_test_alert_send",
+                    "channel": "email",
+                    "provider": "smtp",
+                    "ok": False,
+                    "error": error,
+                }
+            )
+            base_telem["ok"] = False
+            log_telemetry(base_telem)
+            response.update({"ok": False, "error": error})
+            return JSONResponse(response, status_code=400)
+        if not ok:
+            error = "Unable to generate alert body"
+            log_telemetry(
+                {
+                    "type": "favorites_test_alert_send",
+                    "channel": "email",
+                    "provider": "smtp",
+                    "ok": False,
+                    "error": error,
+                }
+            )
+            response.update({"ok": False, "error": error})
+            base_telem["ok"] = False
+            log_telemetry(base_telem)
+            return JSONResponse(response, status_code=500)
+
+        send_result = send_email_smtp(
+            cfg["host"],
+            cfg["port"],
+            cfg["user"],
+            cfg["password"],
+            cfg["mail_from"] or cfg["user"],
+            cfg["recipients"],
+            subject or f"Favorites Alert Test: {symbol}",
+            body,
+        )
+        if not send_result.get("ok"):
+            error = send_result.get("error", "SMTP send failed")
+            log_telemetry(
+                {
+                    "type": "favorites_test_alert_send",
+                    "channel": "email",
+                    "provider": "smtp",
+                    "ok": False,
+                    "error": error,
+                }
+            )
+            response.update({"ok": False, "error": error})
+            base_telem["ok"] = False
+            log_telemetry(base_telem)
+            return JSONResponse(response, status_code=502)
+
+        message_id = send_result.get("message_id", "")
+        response.update({"ok": True, "message_id": message_id})
+        log_telemetry(
+            {
+                "type": "favorites_test_alert_send",
+                "channel": "email",
+                "provider": "smtp",
+                "ok": True,
+                "message_id": message_id,
+            }
+        )
+        base_telem["ok"] = True
+        log_telemetry(base_telem)
+        return response
+
+    base_telem["ok"] = ok
+    log_telemetry(base_telem)
+    return response
+
+
+@router.post("/favorites/test_alert/preview")
+def favorites_test_alert_preview(payload: dict = Body(...)):
+    symbol = (payload.get("symbol") or payload.get("ticker") or "AAPL").upper()
+    channel = (payload.get("channel") or "mms").lower()
+    compact = bool(payload.get("compact"))
+    ok, subject, body = _extract_test_alert_message(
+        favorites_alerts.enrich_and_send_test(
+            symbol, "UP", channel=channel, compact=compact
+        )
     )
     return {
         "ok": ok,
         "symbol": symbol,
         "channel": channel,
         "compact": compact,
+        "subject": subject,
         "body": body,
     }
 
@@ -1153,8 +1348,21 @@ def favorites_test_alert(payload: dict = Body(...)):
 @router.get("/settings", response_class=HTMLResponse)
 def settings_page(request: Request, db=Depends(get_db)):
     st = get_settings(db)
+    _, smtp_missing, smtp_has_any = _smtp_config_status(st)
+    smtp_configured = not smtp_missing
+    smtp_warning = smtp_has_any and bool(smtp_missing)
     return templates.TemplateResponse(
-        request, "settings.html", {"st": st, "active_tab": "settings"}
+        request,
+        "settings.html",
+        {
+            "st": st,
+            "active_tab": "settings",
+            "smtp_configured": smtp_configured,
+            "smtp_missing": smtp_missing,
+            "smtp_missing_label": _format_missing_fields(smtp_missing),
+            "smtp_warning": smtp_warning,
+            "twilio_configured": False,
+        },
     )
 
 
@@ -1166,8 +1374,11 @@ def info_page(request: Request):
 @router.post("/settings/save")
 def settings_save(
     request: Request,
+    smtp_host: str = Form(""),
+    smtp_port: int = Form(587),
     smtp_user: str = Form(""),
     smtp_pass: str = Form(""),
+    mail_from: str = Form(""),
     recipients: str = Form(""),
     scanner_recipients: str = Form(""),
     scheduler_enabled: int = Form(1),
@@ -1194,15 +1405,25 @@ def settings_save(
     clean_fav = _clean(recipients, allow_sms=True)
     clean_scan = _clean(scanner_recipients, allow_sms=False)
 
+    try:
+        port_value = int(smtp_port)
+    except (TypeError, ValueError):
+        port_value = 0
+
+    password_value = smtp_pass.replace(" ", "").strip()
+
     db.execute(
         """
         UPDATE settings
-           SET smtp_user=?, smtp_pass=?, recipients=?, scanner_recipients=?, scheduler_enabled=?, throttle_minutes=?
+           SET smtp_host=?, smtp_port=?, smtp_user=?, smtp_pass=?, mail_from=?, recipients=?, scanner_recipients=?, scheduler_enabled=?, throttle_minutes=?
          WHERE id=1
         """,
         (
+            smtp_host.strip(),
+            port_value,
             smtp_user.strip(),
-            smtp_pass.strip(),
+            password_value,
+            mail_from.strip(),
             clean_fav,
             clean_scan,
             int(scheduler_enabled),
