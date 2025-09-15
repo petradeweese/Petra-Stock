@@ -1,5 +1,7 @@
+import contextvars
 import datetime as dt
 import os
+from contextlib import contextmanager
 from typing import Dict, List, Optional
 
 import pandas as pd
@@ -26,9 +28,30 @@ coverage_metric = Histogram(
 
 DEFAULT_PROVIDER = os.getenv("DATA_PROVIDER", os.getenv("PF_DATA_PROVIDER", "db"))
 
+_NOW_OVERRIDE: contextvars.ContextVar[Optional[dt.datetime]] = contextvars.ContextVar(
+    "market_data_now_override", default=None
+)
+
+
+@contextmanager
+def override_window_end(end: Optional[dt.datetime]):
+    """Temporarily override the ``window_from_lookback`` end timestamp."""
+
+    token = _NOW_OVERRIDE.set(end)
+    try:
+        yield
+    finally:
+        _NOW_OVERRIDE.reset(token)
+
 
 def window_from_lookback(lookback_years: float) -> tuple[dt.datetime, dt.datetime]:
-    end = pd.Timestamp.utcnow().to_pydatetime().replace(tzinfo=dt.timezone.utc)
+    override = _NOW_OVERRIDE.get()
+    if override is not None:
+        if override.tzinfo is None:
+            override = override.replace(tzinfo=dt.timezone.utc)
+        end = override.astimezone(dt.timezone.utc)
+    else:
+        end = pd.Timestamp.utcnow().to_pydatetime().replace(tzinfo=dt.timezone.utc)
     start = end - dt.timedelta(days=int(lookback_years * 365))
     return start, end
 

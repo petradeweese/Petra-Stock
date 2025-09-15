@@ -232,8 +232,10 @@ def results_from_archive(request: Request, run_id: int, db=Depends(get_db)):
 
     rule_summary = ""
     ran_at = ""
+    meta: Dict[str, Any] = {}
     try:
         params = json.loads(run.get("params_json") or "{}")
+        meta = params.pop("_meta", {}) or {}
         rule_summary = _format_rule_summary(params)
         dt = datetime.fromisoformat(run["started_at"])
         if dt.tzinfo is None:
@@ -247,11 +249,18 @@ def results_from_archive(request: Request, run_id: int, db=Depends(get_db)):
     settings_items: List[Tuple[str, Any]] = []
     try:
         settings = json.loads(run.get("settings_json") or "{}")
+        settings.pop("_meta", None)
         for k, v in settings.items():
             settings_items.append((k.replace("_", " ").title(), v))
         settings_items.sort()
     except Exception:
         pass
+
+    note = ""
+    error_msg = None
+    if isinstance(meta, dict):
+        note = str(meta.get("note") or "")
+        error_msg = meta.get("error")
 
     ctx = {
         "rows": rows,
@@ -264,5 +273,8 @@ def results_from_archive(request: Request, run_id: int, db=Depends(get_db)):
         "ran_at": ran_at,
         "rule_summary": rule_summary,
         "settings_items": settings_items,
+        "note": note,
+        "error": error_msg,
+        "meta": meta,
     }
     return templates.TemplateResponse(request, "archive/results.html", ctx)

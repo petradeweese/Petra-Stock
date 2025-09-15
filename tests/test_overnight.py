@@ -10,7 +10,7 @@ from fastapi.staticfiles import StaticFiles
 import db
 from db import get_db
 from routes import router
-from services.overnight import OvernightRunner, in_window
+from services.overnight import OvernightRunner, OvernightScanError, in_window
 
 
 def test_window_enforcement():
@@ -578,3 +578,25 @@ def test_telemetry_fields(tmp_path, caplog):
     assert item["run_id"] == 42
     assert item["silent"] is True
     assert "position" in item and "queue_wait" in item["timings_ms"] and "scan" in item["timings_ms"]
+
+
+def test_overnight_scan_failure_sets_error(tmp_path):
+    app = _setup_app(tmp_path)
+    client = TestClient(app)
+    res = client.post("/overnight/batches", json={"items": [{"ticker": "FAIL"}]})
+    batch_id = res.json()["batch_id"]
+
+    def _scan(p: dict, s: bool):
+        raise OvernightScanError("boom", meta={"processed": 1})
+
+    runner = OvernightRunner(_scan)
+    runner.run_batch(batch_id)
+
+    conn = sqlite3.connect(db.DB_PATH)
+    cur = conn.cursor()
+    status, error = cur.execute(
+        "SELECT status, error FROM overnight_items WHERE batch_id=?", (batch_id,)
+    ).fetchone()
+    conn.close()
+    assert status == "failed"
+    assert "boom" in error

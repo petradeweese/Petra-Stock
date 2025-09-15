@@ -1,7 +1,7 @@
 import json
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
@@ -23,7 +23,12 @@ from routes import router
 from scanner import compute_scan_for_ticker
 from scheduler import setup_scheduler
 from services import http_client
-from services.overnight import start_background_runner
+from services.market_data import override_window_end
+from services.overnight import (
+    OvernightScanError,
+    resolve_overnight_window,
+    start_background_runner,
+)
 from utils import market_is_open, now_et
 
 
@@ -68,7 +73,7 @@ def create_app() -> FastAPI:
     app.include_router(router)
     setup_scheduler(app, market_is_open, now_et, compute_scan_for_ticker)
 
-    def _overnight_scan(payload: dict, silent: bool) -> int:
+    def _overnight_scan(payload: dict, silent: bool) -> dict:
         params = dict(payload.get("settings") or {})
         pattern = payload.get("pattern")
         if pattern:
@@ -78,17 +83,68 @@ def create_app() -> FastAPI:
             for t in str(payload.get("universe", "")).split(",")
             if t.strip()
         ]
-        started = datetime.utcnow().isoformat()
+        now_ts = now_et()
+        window_start_et, window_end_et = resolve_overnight_window(now_ts)
+        window_end_utc = window_end_et.astimezone(timezone.utc)
+        metadata: dict = {
+            "scheduled_at": now_ts.isoformat(),
+            "window_start": window_start_et.isoformat(),
+            "window_end": window_end_et.isoformat(),
+            "timezone": "America/New_York",
+            "symbols_total": len(universe),
+            "silent": silent,
+        }
+        processed = 0
+        successes = 0
+        failures: list[dict] = []
         rows: list[dict] = []
-        for t in universe:
-            try:
-                res = compute_scan_for_ticker(t, params)
-            except Exception:
-                logger.exception("overnight scan failed ticker=%s", t)
-                continue
-            if res:
-                rows.append(res)
-        finished = datetime.utcnow().isoformat()
+
+        with override_window_end(window_end_utc):
+            for raw in universe:
+                ticker = raw.strip().upper()
+                if not ticker:
+                    continue
+                processed += 1
+                try:
+                    res = compute_scan_for_ticker(ticker, params)
+                except Exception as exc:
+                    failures.append({"ticker": ticker, "error": repr(exc)})
+                    logger.exception("overnight scan failed ticker=%s", ticker)
+                    continue
+                if res:
+                    rows.append(res)
+                    successes += 1
+
+        metadata["processed"] = processed
+        metadata["successes"] = successes
+        metadata["failures"] = len(failures)
+        if failures:
+            metadata["failure_examples"] = failures[:5]
+
+        if processed == 0:
+            metadata["error"] = "No symbols to scan"
+            logger.error(json.dumps({"type": "overnight_scan", **metadata}))
+            raise OvernightScanError("No symbols to scan", meta=metadata)
+
+        if successes == 0 and len(failures) == processed:
+            metadata["error"] = "Scan failed for all symbols"
+            logger.error(json.dumps({"type": "overnight_scan", **metadata}))
+            raise OvernightScanError("Scan failed for all symbols", meta=metadata)
+
+        if successes == 0:
+            metadata["note"] = f"Scanned {processed} symbols — 0 results"
+        elif failures:
+            metadata["note"] = f"{successes} results • {len(failures)} tickers failed"
+        else:
+            metadata["note"] = f"Scanned {processed} symbols"
+
+        metadata["rows_returned"] = len(rows)
+
+        params_with_meta = dict(params)
+        params_with_meta["_meta"] = metadata
+
+        started = now_ts.astimezone(timezone.utc).isoformat()
+        finished = datetime.now(timezone.utc).isoformat()
         gen = get_db()
         db = next(gen)
         try:
@@ -103,11 +159,11 @@ def create_app() -> FastAPI:
                 (
                     started,
                     params.get("scan_type", "overnight"),
-                    json.dumps(params),
+                    json.dumps(params_with_meta),
                     ",".join(universe),
                     finished,
                     len(rows),
-                    json.dumps(params),
+                    json.dumps(params_with_meta),
                 ),
             )
             run_id = db.lastrowid
@@ -134,9 +190,17 @@ def create_app() -> FastAPI:
                     ),
                 )
             db.connection.commit()
-            return run_id
         finally:
             gen.close()
+
+        metadata["run_id"] = run_id
+        log_payload = {k: v for k, v in metadata.items() if k != "failure_examples"}
+        log_payload["type"] = "overnight_scan"
+        if metadata.get("failure_examples"):
+            log_payload["failure_examples"] = metadata["failure_examples"]
+        logger.info(json.dumps(log_payload))
+
+        return {"run_id": run_id, **metadata}
 
     start_background_runner(_overnight_scan)
 
