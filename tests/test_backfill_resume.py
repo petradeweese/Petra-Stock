@@ -20,7 +20,7 @@ def test_backfill_resume(monkeypatch, tmp_path):
     monkeypatch.setattr(backfill, "CHECKPOINT", chk)
 
     # stub polygon fetch
-    async def fake_fetch(symbols, interval, start, end):
+    async def fake_fetch(symbols, interval, start, end, **kwargs):
         return {symbols[0]: pd.DataFrame()}
 
     monkeypatch.setattr(polygon_client, "fetch_polygon_prices_async", fake_fetch)

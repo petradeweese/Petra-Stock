@@ -10,8 +10,8 @@ def _bool(name: str, default: str = "false") -> bool:
 class Settings:
     run_migrations: bool = _bool("RUN_MIGRATIONS", "true")
     database_url: str = os.getenv("DATABASE_URL", "sqlite:///patternfinder.db")
-    http_max_concurrency: int = int(os.getenv("HTTP_MAX_CONCURRENCY", "10"))
-    job_timeout: int = int(os.getenv("JOB_TIMEOUT", "30"))
+    http_max_concurrency: int = int(os.getenv("HTTP_MAX_CONCURRENCY", "1"))
+    job_timeout: int = int(os.getenv("JOB_TIMEOUT", "60"))
     metrics_enabled: bool = _bool("METRICS_ENABLED", "false")
     clamp_market_closed: bool = _bool("CLAMP_MARKET_CLOSED", "true")
     backfill_chunk_days: int = int(os.getenv("BACKFILL_CHUNK_DAYS", "1"))
@@ -29,6 +29,7 @@ class Settings:
     scan_fetch_concurrency: int = int(os.getenv("SCAN_FETCH_CONCURRENCY", "8"))
     scan_coverage_batch_size: int = int(os.getenv("SCAN_COVERAGE_BATCH_SIZE", "200"))
     scan_symbols_per_task: int = int(os.getenv("SCAN_SYMBOLS_PER_TASK", "1"))
+    scan_minimal_near_now: bool = _bool("SCAN_MINIMAL_NEAR_NOW", "1")
 
 
 settings = Settings()

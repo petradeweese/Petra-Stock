@@ -11,7 +11,8 @@ import httpx
 import pandas as pd
 
 from config import settings
-from services import http_client
+from services import http_client, price_store
+from utils import OPEN_TIME, TZ, last_trading_close, market_is_open
 
 RUN_ID = os.getenv("RUN_ID", "")
 logger = logging.getLogger(__name__)
@@ -25,6 +26,77 @@ def _add_run_id(record: logging.LogRecord) -> bool:
 logger.addFilter(_add_run_id)
 NY_TZ = ZoneInfo("America/New_York")
 
+FIFTEEN_MIN = dt.timedelta(minutes=15)
+
+
+def _current_session_start(now: dt.datetime) -> dt.datetime:
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=dt.timezone.utc)
+    now_et = now.astimezone(TZ)
+    if market_is_open(now):
+        session_date = now_et.date()
+    else:
+        last_close = last_trading_close(now)
+        session_date = last_close.astimezone(TZ).date()
+    open_dt = dt.datetime.combine(session_date, OPEN_TIME, tzinfo=TZ)
+    return open_dt.astimezone(dt.timezone.utc)
+
+
+def _clone_timeout_ctx(timeout_ctx: Optional[dict]) -> Optional[dict]:
+    if timeout_ctx is None:
+        return None
+    cloned = dict(timeout_ctx)
+    deadline = cloned.get("deadline")
+    if deadline is not None:
+        cloned["remaining"] = max(0.0, deadline - time.monotonic())
+    elif "remaining" in cloned:
+        try:
+            cloned["remaining"] = max(0.0, float(cloned["remaining"]))
+        except (TypeError, ValueError):
+            cloned.pop("remaining", None)
+    return cloned
+
+
+def compute_request_window(
+    symbol: str,
+    interval: str,
+    default_start: dt.datetime,
+    default_end: dt.datetime,
+    *,
+    last_bar: Optional[dt.datetime] = None,
+    now: Optional[dt.datetime] = None,
+) -> Tuple[dt.datetime, dt.datetime, str]:
+    if interval != "15m" or not settings.scan_minimal_near_now:
+        return default_start, default_end, "range"
+
+    if last_bar is None:
+        try:
+            _, last_bar = price_store.get_coverage(symbol, interval)
+        except Exception:
+            last_bar = None
+
+    if last_bar is None:
+        return default_start, default_end, "range"
+
+    if last_bar.tzinfo is None:
+        last_bar = last_bar.replace(tzinfo=dt.timezone.utc)
+    else:
+        last_bar = last_bar.astimezone(dt.timezone.utc)
+
+    now_utc = now or dt.datetime.now(dt.timezone.utc)
+    if now_utc.tzinfo is None:
+        now_utc = now_utc.replace(tzinfo=dt.timezone.utc)
+
+    session_start = _current_session_start(now_utc)
+    if last_bar < session_start:
+        return default_start, default_end, "range"
+
+    start = max(default_start, last_bar)
+    end = min(default_end, start + FIFTEEN_MIN)
+    if end <= start:
+        end = start + FIFTEEN_MIN
+    return start, end, "single_bucket"
+
 
 def _api_key() -> str:
     return os.getenv("POLYGON_API_KEY", "")
@@ -37,9 +109,9 @@ def _include_prepost() -> bool:
 # Allow SCAN_* overrides so ops can tune rate limits and concurrency without
 # redeploying.  Defaults fall back to the legacy POLY_* values for backwards
 # compatibility.
-POLY_RPS = float(os.getenv("SCAN_RPS", os.getenv("POLY_RPS", "0.08")))
+POLY_RPS = float(os.getenv("SCAN_RPS", os.getenv("POLY_RPS", "1.0")))
 POLY_BURST = int(
-    os.getenv("SCAN_MAX_CONCURRENCY", os.getenv("POLY_BURST", "1"))
+    os.getenv("SCAN_MAX_CONCURRENCY", os.getenv("POLY_BURST", "2"))
 )
 
 try:  # pragma: no cover - best effort
@@ -77,6 +149,8 @@ async def _fetch_single(
     end: dt.datetime,
     multiplier: int = 15,
     timespan: str = "minute",
+    *,
+    timeout_ctx: Optional[dict] = None,
 ) -> pd.DataFrame:
     api_key = _api_key()
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
@@ -100,7 +174,10 @@ async def _fetch_single(
         while True:
             status: Optional[int] = None
             try:
-                return await http_client.get_json(url, headers=headers)
+                ctx = _clone_timeout_ctx(timeout_ctx)
+                return await http_client.get_json(
+                    url, headers=headers, timeout_ctx=ctx
+                )
             except httpx.HTTPStatusError as e:
                 status = e.response.status_code
                 if status not in (429,) and status < 500:
@@ -196,6 +273,8 @@ async def fetch_polygon_prices_async(
     interval: str,
     start: dt.datetime,
     end: dt.datetime,
+    *,
+    timeout_ctx: Optional[dict] = None,
 ) -> Dict[str, pd.DataFrame]:
     if not _api_key():
         raise RuntimeError("POLYGON_API_KEY missing")
@@ -214,7 +293,11 @@ async def fetch_polygon_prices_async(
                 cur.isoformat(),
                 nxt.isoformat(),
             )
-            dfs.append(await _fetch_single(sym, cur, nxt, multiplier, timespan))
+            dfs.append(
+                await _fetch_single(
+                    sym, cur, nxt, multiplier, timespan, timeout_ctx=timeout_ctx
+                )
+            )
             cur = nxt
 
         if dfs:

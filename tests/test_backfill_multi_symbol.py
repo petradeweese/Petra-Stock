@@ -25,7 +25,7 @@ def test_backfill_two_symbols(monkeypatch, caplog):
         index=pd.date_range("2024-01-01", periods=1, freq="15T", tz="UTC"),
     )
 
-    async def fake_fetch(symbols, interval, start, end):
+    async def fake_fetch(symbols, interval, start, end, **kwargs):
         sym = symbols[0]
         logger = logging.getLogger("services.polygon_client")
         logger.info("polygon_fetch symbol=%s pages=1 rows=1 duration=0.00", sym)

@@ -25,7 +25,7 @@ def test_quick_test_mode(monkeypatch, caplog):
         index=pd.date_range("2024-01-01", periods=2, freq="15T", tz="UTC"),
     )
 
-    async def fake_fetch(symbols, interval, start, end):
+    async def fake_fetch(symbols, interval, start, end, **kwargs):
         assert symbols == ["SPY"]
         assert interval == "15m"
         assert end - start <= dt.timedelta(days=1, minutes=1)
