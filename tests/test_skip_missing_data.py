@@ -20,11 +20,17 @@ def test_perform_scan_counts_skipped(monkeypatch):
         return {"ticker": ticker}
 
     monkeypatch.setattr(routes, "compute_scan_for_ticker", fake_scan)
-    monkeypatch.setattr(routes, "preload_prices", lambda *a, **k: None)
+    monkeypatch.setattr(
+        routes.price_store,
+        "bulk_coverage",
+        lambda symbols, interval, s, e: {sym: (s, e, 10**6) for sym in symbols},
+    )
+    monkeypatch.setattr(routes.price_store, "covers", lambda a, b, c, d: True)
 
-    rows, skipped = routes._perform_scan(tickers, {}, "")
+    rows, skipped, metrics = routes._perform_scan(tickers, {}, "")
     assert rows == [{"ticker": "AAA"}]
     assert skipped == 1
+    assert metrics["symbols_no_gap"] == 2
 
 
 def test_compute_scan_skips_when_no_data(monkeypatch, caplog):

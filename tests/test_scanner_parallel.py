@@ -28,10 +28,17 @@ def test_scanner_run_parallel_handles_errors(monkeypatch, caplog):
         }
 
     monkeypatch.setattr(routes, "compute_scan_for_ticker", fake_scan)
+    monkeypatch.setattr(
+        routes.price_store,
+        "bulk_coverage",
+        lambda symbols, interval, s, e: {sym: (s, e, 10**6) for sym in symbols},
+    )
+    monkeypatch.setattr(routes.price_store, "covers", lambda a, b, c, d: True)
 
     with caplog.at_level(logging.ERROR):
-        rows, skipped = routes._perform_scan(tickers, {}, "")
+        rows, skipped, metrics = routes._perform_scan(tickers, {}, "")
 
     assert {r["ticker"] for r in rows} == {"AAA", "CCC"}
     assert skipped == 0
+    assert metrics["symbols_no_gap"] == 3
     assert any("BAD" in rec.message for rec in caplog.records)

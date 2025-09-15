@@ -166,7 +166,7 @@ def test_progress_polling_does_not_hit_yahoo(monkeypatch):
     # Replace _perform_scan to issue a single Yahoo request and then return.
     def fake_perform_scan(tickers, params, sort_key, progress_cb=None):
         asyncio.run(http_client.get_json("http://test/once"))
-        return [], 0
+        return [], 0, {"symbols_no_gap": len(tickers), "symbols_gap": 0}
 
     monkeypatch.setattr(routes, "_perform_scan", fake_perform_scan)
     monkeypatch.setattr(routes, "SP100", ["AAA"])  # small universe

@@ -219,6 +219,7 @@ SCHEMA = [
     );
     """,
     "CREATE INDEX IF NOT EXISTS idx_bars_sym_int_ts ON bars(symbol, interval, ts);",
+    "CREATE INDEX IF NOT EXISTS bars_symbol_ts ON bars(symbol, ts);",
     # Scan tasks for cross-worker communication
     """
     CREATE TABLE IF NOT EXISTS scan_tasks (

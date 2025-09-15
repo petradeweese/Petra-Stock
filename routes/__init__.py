@@ -3,11 +3,13 @@ import atexit
 import json
 import logging
 import os
+import asyncio
 import smtplib
 import sqlite3
 import ssl
+import statistics
 import time
-from datetime import timedelta
+from datetime import timedelta, datetime
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from email.message import EmailMessage
 from threading import Thread
@@ -24,8 +26,14 @@ from config import settings
 from db import DB_PATH, get_db, get_schema_status, get_settings, _ensure_scanner_column
 from indices import SP100, TOP150, TOP250
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
-from scanner import compute_scan_for_ticker, preload_prices
-from services.market_data import get_prices, window_from_lookback
+from scanner import compute_scan_for_ticker
+from services import price_store
+from services.market_data import (
+    expected_bar_count,
+    fetch_prices,
+    window_from_lookback,
+    get_prices,
+)
 from utils import TZ, now_et
 
 from .archive import _format_rule_summary
@@ -91,6 +99,18 @@ router.include_router(archive_router)
 
 scan_duration = Histogram("scan_duration_seconds", "Duration of /scanner/run requests")
 scan_tickers = Counter("scan_tickers_total", "Tickers processed by /scanner/run")
+coverage_symbols_total = Counter(
+    "coverage_symbols_total", "Symbols processed during coverage checks"
+)
+coverage_symbols_no_gap = Counter(
+    "coverage_symbols_no_gap", "Symbols with full local coverage"
+)
+coverage_symbols_gap_fetched = Counter(
+    "coverage_symbols_gap_fetched", "Symbols fetched due to coverage gaps"
+)
+coverage_elapsed_seconds = Histogram(
+    "coverage_elapsed_seconds", "Time spent performing bulk coverage checks"
+)
 
 
 def healthz() -> dict:
@@ -235,7 +255,7 @@ def _task_update(task_id: str, **fields: Any) -> None:
     last = _TASK_WRITE_TS.get(task_id, 0.0)
     need_persist = False
     items = settings.scan_progress_flush_items
-    interval = settings.scan_progress_flush_ms / 1000.0
+    interval = settings.scan_status_flush_ms / 1000.0
     if task is not None:
         done = task.get("done")
         if isinstance(done, int) and items > 0 and done % items == 0:
@@ -360,26 +380,77 @@ def _perform_scan(
     sort_key: str,
     progress_cb: Optional[Callable[[int, int, str], None]] = None,
     progress_every: int = 5,
-) -> list[dict]:
+) -> tuple[list[dict], int, dict]:
     start = time.perf_counter()
     total = len(tickers)
-    preload_prices(
-        tickers, params.get("interval", "15m"), params.get("lookback_years", 2.0)
+    interval = params.get("interval", "15m")
+    lookback = float(params.get("lookback_years", 2.0))
+    window_start, window_end = window_from_lookback(lookback)
+
+    cov_start = time.perf_counter()
+    cov: dict[str, tuple[datetime, datetime, int]] = {}
+    batch = max(1, settings.scan_coverage_batch_size)
+    for i in range(0, len(tickers), batch):
+        chunk = tickers[i : i + batch]
+        cov.update(price_store.bulk_coverage(chunk, interval, window_start, window_end))
+    expected = expected_bar_count(window_start, window_end, interval)
+    no_gap: list[str] = []
+    need_fetch: list[str] = []
+    for sym in tickers:
+        cmin, cmax, cnt = cov.get(sym, (None, None, 0))
+        if cnt >= expected and price_store.covers(window_start, window_end, cmin, cmax):
+            no_gap.append(sym)
+        else:
+            need_fetch.append(sym)
+    cov_elapsed = (time.perf_counter() - cov_start) * 1000.0
+    coverage_symbols_total.inc(total)
+    coverage_symbols_no_gap.inc(len(no_gap))
+    coverage_symbols_gap_fetched.inc(len(need_fetch))
+    coverage_elapsed_seconds.observe(cov_elapsed / 1000.0)
+    logger.info(
+        "coverage_mode=batch symbols=%d rows=%d elapsed_ms=%.0f",
+        total,
+        len(cov),
+        cov_elapsed,
     )
+
+    fetch_elapsed = 0.0
+    if need_fetch:
+        async def _fetch_all(symbols: list[str]) -> None:
+            sem = asyncio.Semaphore(settings.scan_fetch_concurrency)
+
+            async def _worker(sym: str) -> None:
+                async with sem:
+                    logger.debug("fetch_gap symbol=%s", sym)
+                    await asyncio.to_thread(fetch_prices, [sym], interval, lookback)
+
+            await asyncio.gather(*(_worker(s) for s in symbols))
+
+        fetch_start = time.perf_counter()
+        asyncio.run(_fetch_all(need_fetch))
+        fetch_elapsed = (time.perf_counter() - fetch_start) * 1000.0
+
     if progress_cb:
         progress_cb(0, total, "preloading")
+
     rows: list[dict] = []
     skipped_missing_data = 0
     ex = _get_scan_executor()
-    future_to_ticker = {
-        ex.submit(compute_scan_for_ticker, t, params): t for t in tickers
-    }
+
+    def _scan_single(t: str) -> tuple[dict | None, float]:
+        t0 = time.perf_counter()
+        res = compute_scan_for_ticker(t, params)
+        return res, time.perf_counter() - t0
+
+    future_to_ticker = {ex.submit(_scan_single, t): t for t in tickers}
     step = max(1, int(progress_every))
     done = 0
+    times: list[float] = []
     for fut in as_completed(future_to_ticker):
         ticker = future_to_ticker[fut]
         try:
-            r = fut.result()
+            r, elapsed = fut.result()
+            times.append(elapsed)
             if r is None:
                 skipped_missing_data += 1
             elif r:
@@ -437,23 +508,33 @@ def _perform_scan(
     duration = time.perf_counter() - start
     scan_duration.observe(duration)
     scan_tickers.inc(len(tickers))
-    if duration > 0:
-        logger.info(
-            "scan completed: %d tickers in %.2fs (%.2f tickers/sec) skipped_missing_data=%d",
-            len(tickers),
-            duration,
-            len(tickers) / duration,
-            skipped_missing_data,
-        )
-    else:
-        logger.info(
-            "scan completed: %d tickers in %.2fs skipped_missing_data=%d",
-            len(tickers),
-            duration,
-            skipped_missing_data,
-        )
+    avg_ms = (statistics.mean(times) * 1000.0) if times else 0.0
+    p95_ms = (
+        sorted(times)[max(int(len(times) * 0.95) - 1, 0)] * 1000.0 if times else 0.0
+    )
+    metrics = {
+        "coverage_ms": cov_elapsed,
+        "fetch_ms": fetch_elapsed,
+        "symbols_no_gap": len(no_gap),
+        "symbols_gap": len(need_fetch),
+        "avg_per_symbol_ms": avg_ms,
+        "p95_per_symbol_ms": p95_ms,
+        "db_reads": 1,
+        "db_writes": 0,
+    }
+    logger.info(
+        "scan completed total=%d no_gap=%d gaps=%d avg_ms=%.1f p95_ms=%.1f db_reads=%d db_writes=%d skipped_missing_data=%d",
+        len(tickers),
+        len(no_gap),
+        len(need_fetch),
+        avg_ms,
+        p95_ms,
+        metrics["db_reads"],
+        metrics["db_writes"],
+        skipped_missing_data,
+    )
 
-    return rows, skipped_missing_data
+    return rows, skipped_missing_data, metrics
 
 
 def _sort_rows(rows, sort_key):
@@ -1066,13 +1147,16 @@ async def scanner_run(request: Request):
         http_client.set_wait_callback(wait_cb)
 
         try:
-            rows, skipped = _perform_scan(tickers, params, sort_key, progress_cb=prog)
+            rows, skipped, metrics = _perform_scan(
+                tickers, params, sort_key, progress_cb=prog
+            )
             duration = time.time() - start_ts
             ctx = {
                 "rows": rows,
                 "ran_at": now_et().strftime("%I:%M:%S %p").lstrip("0"),
                 "note": f"{scan_type} • {params.get('interval')} • {params.get('direction')} • window {params.get('window_value')} {params.get('window_unit')}",
                 "skipped_missing_data": skipped,
+                "metrics": metrics,
                 "summary": {
                     "successes": len(rows),
                     "empties": skipped,
@@ -1085,12 +1169,15 @@ async def scanner_run(request: Request):
                 task_id, state="succeeded", percent=100.0, done=len(tickers), ctx=ctx
             )
             logger.info(
-                "task_done id=%s duration=%.2fs successes=%d empties=%d errors=%d",
+                "task_done id=%s duration=%.2fs successes=%d empties=%d errors=%d no_gap=%d avg_ms=%.1f p95_ms=%.1f",
                 task_id,
                 duration,
                 len(rows),
                 skipped,
                 0,
+                metrics.get("symbols_no_gap", 0),
+                metrics.get("avg_per_symbol_ms", 0.0),
+                metrics.get("p95_per_symbol_ms", 0.0),
             )
         except Exception as e:
             logger.error("task_error id=%s error=%s", task_id, e)
