@@ -13,7 +13,7 @@ from concurrent.futures import as_completed
 from datetime import datetime, timedelta
 from email.message import EmailMessage
 from threading import Thread
-from typing import Any, Callable, Dict, Optional, Union
+from typing import Any, Callable, Dict, Optional
 from uuid import uuid4
 
 import certifi
@@ -34,7 +34,7 @@ from db import (
 from indices import SP100, TOP150, TOP250
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 from scanner import compute_scan_for_ticker
-from services import price_store, executor, favorites_alerts
+from services import executor, favorites_alerts, price_store
 from services.market_data import (
     expected_bar_count,
     fetch_prices,
@@ -50,6 +50,8 @@ router = APIRouter()
 templates = Jinja2Templates(directory="templates")
 logger = logging.getLogger(__name__)
 SCAN_BATCH_WRITES = os.getenv("SCAN_BATCH_WRITES", "1") not in {"0", "false", "no"}
+
+_perf_counter = time.perf_counter
 
 
 def _get_next_earnings(ticker: str):  # pragma: no cover - external service
@@ -256,7 +258,9 @@ def _task_update_db(task_id: str, fields: dict[str, Any]) -> None:
             else:
                 vals.append(v)
         vals.append(task_id)
-        _execute_write(conn, f"UPDATE scan_tasks SET {', '.join(cols)} WHERE id=?", tuple(vals))
+        _execute_write(
+            conn, f"UPDATE scan_tasks SET {', '.join(cols)} WHERE id=?", tuple(vals)
+        )
         conn.commit()
     finally:
         conn.close()
@@ -359,9 +363,23 @@ atexit.register(_task_flush_all)
 
 
 def _scan_single(t: str, params: dict) -> tuple[dict | None, float]:
-    t0 = time.perf_counter()
+    t0 = _perf_counter()
     res = compute_scan_for_ticker(t, params)
-    return res, time.perf_counter() - t0
+    return res, _perf_counter() - t0
+
+
+def _scan_chunk(ts: list[str], params: dict) -> list[tuple[str, dict | None, float]]:
+    pc = _perf_counter
+    out: list[tuple[str, dict | None, float]] = []
+    for t in ts:
+        t0 = pc()
+        try:
+            res = compute_scan_for_ticker(t, params)
+        except Exception as e:
+            logger.error("scan failed for %s: %s", t, e)
+            res = {}
+        out.append((t, res, pc() - t0))
+    return out
 
 
 def _perform_scan(
@@ -371,13 +389,13 @@ def _perform_scan(
     progress_cb: Optional[Callable[[int, int, str], None]] = None,
     progress_every: int = 5,
 ) -> tuple[list[dict], int, dict]:
-    start = time.perf_counter()
+    start = _perf_counter()
     total = len(tickers)
     interval = params.get("interval", "15m")
     lookback = float(params.get("lookback_years", 2.0))
     window_start, window_end = window_from_lookback(lookback)
 
-    cov_start = time.perf_counter()
+    cov_start = _perf_counter()
     cov: dict[str, tuple[datetime, datetime, int]] = {}
     batch = max(1, settings.scan_coverage_batch_size)
     for i in range(0, len(tickers), batch):
@@ -392,7 +410,7 @@ def _perform_scan(
             no_gap.append(sym)
         else:
             need_fetch.append(sym)
-    cov_elapsed = (time.perf_counter() - cov_start) * 1000.0
+    cov_elapsed = (_perf_counter() - cov_start) * 1000.0
     coverage_symbols_total.inc(total)
     coverage_symbols_no_gap.inc(len(no_gap))
     coverage_symbols_gap_fetched.inc(len(need_fetch))
@@ -417,9 +435,9 @@ def _perform_scan(
 
             await asyncio.gather(*(_worker(s) for s in symbols))
 
-        fetch_start = time.perf_counter()
+        fetch_start = _perf_counter()
         asyncio.run(_fetch_all(need_fetch))
-        fetch_elapsed = (time.perf_counter() - fetch_start) * 1000.0
+        fetch_elapsed = (_perf_counter() - fetch_start) * 1000.0
 
     if progress_cb:
         progress_cb(0, total, "preloading")
@@ -427,16 +445,27 @@ def _perform_scan(
     rows: list[dict] = []
     skipped_missing_data = 0
     ex = executor.EXECUTOR
-
-    future_to_ticker = {ex.submit(_scan_single, t, params): t for t in tickers}
+    chunk_size = max(1, settings.scan_symbols_per_task)
+    futures = [
+        ex.submit(_scan_chunk, tickers[i : i + chunk_size], params)
+        for i in range(0, len(tickers), chunk_size)
+    ]
+    logger.info(
+        "scan dispatch mode=%s workers=%d symbols_per_task=%d tasks=%d",
+        executor.MODE,
+        executor.WORKERS,
+        chunk_size,
+        len(futures),
+    )
     step = max(1, int(progress_every))
     times: list[float] = []
     buffer: list[dict] = []
     seen: set[str] = set()
-    for i, fut in enumerate(as_completed(future_to_ticker), 1):
-        ticker = future_to_ticker[fut]
-        try:
-            r, elapsed = fut.result()
+    processed = 0
+    for fut in as_completed(futures):
+        results = fut.result()
+        for ticker, r, elapsed in results:
+            processed += 1
             times.append(elapsed)
             if r is None:
                 skipped_missing_data += 1
@@ -449,25 +478,23 @@ def _perform_scan(
                         buffer.clear()
                 else:
                     rows.append(r)
-        except Exception as e:
-            logger.error("scan failed for %s: %s", ticker, e)
-        if progress_cb and (i % step == 0 or i == total):
-            progress_cb(i, total, f"Scanning {i}/{total}")
-        if i % 10 == 0:
-            el = time.perf_counter() - start
-            logger.info(
-                "scan progress %d/%d elapsed=%.1fs avg_per_task=%.2fs",
-                i,
-                total,
-                el,
-                el / i,
-            )
+            if progress_cb and (processed % step == 0 or processed == total):
+                progress_cb(processed, total, f"Scanning {processed}/{total}")
+            if processed % 10 == 0:
+                el = _perf_counter() - start
+                logger.info(
+                    "scan progress %d/%d elapsed=%.1fs avg_per_task=%.2fs",
+                    processed,
+                    total,
+                    el,
+                    el / processed,
+                )
     if buffer:
         rows.extend(buffer)
     logger.info(
         "scan complete %d symbols in %.1fs",
-        len(future_to_ticker),
-        time.perf_counter() - start,
+        total,
+        _perf_counter() - start,
     )
 
     try:
@@ -514,7 +541,7 @@ def _perform_scan(
             reverse=True,
         )
 
-    duration = time.perf_counter() - start
+    duration = _perf_counter() - start
     scan_duration.observe(duration)
     scan_tickers.inc(len(tickers))
     avg_ms = (statistics.mean(times) * 1000.0) if times else 0.0
@@ -679,16 +706,12 @@ def send_weekly_digest(db: sqlite3.Cursor) -> None:
 
 @router.get("/", response_class=HTMLResponse)
 def home(request: Request):
-    return templates.TemplateResponse(
-        request, "index.html", {"active_tab": "scanner"}
-    )
+    return templates.TemplateResponse(request, "index.html", {"active_tab": "scanner"})
 
 
 @router.get("/scanner", response_class=HTMLResponse)
 def scanner_page(request: Request):
-    return templates.TemplateResponse(
-        request, "index.html", {"active_tab": "scanner"}
-    )
+    return templates.TemplateResponse(request, "index.html", {"active_tab": "scanner"})
 
 
 @router.get("/favorites", response_class=HTMLResponse)
@@ -1051,7 +1074,11 @@ def favorites_test_alert(payload: dict = Body(...)):
     ticker = (payload.get("ticker") or "").upper()
     direction = (payload.get("direction") or "UP").upper()
     ok = favorites_alerts.enrich_and_send_test(ticker, direction)
-    resp = {"status": "sent" if ok else "fallback_sent", "ticker": ticker, "direction": direction}
+    resp = {
+        "status": "sent" if ok else "fallback_sent",
+        "ticker": ticker,
+        "direction": direction,
+    }
     if not ok:
         resp["note"] = "data unavailable"
     return resp
@@ -1067,9 +1094,7 @@ def settings_page(request: Request, db=Depends(get_db)):
 
 @router.get("/info", response_class=HTMLResponse)
 def info_page(request: Request):
-    return templates.TemplateResponse(
-        request, "info.html", {"active_tab": "info"}
-    )
+    return templates.TemplateResponse(request, "info.html", {"active_tab": "info"})
 
 
 @router.post("/settings/save")

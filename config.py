@@ -28,6 +28,7 @@ class Settings:
     scan_status_flush_ms: int = int(os.getenv("SCAN_STATUS_FLUSH_MS", "500"))
     scan_fetch_concurrency: int = int(os.getenv("SCAN_FETCH_CONCURRENCY", "8"))
     scan_coverage_batch_size: int = int(os.getenv("SCAN_COVERAGE_BATCH_SIZE", "200"))
+    scan_symbols_per_task: int = int(os.getenv("SCAN_SYMBOLS_PER_TASK", "1"))
 
 
 settings = Settings()
