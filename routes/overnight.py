@@ -10,7 +10,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.templating import Jinja2Templates
 
 from db import get_db, row_to_dict
-from services.overnight import get_runner_state
+from services.overnight import get_runner_state, resolve_overnight_symbols
 from services.scanner_params import coerce_scan_params
 
 # ruff: noqa: E501
@@ -42,6 +42,19 @@ def _renumber(db, batch_id: str) -> None:
 
 MAX_ITEMS = 50
 MAX_PAYLOAD = 2000
+
+
+@router.post("/validate")
+def validate_item(payload: dict = Body(...), db=Depends(get_db)):
+    item = coerce_scan_params(payload)
+    resolution = resolve_overnight_symbols(item, db)
+    return {
+        "symbols_total": resolution.symbols_total,
+        "message": resolution.message,
+        "detail": resolution.detail,
+        "universe": resolution.universe,
+        "ticker": resolution.ticker,
+    }
 
 
 @router.post("/batches")
@@ -305,6 +318,30 @@ def start_now(batch_id: str, db=Depends(get_db)):
         return {"status": "already_queued"}
     if row[2] in FINISHED_STATUSES:
         return JSONResponse({"error": "batch_finished"}, status_code=409)
+    first_item = db.execute(
+        """
+        SELECT id, payload_json
+        FROM overnight_items
+        WHERE batch_id=? AND status='queued'
+        ORDER BY position
+        LIMIT 1
+        """,
+        (batch_id,),
+    ).fetchone()
+    if first_item:
+        payload = json.loads(first_item[1])
+        resolution = resolve_overnight_symbols(payload, db)
+        if resolution.symbols_total == 0:
+            message = resolution.detail or resolution.message or "Universe resolves to 0 symbols"
+            return JSONResponse(
+                {
+                    "error": "invalid_universe",
+                    "message": message,
+                    "symbols_total": resolution.symbols_total,
+                    "item_id": first_item[0],
+                },
+                status_code=400,
+            )
     db.execute(
         "UPDATE overnight_batches SET start_override=1 WHERE id=?",
         (batch_id,),

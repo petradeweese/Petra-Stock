@@ -15,6 +15,18 @@
   const FINISHED_STATUSES = new Set(['complete', 'canceled', 'failed']);
   const REMOVAL_CONFIRM = 'Remove finished batch? CSV links may no longer be shown on this page, but data already exported remains.';
 
+  function setError(row, message){
+    const el = row?.querySelector?.('.ov-error');
+    if(!el) return;
+    if(message){
+      el.textContent = message;
+      el.style.display = 'block';
+    }else{
+      el.textContent = '';
+      el.style.display = 'none';
+    }
+  }
+
   function renumber(){
     [...queue.children].forEach((row, idx)=>{
       const cell = row.querySelector('.pos');
@@ -25,28 +37,84 @@
   function addRow(values={}){
     const node = tmpl.content.firstElementChild.cloneNode(true);
     const form = node.querySelector('form');
+    const scanSelect = form?.elements?.scan_type;
+    if(scanSelect) scanSelect.value = 'scan150';
     Object.entries(values).forEach(([k,v])=>{
       const el = form.elements[k];
       if(el) el.value = v;
     });
     const emailDiv = form.querySelector('select[name="email_checkbox"]')?.closest('div');
     if(emailDiv) emailDiv.style.display = 'none';
+    const errEl = node.querySelector('.ov-error');
+    if(errEl){
+      errEl.style.display = 'none';
+      errEl.style.color = '#c00';
+      errEl.style.marginTop = '0.5rem';
+      errEl.style.fontWeight = '600';
+    }
     node.querySelector('.rm').addEventListener('click', ()=>{ node.remove(); renumber(); });
     queue.appendChild(node);
+    setError(node, '');
     renumber();
   }
 
   addBtn?.addEventListener('click', ()=>addRow());
 
-  saveBtn?.addEventListener('click', async ()=>{
-    const items = [...queue.querySelectorAll('form')].map(f=>{
+  async function validateForms(forms){
+    if(!forms.length) return true;
+    const results = await Promise.all(forms.map(async form=>{
+      const fd = new FormData(form);
+      const payload = Object.fromEntries(fd.entries());
+      try{
+        const resp = await fetch('/overnight/validate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+        let data = {};
+        try{ data = await resp.json(); }catch(err){ data = {}; }
+        const total = Number(data.symbols_total || 0);
+        const ok = resp.ok && total > 0;
+        const message = ok ? '' : (data.message || data.detail || 'Universe resolves to 0 symbols');
+        return {form, ok, message};
+      }catch(err){
+        return {form, ok:false, message:'Validation failed'};
+      }
+    }));
+    let allOk = true;
+    results.forEach(({form, ok, message})=>{
+      const row = form.closest('.ov-row');
+      if(row) setError(row, ok ? '' : message);
+      if(!ok) allOk = false;
+    });
+    return allOk;
+  }
+
+  async function submitForms(forms){
+    const items = forms.map(f=>{
       const fd = new FormData(f);
       return Object.fromEntries(fd.entries());
     });
-    await fetch('/overnight/batches', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({items})});
+    let resp;
+    try{
+      resp = await fetch('/overnight/batches',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({items})});
+    }catch(err){
+      alert('Failed to save batch.');
+      return null;
+    }
+    let data = {};
+    try{ data = await resp.json(); }catch(err){ data = {}; }
+    if(!resp.ok){
+      alert(data.message || data.error || 'Failed to save batch.');
+      return null;
+    }
     queue.innerHTML='';
     renumber();
-    loadBatches();
+    await loadBatches();
+    return data;
+  }
+
+  saveBtn?.addEventListener('click', async ()=>{
+    const forms = [...queue.querySelectorAll('form')];
+    if(!forms.length) return;
+    if(!(await validateForms(forms))) return;
+    await submitForms(forms);
   });
 
   function renderBatch(b){
@@ -91,7 +159,13 @@
         if(!confirm('Another batch is running. Queue after current?')) return;
       }
       const resp = await fetch(`/overnight/batches/${id}/start_now`,{method:'POST'});
-      const data = await resp.json();
+      let data = {};
+      try{ data = await resp.json(); }catch(err){ data = {}; }
+      if(!resp.ok){
+        alert(data.message || data.error || 'Failed to start batch.');
+        await loadBatches();
+        return;
+      }
       if(data.status==='queued_after_current') alert('Queued after current batch');
       loadBatches();
     }else if(e.target.classList.contains('pause')){
@@ -118,9 +192,36 @@
     }
   });
 
-  startBtn?.addEventListener('click', ()=>{
+  startBtn?.addEventListener('click', async ()=>{
+    const forms = [...queue.querySelectorAll('form')];
+    if(forms.length){
+      if(!(await validateForms(forms))) return;
+      const data = await submitForms(forms);
+      if(data?.batch_id){
+        const resp = await fetch(`/overnight/batches/${data.batch_id}/start_now`,{method:'POST'});
+        let startData = {};
+        try{ startData = await resp.json(); }catch(err){ startData = {}; }
+        if(!resp.ok){
+          alert(startData.message || startData.error || 'Failed to start batch.');
+        }else if(startData.status==='queued_after_current'){
+          alert('Queued after current batch');
+        }
+        await loadBatches();
+      }
+      return;
+    }
     const first = batchesDiv.querySelector('.batch');
-    if(first) fetch(`/overnight/batches/${first.dataset.id}/start_now`,{method:'POST'}).then(loadBatches);
+    if(!first) return;
+    const resp = await fetch(`/overnight/batches/${first.dataset.id}/start_now`,{method:'POST'});
+    let data = {};
+    try{ data = await resp.json(); }catch(err){ data = {}; }
+    if(!resp.ok){
+      alert(data.message || data.error || 'Failed to start batch.');
+      await loadBatches();
+      return;
+    }
+    if(data.status==='queued_after_current') alert('Queued after current batch');
+    loadBatches();
   });
 
   showFinished?.addEventListener('change', ()=>{

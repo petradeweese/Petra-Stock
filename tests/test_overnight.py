@@ -109,6 +109,29 @@ def test_overnight_save_and_reload(tmp_path):
     assert payload == coerce_scan_params(form)
 
 
+def test_validate_endpoint_blocks_empty_favorites(tmp_path):
+    app = _setup_app(tmp_path)
+    client = TestClient(app)
+    resp = client.post("/overnight/validate", json={"scan_type": "favorites"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["symbols_total"] == 0
+    assert data["message"] == "Universe resolves to 0 symbols"
+    assert "favorites" in data.get("detail", "")
+
+
+def test_start_now_blocks_invalid_universe(tmp_path):
+    app = _setup_app(tmp_path)
+    client = TestClient(app)
+    res = client.post("/overnight/batches", json={"items": [{"scan_type": "favorites"}]})
+    batch_id = res.json()["batch_id"]
+    resp = client.post(f"/overnight/batches/{batch_id}/start_now")
+    assert resp.status_code == 400
+    data = resp.json()
+    assert data["error"] == "invalid_universe"
+    assert "favorites" in data.get("message", "")
+
+
 def _setup_app(tmp_path):
     db.DB_PATH = str(tmp_path / "test.db")
     db.init_db()
@@ -128,6 +151,33 @@ def test_overnight_page_has_full_form(tmp_path):
     assert "Delta (assumed)" in text
     assert "Show finished" in text
     assert "Clear finished" in text
+
+
+def test_runner_skips_zero_symbols(tmp_path):
+    app = _setup_app(tmp_path)
+    client = TestClient(app)
+    res = client.post("/overnight/batches", json={"items": [{"scan_type": "favorites"}]})
+    batch_id = res.json()["batch_id"]
+    calls: list[dict] = []
+
+    def _scan(payload: dict, silent: bool):
+        calls.append(payload)
+        return 1
+
+    runner = OvernightRunner(_scan)
+    runner.run_batch(batch_id)
+
+    gen = get_db()
+    db_conn = next(gen)
+    status, error = db_conn.execute(
+        "SELECT status, error FROM overnight_items WHERE batch_id=?",
+        (batch_id,),
+    ).fetchone()
+    gen.close()
+
+    assert status == "failed"
+    assert error and "favorites" in error
+    assert calls == []
 
 
 def test_overnight_add_remove_renumber(tmp_path):

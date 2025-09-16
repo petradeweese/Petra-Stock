@@ -1,17 +1,148 @@
 import json
 import logging
 import time
+from dataclasses import dataclass
 from datetime import datetime, time as dt_time, timedelta, timezone
 from threading import Thread
-from typing import Callable, Optional
+from typing import Callable, Optional, Sequence
 
 from db import get_db
+from indices import SP100, TOP150, TOP250
 from utils import TZ, last_trading_close, market_is_open
 
 logger = logging.getLogger(__name__)
 
 
 PREMARKET_OPEN = dt_time(4, 0)
+
+
+@dataclass
+class UniverseResolution:
+    symbols: list[str]
+    universe: str
+    ticker: str
+    symbols_total: int
+    message: str = ""
+    detail: str = ""
+
+
+_UNIVERSE_ALIASES = {
+    "scan150": "scan150",
+    "top150": "scan150",
+    "options150": "scan150",
+    "scan250": "scan250",
+    "top250": "scan250",
+    "options250": "scan250",
+    "sp100": "sp100",
+    "sp_100": "sp100",
+    "sp100_scan": "sp100",
+    "single": "single",
+    "single_ticker": "single",
+    "favorites": "favorites",
+    "favorites_scan": "favorites",
+    "favorites_universe": "favorites",
+    "favorites_alerts": "favorites",
+}
+
+
+def _normalize_symbols(raw: object) -> list[str]:
+    seen: set[str] = set()
+    symbols: list[str] = []
+
+    def _add(val: object) -> None:
+        sym = str(val or "").strip().upper()
+        if sym and sym not in seen:
+            seen.add(sym)
+            symbols.append(sym)
+
+    if isinstance(raw, str):
+        cleaned = raw.replace("\n", ",")
+        for part in cleaned.split(","):
+            _add(part)
+        return symbols
+    if isinstance(raw, Sequence) and not isinstance(raw, (bytes, bytearray)):
+        for part in raw:
+            _add(part)
+        return symbols
+    if raw is not None:
+        _add(raw)
+    return symbols
+
+
+def _load_favorites(db=None) -> list[str]:
+    close_gen = False
+    gen = None
+    if db is None:
+        gen = get_db()
+        db = next(gen)
+        close_gen = True
+    try:
+        rows = db.execute("SELECT ticker FROM favorites ORDER BY id").fetchall()
+        raw = []
+        for row in rows:
+            if hasattr(row, "keys"):
+                raw.append(row["ticker"])
+            else:
+                raw.append(row[0])
+        return _normalize_symbols(raw)
+    finally:
+        if close_gen and gen is not None:
+            gen.close()
+
+
+def resolve_overnight_symbols(payload: dict, db=None) -> UniverseResolution:
+    params: dict = {}
+    settings = payload.get("settings")
+    if isinstance(settings, dict):
+        params.update(settings)
+    params.update(payload)
+
+    scan_type_raw = str(params.get("scan_type") or "").strip()
+    scan_type = scan_type_raw.lower()
+    canonical = _UNIVERSE_ALIASES.get(scan_type, scan_type)
+    ticker = str(params.get("ticker") or "").strip().upper()
+
+    raw_universe = params.get("universe")
+    symbols: list[str] = []
+
+    if isinstance(raw_universe, str) and raw_universe.strip().lower() in {"favorites"}:
+        canonical = "favorites"
+        symbols = _load_favorites(db)
+    elif raw_universe not in (None, "", []):
+        symbols = _normalize_symbols(raw_universe)
+        if not canonical:
+            canonical = "custom"
+    elif canonical == "single":
+        symbols = _normalize_symbols([ticker] if ticker else [])
+    elif canonical == "favorites":
+        symbols = _load_favorites(db)
+    elif canonical == "sp100":
+        symbols = _normalize_symbols(SP100)
+    elif canonical == "scan250":
+        symbols = _normalize_symbols(TOP250)
+    else:
+        canonical = canonical or "scan150"
+        symbols = _normalize_symbols(TOP150)
+
+    symbols_total = len(symbols)
+    message = ""
+    detail = ""
+    if symbols_total == 0:
+        label = canonical or (scan_type or "custom")
+        if label == "single" and ticker:
+            detail = f"Ticker {ticker} resolved to 0 symbols"
+        else:
+            detail = f"Universe {label} resolved to 0 symbols"
+        message = "Universe resolves to 0 symbols"
+
+    return UniverseResolution(
+        symbols=symbols,
+        universe=canonical or (scan_type_raw or "scan150"),
+        ticker=ticker,
+        symbols_total=symbols_total,
+        message=message,
+        detail=detail,
+    )
 
 
 class OvernightScanError(Exception):
@@ -230,8 +361,42 @@ class OvernightRunner:
 
                 item_id, payload_json, created_at = row
                 payload = json.loads(payload_json)
+                resolution = resolve_overnight_symbols(payload, db)
+                log_context = {
+                    "universe": resolution.universe,
+                    "ticker": resolution.ticker,
+                    "symbols_total": resolution.symbols_total,
+                }
                 now = datetime.utcnow()
                 queue_wait = int((now - datetime.fromisoformat(created_at)).total_seconds() * 1000)
+                if resolution.symbols_total == 0:
+                    err_msg = resolution.detail or resolution.message or "Universe resolves to 0 symbols"
+                    db.execute(
+                        """
+                        UPDATE overnight_items
+                        SET status='failed', finished_at=?, error=?
+                        WHERE id=?
+                        """,
+                        (now.isoformat(), err_msg, item_id),
+                    )
+                    db.connection.commit()
+                    pos = db.execute(
+                        "SELECT position FROM overnight_items WHERE id=?",
+                        (item_id,),
+                    ).fetchone()[0]
+                    log_payload = {
+                        "type": "overnight_item",
+                        "batch_id": batch_id,
+                        "item_id": item_id,
+                        "position": pos,
+                        "status": "failed",
+                        "error": err_msg,
+                        "timings_ms": {"scan": 0, "queue_wait": queue_wait},
+                    }
+                    log_payload.update(log_context)
+                    logger.error(json.dumps(log_payload))
+                    continue
+
                 db.execute(
                     "UPDATE overnight_items SET status='running', started_at=? WHERE id=?",
                     (now.isoformat(), item_id),
@@ -270,6 +435,7 @@ class OvernightRunner:
                         "error": err_msg,
                         "timings_ms": {"scan": elapsed, "queue_wait": queue_wait},
                     }
+                    log_payload.update(log_context)
                     if scan_meta:
                         meta_log = {k: v for k, v in scan_meta.items() if k != "run_id"}
                         if meta_log:
@@ -301,7 +467,15 @@ class OvernightRunner:
                         "error": err_msg,
                         "timings_ms": {"scan": elapsed, "queue_wait": queue_wait},
                     }
-                    logger.exception("overnight scan unexpected error batch=%s item=%s", batch_id, item_id)
+                    log_payload.update(log_context)
+                    logger.exception(
+                        "overnight scan unexpected error batch=%s item=%s universe=%s symbols=%d ticker=%s",
+                        batch_id,
+                        item_id,
+                        log_context.get("universe"),
+                        log_context.get("symbols_total"),
+                        log_context.get("ticker"),
+                    )
                     logger.error(json.dumps(log_payload))
                     continue
 
@@ -336,6 +510,7 @@ class OvernightRunner:
                         "error": err_msg,
                         "timings_ms": {"scan": elapsed, "queue_wait": queue_wait},
                     }
+                    log_payload.update(log_context)
                     if scan_meta:
                         meta_log = {k: v for k, v in scan_meta.items() if k != "run_id"}
                         if meta_log:
@@ -367,6 +542,7 @@ class OvernightRunner:
                     "silent": True,
                     "timings_ms": {"scan": elapsed, "queue_wait": queue_wait},
                 }
+                log_payload.update(log_context)
                 if scan_meta:
                     meta_log = {k: v for k, v in scan_meta.items() if k != "run_id"}
                     if meta_log:
