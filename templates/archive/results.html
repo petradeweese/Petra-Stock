@@ -1,15 +1,23 @@
 {% extends 'base.html' %}
 {% block title %}Pattern Finder — Results{% endblock %}
 {% block content %}
-  {% if settings_items %}
+  {% if settings_items or settings_json_pretty %}
   <div class="card" style="margin-bottom:1rem;">
     <div class="card-body">
-      <strong>Settings</strong>
-      <div class="grid" style="margin-top:.5rem;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));font-size:.85rem;">
+      <strong>Exact Settings</strong>
+      {% if settings_items %}
+      <div class="grid" style="margin-top:.5rem;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));font-size:.85rem;gap:.75rem;">
         {% for key, val in settings_items %}
-        <div><span class="muted">{{ key }}</span><br>{{ val }}</div>
+        <div>
+          <div class="muted" style="font-size:.75rem;"><code>{{ key }}</code></div>
+          <div><code>{{ val | tojson }}</code></div>
+        </div>
         {% endfor %}
       </div>
+      {% endif %}
+      {% if settings_json_pretty %}
+      <pre style="margin-top:.75rem;font-size:.8rem;white-space:pre-wrap;background:#0e1117;border:1px solid #1f2937;border-radius:4px;padding:.75rem;">{{ settings_json_pretty }}</pre>
+      {% endif %}
     </div>
   </div>
   {% endif %}

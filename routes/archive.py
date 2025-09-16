@@ -257,26 +257,53 @@ def results_from_archive(request: Request, run_id: int, db=Depends(get_db)):
     rule_summary = ""
     ran_at = ""
     meta: Dict[str, Any] = {}
-    try:
-        params = json.loads(run.get("params_json") or "{}")
+    settings_items: List[Tuple[str, Any]] = []
+    settings_json_pretty: str | None = None
+
+    settings_dict: Dict[str, Any] | None = None
+    raw_settings_text: str | None = None
+    fallback_parsed: Any = None
+    for source in (run.get("params_json"), run.get("settings_json")):
+        if not source:
+            continue
+        if isinstance(source, str):
+            raw_settings_text = raw_settings_text or source
+            try:
+                parsed = json.loads(source)
+            except Exception:
+                continue
+        elif isinstance(source, dict):
+            parsed = source
+        else:
+            continue
+        if isinstance(parsed, dict):
+            settings_dict = parsed
+            break
+        elif fallback_parsed is None:
+            fallback_parsed = parsed
+
+    if settings_dict:
+        params = dict(settings_dict)
         meta = params.pop("_meta", {}) or {}
         rule_summary = _format_rule_summary(params)
+        settings_items = list(params.items())
+        if params:
+            settings_json_pretty = json.dumps(params, indent=2)
+    elif fallback_parsed is not None:
+        try:
+            settings_json_pretty = json.dumps(fallback_parsed, indent=2)
+        except Exception:
+            settings_json_pretty = str(fallback_parsed)
+    elif raw_settings_text:
+        settings_json_pretty = raw_settings_text
+
+    try:
         dt = datetime.fromisoformat(run["started_at"])
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=TZ)
         else:
             dt = dt.astimezone(TZ)
         ran_at = dt.strftime("%m/%d/%y,%I:%M%p").replace("/0", "/").replace(",0", ",")
-    except Exception:
-        pass
-
-    settings_items: List[Tuple[str, Any]] = []
-    try:
-        settings = json.loads(run.get("settings_json") or "{}")
-        settings.pop("_meta", None)
-        for k, v in settings.items():
-            settings_items.append((k.replace("_", " ").title(), v))
-        settings_items.sort()
     except Exception:
         pass
 
@@ -297,6 +324,7 @@ def results_from_archive(request: Request, run_id: int, db=Depends(get_db)):
         "ran_at": ran_at,
         "rule_summary": rule_summary,
         "settings_items": settings_items,
+        "settings_json_pretty": settings_json_pretty,
         "note": note,
         "error": error_msg,
         "meta": meta,
