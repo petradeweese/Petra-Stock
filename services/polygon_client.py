@@ -94,7 +94,11 @@ def compute_request_window(
     if last_bar < session_start:
         return default_start, default_end, "range"
 
-    if default_end_utc <= session_start or default_start_utc < last_bar:
+    overlaps_session = default_end_utc > session_start
+    starts_at_or_after_last_bar = default_start_utc >= last_bar
+    extends_beyond_last_bar = default_end_utc > last_bar
+
+    if not (overlaps_session and starts_at_or_after_last_bar and extends_beyond_last_bar):
         return default_start, default_end, "range"
 
     start = max(default_start_utc, last_bar)

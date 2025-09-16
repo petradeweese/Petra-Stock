@@ -45,7 +45,7 @@ def test_single_bucket_not_used_for_ranges_before_last_bar(monkeypatch):
     last_bar = datetime(2024, 1, 2, 14, 30, tzinfo=timezone.utc)
     now = datetime(2024, 1, 2, 14, 40, tzinfo=timezone.utc)
     default_start = last_bar - timedelta(minutes=30)
-    default_end = last_bar - timedelta(minutes=15)
+    default_end = last_bar
 
     start, end, mode = polygon_client.compute_request_window(
         "AAA",
