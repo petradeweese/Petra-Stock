@@ -57,6 +57,12 @@ def _clone_timeout_ctx(timeout_ctx: Optional[dict]) -> Optional[dict]:
     return cloned
 
 
+def _as_utc(ts: dt.datetime) -> dt.datetime:
+    if ts.tzinfo is None:
+        return ts.replace(tzinfo=dt.timezone.utc)
+    return ts.astimezone(dt.timezone.utc)
+
+
 def compute_request_window(
     symbol: str,
     interval: str,
@@ -78,21 +84,21 @@ def compute_request_window(
     if last_bar is None:
         return default_start, default_end, "range"
 
-    if last_bar.tzinfo is None:
-        last_bar = last_bar.replace(tzinfo=dt.timezone.utc)
-    else:
-        last_bar = last_bar.astimezone(dt.timezone.utc)
+    last_bar = _as_utc(last_bar)
+    default_start_utc = _as_utc(default_start)
+    default_end_utc = _as_utc(default_end)
 
-    now_utc = now or dt.datetime.now(dt.timezone.utc)
-    if now_utc.tzinfo is None:
-        now_utc = now_utc.replace(tzinfo=dt.timezone.utc)
+    now_utc = _as_utc(now) if now is not None else dt.datetime.now(dt.timezone.utc)
 
     session_start = _current_session_start(now_utc)
     if last_bar < session_start:
         return default_start, default_end, "range"
 
-    start = max(default_start, last_bar)
-    end = min(default_end, start + FIFTEEN_MIN)
+    if default_end_utc <= session_start or default_start_utc < last_bar:
+        return default_start, default_end, "range"
+
+    start = max(default_start_utc, last_bar)
+    end = min(default_end_utc, start + FIFTEEN_MIN)
     if end <= start:
         end = start + FIFTEEN_MIN
     return start, end, "single_bucket"

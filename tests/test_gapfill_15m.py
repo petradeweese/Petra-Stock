@@ -40,6 +40,27 @@ def test_single_bucket_request_window(monkeypatch):
     assert end == last_bar + timedelta(minutes=15)
 
 
+def test_single_bucket_not_used_for_ranges_before_last_bar(monkeypatch):
+    monkeypatch.setattr(polygon_client.settings, "scan_minimal_near_now", True)
+    last_bar = datetime(2024, 1, 2, 14, 30, tzinfo=timezone.utc)
+    now = datetime(2024, 1, 2, 14, 40, tzinfo=timezone.utc)
+    default_start = last_bar - timedelta(minutes=30)
+    default_end = last_bar - timedelta(minutes=15)
+
+    start, end, mode = polygon_client.compute_request_window(
+        "AAA",
+        "15m",
+        default_start,
+        default_end,
+        last_bar=last_bar,
+        now=now,
+    )
+
+    assert mode == "range"
+    assert start == default_start
+    assert end == default_end
+
+
 def test_fail_fast_requeues_gap_job(monkeypatch):
     symbol = "AAA"
     start = datetime(2024, 1, 3, 14, 0, tzinfo=timezone.utc)
