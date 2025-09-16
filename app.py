@@ -26,6 +26,7 @@ from services import http_client
 from services.market_data import override_window_end
 from services.overnight import (
     OvernightScanError,
+    resolve_overnight_symbols,
     resolve_overnight_window,
     start_background_runner,
 )
@@ -78,11 +79,8 @@ def create_app() -> FastAPI:
         pattern = payload.get("pattern")
         if pattern:
             params["rule"] = pattern
-        universe = [
-            t.strip().upper()
-            for t in str(payload.get("universe", "")).split(",")
-            if t.strip()
-        ]
+        resolution = resolve_overnight_symbols(payload)
+        universe = resolution.symbols
         now_ts = now_et()
         window_start_et, window_end_et = resolve_overnight_window(now_ts)
         window_end_utc = window_end_et.astimezone(timezone.utc)
@@ -91,7 +89,9 @@ def create_app() -> FastAPI:
             "window_start": window_start_et.isoformat(),
             "window_end": window_end_et.isoformat(),
             "timezone": "America/New_York",
-            "symbols_total": len(universe),
+            "symbols_total": resolution.symbols_total,
+            "universe": resolution.universe,
+            "ticker": resolution.ticker,
             "silent": silent,
         }
         processed = 0
@@ -122,9 +122,10 @@ def create_app() -> FastAPI:
             metadata["failure_examples"] = failures[:5]
 
         if processed == 0:
-            metadata["error"] = "No symbols to scan"
+            err_msg = resolution.detail or "No symbols to scan"
+            metadata["error"] = err_msg
             logger.error(json.dumps({"type": "overnight_scan", **metadata}))
-            raise OvernightScanError("No symbols to scan", meta=metadata)
+            raise OvernightScanError(err_msg, meta=metadata)
 
         if successes == 0 and len(failures) == processed:
             metadata["error"] = "Scan failed for all symbols"
