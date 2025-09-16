@@ -185,6 +185,8 @@ async def _fetch_single(
             status: Optional[int] = None
             try:
                 ctx = _clone_timeout_ctx(timeout_ctx)
+                if ctx is None:
+                    return await http_client.get_json(url, headers=headers)
                 return await http_client.get_json(
                     url, headers=headers, timeout_ctx=ctx
                 )
@@ -303,9 +305,12 @@ async def fetch_polygon_prices_async(
                 cur.isoformat(),
                 nxt.isoformat(),
             )
+            fetch_kwargs = {}
+            if timeout_ctx is not None:
+                fetch_kwargs["timeout_ctx"] = timeout_ctx
             dfs.append(
                 await _fetch_single(
-                    sym, cur, nxt, multiplier, timespan, timeout_ctx=timeout_ctx
+                    sym, cur, nxt, multiplier, timespan, **fetch_kwargs
                 )
             )
             cur = nxt
