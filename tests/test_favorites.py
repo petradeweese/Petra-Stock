@@ -192,3 +192,29 @@ def test_add_favorite_uses_settings_for_targets(tmp_path):
     assert min_support == 15
     assert interval == "30m"
 
+
+def test_normalize_favorite_preserves_existing_values_when_snapshot_missing_fields():
+    row = {
+        "ticker": "ABC",
+        "direction": "UP",
+        "interval": "1h",
+        "rule": "r1",
+        "lookback_years": 3.5,
+        "min_support": 42,
+        "target_pct": 2.2,
+        "stop_pct": 0.9,
+        "window_value": 8.0,
+        "window_unit": "Days",
+        "support_snapshot": json.dumps({}),
+        "settings_json_snapshot": json.dumps({"target_pct": "1.5"}),
+    }
+
+    normalized = routes._normalize_favorite(dict(row))
+
+    assert normalized["lookback_years"] == 3.5
+    assert normalized["min_support"] == 42
+    assert normalized["target_pct"] == 1.5
+    assert normalized["stop_pct"] == 0.9
+    assert normalized["window_value"] == 8.0
+    assert normalized["window_unit"] == "Days"
+

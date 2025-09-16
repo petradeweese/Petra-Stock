@@ -115,6 +115,17 @@ def _parse_settings_snapshot(raw: Any) -> tuple[dict[str, Any], dict[str, Any]]:
     return settings_dict, coerced
 
 
+def _snapshot_has_value(snapshot: dict[str, Any], key: str) -> bool:
+    if key not in snapshot:
+        return False
+    value = snapshot.get(key)
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    return True
+
+
 def _format_lookback(value: float | None) -> str:
     if value is None:
         return "—"
@@ -138,10 +149,7 @@ def _normalize_favorite(row: dict[str, Any]) -> dict[str, Any]:
         else None
     )
     lookback_from_settings = None
-    if settings_params and (
-        "lookback_years" in settings_raw
-        or settings_params.get("lookback_years") is not None
-    ):
+    if settings_params and _snapshot_has_value(settings_raw, "lookback_years"):
         lookback_from_settings = _coerce_float(settings_params.get("lookback_years"))
     if lookback_from_settings is not None:
         lookback = lookback_from_settings
@@ -155,10 +163,7 @@ def _normalize_favorite(row: dict[str, Any]) -> dict[str, Any]:
         else None
     )
     min_support_from_settings = None
-    if settings_params and (
-        "min_support" in settings_raw
-        or settings_params.get("min_support") is not None
-    ):
+    if settings_params and _snapshot_has_value(settings_raw, "min_support"):
         min_support_from_settings = _coerce_int(settings_params.get("min_support"))
     if min_support_from_settings is not None:
         min_support = min_support_from_settings
@@ -178,25 +183,25 @@ def _normalize_favorite(row: dict[str, Any]) -> dict[str, Any]:
         row["min_support"] = min_support
 
     if settings_params:
-        if "target_pct" in settings_raw or settings_params.get("target_pct") is not None:
+        if _snapshot_has_value(settings_raw, "target_pct"):
             target = _coerce_float(settings_params.get("target_pct"))
             if target is not None:
                 row["target_pct"] = target
-        if "stop_pct" in settings_raw or settings_params.get("stop_pct") is not None:
+        if _snapshot_has_value(settings_raw, "stop_pct"):
             stop = _coerce_float(settings_params.get("stop_pct"))
             if stop is not None:
                 row["stop_pct"] = stop
-        if "window_value" in settings_raw or settings_params.get("window_value") is not None:
+        if _snapshot_has_value(settings_raw, "window_value"):
             window_val = _coerce_float(settings_params.get("window_value"))
             if window_val is not None:
                 row["window_value"] = window_val
-        if "window_unit" in settings_raw or settings_params.get("window_unit"):
+        if _snapshot_has_value(settings_raw, "window_unit"):
             unit = settings_params.get("window_unit")
             if isinstance(unit, str) and unit:
                 row["window_unit"] = unit
-        if "interval" in settings_raw and settings_params.get("interval"):
+        if _snapshot_has_value(settings_raw, "interval") and settings_params.get("interval"):
             row["interval"] = settings_params.get("interval")
-        if "direction" in settings_raw and settings_params.get("direction"):
+        if _snapshot_has_value(settings_raw, "direction") and settings_params.get("direction"):
             row["direction"] = settings_params.get("direction")
     return row
 
