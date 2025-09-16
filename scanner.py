@@ -267,25 +267,53 @@ def _desktop_like_single(ticker: str, params: dict) -> dict:
         return {}
     try:
         # Pull parameters into locals once so the tight loops in the engine
-        # don't need repeated dict lookups.
-        interval = params["interval"]
-        direction = params["direction"]
-        target_pct = params["target_pct"]
-        stop_pct = params["stop_pct"]
-        window_value = params["window_value"]
-        window_unit = params["window_unit"]
-        lookback_years = params["lookback_years"]
-        max_tt_bars = params["max_tt_bars"]
-        min_support = params["min_support"]
-        delta_assumed = params["delta_assumed"]
-        theta_per_day_pct = params["theta_per_day_pct"]
-        atrz_gate = params["atrz_gate"]
-        slope_gate_pct = params["slope_gate_pct"]
-        use_regime = params["use_regime"]
-        regime_trend_only = params["regime_trend_only"]
-        vix_z_max = params["vix_z_max"]
-        slippage_bps = params["slippage_bps"]
-        vega_scale = params["vega_scale"]
+        # don't need repeated dict lookups. Missing values fall back to the
+        # same defaults used by the desktop scanner.
+
+        def _get_str(key: str, default: str) -> str:
+            value = params.get(key, default)
+            if value in (None, ""):
+                return default
+            return str(value)
+
+        def _get_float(key: str, default: float) -> float:
+            value = params.get(key, default)
+            try:
+                if value in (None, ""):
+                    return float(default)
+                return float(value)
+            except (TypeError, ValueError):
+                return float(default)
+
+        def _get_int(key: str, default: int) -> int:
+            value = params.get(key, default)
+            try:
+                if value in (None, ""):
+                    return int(default)
+                return int(value)
+            except (TypeError, ValueError):
+                return int(default)
+
+        interval = _get_str("interval", "15m")
+        direction = _get_str("direction", "UP").upper()
+        target_pct = _get_float("target_pct", 1.0)
+        stop_pct = _get_float("stop_pct", 0.5)
+        window_value = _get_float("window_value", 4.0)
+        window_unit = _get_str("window_unit", "Hours")
+        lookback_years = _get_float("lookback_years", 2.0)
+        max_tt_bars = _get_int("max_tt_bars", 12)
+        min_support = _get_int("min_support", 20)
+        delta_assumed = _get_float("delta_assumed", 0.40)
+        theta_per_day_pct = _get_float("theta_per_day_pct", 0.20)
+        atrz_gate = _get_float("atrz_gate", 0.10)
+        slope_gate_pct = _get_float("slope_gate_pct", 0.02)
+        use_regime = bool(_get_int("use_regime", 0))
+        regime_trend_only = bool(_get_int("regime_trend_only", 0))
+        vix_z_max = _get_float("vix_z_max", 3.0)
+        slippage_bps = _get_float("slippage_bps", 7.0)
+        vega_scale = _get_float("vega_scale", 0.03)
+        scan_min_hit = _get_float("scan_min_hit", 50.0)
+        scan_max_dd = _get_float("scan_max_dd", 50.0)
 
         model, df, _ = _pfa.analyze_roi_mode(
             ticker=ticker,
@@ -312,8 +340,8 @@ def _desktop_like_single(ticker: str, params: dict) -> dict:
         if df is None or df.empty:
             return {}
         df = df[
-            (df["hit_rate"] * 100.0 >= params["scan_min_hit"])
-            & (df["avg_dd"] * 100.0 <= params["scan_max_dd"])
+            (df["hit_rate"] * 100.0 >= scan_min_hit)
+            & (df["avg_dd"] * 100.0 <= scan_max_dd)
         ]
         if df.empty:
             return {}
@@ -325,7 +353,7 @@ def _desktop_like_single(ticker: str, params: dict) -> dict:
         stab_pct = stab * 100.0 if abs(stab) <= 1.0 else stab
         return {
             "ticker": ticker,
-            "direction": r.get("direction", params["direction"]),
+            "direction": r.get("direction", direction),
             "avg_roi_pct": float(r["avg_roi"]) * 100.0,
             "hit_pct": float(r["hit_rate"]) * 100.0,
             "support": int(r["support"]),
