@@ -36,10 +36,70 @@ def test_forward_list_favorites_present(tmp_path, monkeypatch):
     data = res.json()
     assert len(data["favorites"]) == 2
     assert {fav["lookback_years"] for fav in data["favorites"]} == {1.0}
+    assert all(fav["forward"] is None for fav in data["favorites"])
     page = client.get("/forward")
     assert 'id="forward-tbody"' in page.text
     assert 'Run Forward Tests' in page.text
     assert 'static/js/forward.js' in page.text
+
+
+def test_forward_favorites_include_forward_metrics(tmp_path):
+    conn, cur = _setup(tmp_path)
+    cur.execute(
+        "INSERT INTO favorites(ticker,direction,interval,rule,target_pct,stop_pct,window_value,window_unit,lookback_years) VALUES('AAA','UP','15m','r',1.0,0.5,4,'Hours',1.0)"
+    )
+    fav_id = cur.lastrowid
+    cur.execute(
+        """
+        INSERT INTO forward_tests(
+            fav_id, ticker, direction, interval, rule, version, entry_price,
+            target_pct, stop_pct, window_minutes, status, roi_forward, hit_forward,
+            dd_forward, last_run_at, runs_count, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            fav_id,
+            'AAA',
+            'UP',
+            '15m',
+            'r',
+            2,
+            100.0,
+            1.0,
+            0.5,
+            60,
+            'ok',
+            5.5,
+            75.0,
+            2.0,
+            '2024-01-01T10:30:00',
+            3,
+            '2024-01-01T10:00:00',
+            '2024-01-01T10:30:00',
+        ),
+    )
+    conn.commit()
+
+    app = FastAPI()
+    app.include_router(routes.router)
+    app.mount("/static", StaticFiles(directory="static"), name="static")
+    client = TestClient(app)
+
+    res = client.get("/api/forward/favorites")
+    assert res.status_code == 200
+    favorites = res.json()["favorites"]
+    assert len(favorites) == 1
+    forward = favorites[0]["forward"]
+    assert forward is not None
+    assert forward["status"] == "ok"
+    assert forward["version"] == 2
+    assert forward["roi_pct"] == 5.5
+    assert forward["hit_pct"] == 75.0
+    assert forward["dd_pct"] == 2.0
+    assert forward["runs_count"] == 3
+    assert forward["created_at"] == "2024-01-01T10:00:00"
+    assert forward["updated_at"] == "2024-01-01T10:30:00"
+    assert forward["last_run_at"] == "2024-01-01T10:30:00"
 
 
 def test_forward_empty_state(tmp_path):

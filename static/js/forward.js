@@ -8,6 +8,15 @@
   const errorBox = document.getElementById('forward-error');
   const runBtn = document.getElementById('forward-run');
   const toast = document.getElementById('toast');
+  const dateFormatter = typeof Intl !== 'undefined' && typeof Intl.DateTimeFormat === 'function'
+    ? new Intl.DateTimeFormat(undefined, {
+        month: 'short',
+        day: 'numeric',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+      })
+    : null;
 
   if(!table || !tbody || !runBtn){
     return;
@@ -54,25 +63,72 @@
     return `${num.toFixed(num % 1 === 0 ? 0 : 1)} ${compact}`;
   }
 
-  function formatHits(fav){
-    const hit = coerceNumber(fav.hit_pct_snapshot ?? fav.hit_pct);
-    const supportLabel = fav.support_display || (fav.support_count ?? '—');
-    const hitText = hit === null ? '' : `${hit.toFixed(0)}%`;
-    if(hitText && supportLabel && supportLabel !== '—'){
-      return `${hitText} / ${supportLabel}`;
+  function formatSupportLabel(fav){
+    const display = typeof fav.support_display === 'string' ? fav.support_display.trim() : '';
+    if(display && display !== '—'){
+      return display;
     }
-    if(hitText){
-      return hitText;
+    if(fav.support_count === 0){
+      return '0';
     }
-    return supportLabel && supportLabel !== undefined ? String(supportLabel) : '—';
+    if(fav.support_count !== undefined && fav.support_count !== null){
+      return String(fav.support_count);
+    }
+    return '';
   }
 
-  function formatRoi(fav){
-    const roi = coerceNumber(fav.roi_snapshot ?? fav.avg_roi_pct);
-    if(roi === null){
+  function formatForwardHit(fav){
+    const hitText = formatPercent(fav.forward?.hit_pct, 0);
+    const support = formatSupportLabel(fav);
+    if(hitText === '—' && !support){
       return '—';
     }
-    return `${roi.toFixed(1)}%`;
+    if(support){
+      if(hitText === '—'){
+        return `— / ${support}`;
+      }
+      return `${hitText} / ${support}`;
+    }
+    return hitText;
+  }
+
+  function formatForwardRoi(fav){
+    return formatPercent(fav.forward?.roi_pct, 1);
+  }
+
+  function formatForwardUpdated(forward){
+    if(!forward){
+      return '';
+    }
+    const raw = forward.updated_at || forward.last_run_at || forward.created_at;
+    if(!raw){
+      return '';
+    }
+    const date = new Date(raw);
+    if(Number.isNaN(date.getTime())){
+      return String(raw);
+    }
+    if(dateFormatter){
+      return dateFormatter.format(date);
+    }
+    return date.toLocaleString();
+  }
+
+  function formatForwardStatus(fav){
+    const forward = fav.forward;
+    if(!forward){
+      return '—';
+    }
+    const rawStatus = typeof forward.status === 'string' ? forward.status.trim() : '';
+    const status = rawStatus ? rawStatus.charAt(0).toUpperCase() + rawStatus.slice(1) : '';
+    const updated = formatForwardUpdated(forward);
+    if(status && updated){
+      return `${status} · ${updated}`;
+    }
+    if(updated){
+      return updated;
+    }
+    return status || '—';
   }
 
   function renderFavorites(items){
@@ -122,10 +178,13 @@
       windowTd.textContent = formatWindow(fav.window_value, fav.window_unit);
 
       const hitsTd = document.createElement('td');
-      hitsTd.textContent = formatHits(fav);
+      hitsTd.textContent = formatForwardHit(fav);
 
       const roiTd = document.createElement('td');
-      roiTd.textContent = formatRoi(fav);
+      roiTd.textContent = formatForwardRoi(fav);
+
+      const statusTd = document.createElement('td');
+      statusTd.textContent = formatForwardStatus(fav);
 
       const ruleTd = document.createElement('td');
       ruleTd.className = 'rule-td';
@@ -147,7 +206,7 @@
       form.appendChild(btn);
       actionsTd.appendChild(form);
 
-      [tickerTd, directionTd, intervalTd, lookbackTd, targetTd, stopTd, windowTd, hitsTd, roiTd, ruleTd, actionsTd].forEach((td) => {
+      [tickerTd, directionTd, intervalTd, lookbackTd, targetTd, stopTd, windowTd, hitsTd, roiTd, statusTd, ruleTd, actionsTd].forEach((td) => {
         tr.appendChild(td);
       });
 

@@ -6,7 +6,7 @@
       <h1 style="margin-top:0;">Forward Test</h1>
       <button id="forward-run" type="button" class="btn" disabled>Run Forward Tests</button>
     </div>
-    <p class="muted forward-note">Run your saved favorites through a fresh forward test. Results update once price data is available.</p>
+    <p class="muted forward-note">Run your saved favorites through a fresh forward test. Forward-only hit/ROI metrics update once price data is available.</p>
     <div id="forward-error" class="inline-error" hidden>
       <span>Couldn't load favorites.</span>
       <button type="button" class="btn btn-secondary btn-sm" data-action="retry">Retry</button>
@@ -23,8 +23,9 @@
           <th>Target</th>
           <th>Stop</th>
           <th>Window</th>
-          <th>Hits</th>
-          <th>ROI</th>
+          <th>Forward Hit% / Support</th>
+          <th>Forward ROI%</th>
+          <th>Status</th>
           <th>Rule</th>
           <th></th>
         </tr>

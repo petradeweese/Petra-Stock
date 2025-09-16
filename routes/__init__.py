@@ -1134,6 +1134,30 @@ def _update_forward_tests(db: sqlite3.Cursor) -> None:
 
 
 def _serialize_forward_favorite(fav: dict[str, Any]) -> dict[str, Any]:
+    forward_row = fav.get("forward") if isinstance(fav, dict) else None
+    forward: dict[str, Any] | None = None
+    if isinstance(forward_row, dict) and forward_row:
+        forward = {
+            "id": forward_row.get("id"),
+            "version": _coerce_int(forward_row.get("version")),
+            "status": (forward_row.get("status") or None),
+            "roi_pct": _coerce_float(forward_row.get("roi_forward")),
+            "hit_pct": _coerce_float(forward_row.get("hit_forward")),
+            "dd_pct": _coerce_float(forward_row.get("dd_forward")),
+            "roi_1": _coerce_float(forward_row.get("roi_1")),
+            "roi_3": _coerce_float(forward_row.get("roi_3")),
+            "roi_5": _coerce_float(forward_row.get("roi_5")),
+            "roi_expiry": _coerce_float(forward_row.get("roi_expiry")),
+            "mae": _coerce_float(forward_row.get("mae")),
+            "mfe": _coerce_float(forward_row.get("mfe")),
+            "time_to_hit": _coerce_float(forward_row.get("time_to_hit")),
+            "time_to_stop": _coerce_float(forward_row.get("time_to_stop")),
+            "option_roi_proxy": _coerce_float(forward_row.get("option_roi_proxy")),
+            "runs_count": _coerce_int(forward_row.get("runs_count")),
+            "created_at": forward_row.get("created_at"),
+            "updated_at": forward_row.get("updated_at"),
+            "last_run_at": forward_row.get("last_run_at"),
+        }
     return {
         "id": fav.get("id"),
         "ticker": fav.get("ticker"),
@@ -1153,6 +1177,7 @@ def _serialize_forward_favorite(fav: dict[str, Any]) -> dict[str, Any]:
         "hit_pct_snapshot": _coerce_float(fav.get("hit_pct_snapshot")),
         "dd_pct_snapshot": _coerce_float(fav.get("dd_pct_snapshot")),
         "snapshot_at": fav.get("snapshot_at"),
+        "forward": forward,
     }
 
 
@@ -1166,6 +1191,43 @@ def _load_forward_favorites(
     else:
         db.execute("SELECT * FROM favorites ORDER BY id DESC")
     rows = [_normalize_favorite(row_to_dict(row, db)) for row in db.fetchall()]
+    if not rows:
+        return []
+
+    fav_ids: list[int] = []
+    seen: set[int] = set()
+    for fav in rows:
+        fid = _coerce_int(fav.get("id"))
+        if fid is None or fid in seen:
+            fav["forward"] = None
+            continue
+        seen.add(fid)
+        fav_ids.append(fid)
+
+    forward_map: dict[int, dict[str, Any]] = {}
+    if fav_ids:
+        placeholders = ",".join("?" for _ in fav_ids)
+        query = (
+            "SELECT ft.* FROM forward_tests AS ft "
+            "JOIN ("
+            " SELECT fav_id, MAX(id) AS max_id"
+            " FROM forward_tests"
+            f" WHERE fav_id IN ({placeholders})"
+            " GROUP BY fav_id"
+            " ) AS latest"
+            " ON ft.fav_id = latest.fav_id AND ft.id = latest.max_id"
+        )
+        db.execute(query, tuple(fav_ids))
+        forward_rows = [row_to_dict(row, db) for row in db.fetchall()]
+        for row in forward_rows:
+            fid = _coerce_int(row.get("fav_id"))
+            if fid is not None:
+                forward_map[fid] = row
+
+    for fav in rows:
+        fid = _coerce_int(fav.get("id"))
+        fav["forward"] = forward_map.get(fid) if fid is not None else None
+
     if ids:
         fav_map = {
             int(fav.get("id")): fav
