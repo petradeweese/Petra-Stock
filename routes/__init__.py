@@ -1133,61 +1133,141 @@ def _update_forward_tests(db: sqlite3.Cursor) -> None:
     db.connection.commit()
 
 
+def _serialize_forward_favorite(fav: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": fav.get("id"),
+        "ticker": fav.get("ticker"),
+        "direction": fav.get("direction"),
+        "interval": fav.get("interval"),
+        "rule": fav.get("rule"),
+        "rule_snapshot": fav.get("rule_snapshot"),
+        "target_pct": _coerce_float(fav.get("target_pct")),
+        "stop_pct": _coerce_float(fav.get("stop_pct")),
+        "window_value": _coerce_float(fav.get("window_value")),
+        "window_unit": fav.get("window_unit"),
+        "lookback_years": _coerce_float(fav.get("lookback_years")),
+        "lookback_display": fav.get("lookback_display"),
+        "support_count": fav.get("support_count"),
+        "support_display": fav.get("support_display"),
+        "roi_snapshot": _coerce_float(fav.get("roi_snapshot")),
+        "hit_pct_snapshot": _coerce_float(fav.get("hit_pct_snapshot")),
+        "dd_pct_snapshot": _coerce_float(fav.get("dd_pct_snapshot")),
+        "snapshot_at": fav.get("snapshot_at"),
+    }
+
+
+def _load_forward_favorites(
+    db: sqlite3.Cursor, ids: list[int] | None = None
+) -> list[dict[str, Any]]:
+    if ids:
+        placeholders = ",".join("?" for _ in ids)
+        query = f"SELECT * FROM favorites WHERE id IN ({placeholders})"
+        db.execute(query, tuple(ids))
+    else:
+        db.execute("SELECT * FROM favorites ORDER BY id DESC")
+    rows = [_normalize_favorite(row_to_dict(row, db)) for row in db.fetchall()]
+    if ids:
+        fav_map = {
+            int(fav.get("id")): fav
+            for fav in rows
+            if fav.get("id") is not None
+        }
+        ordered: list[dict[str, Any]] = []
+        for fid in ids:
+            if fid in fav_map:
+                ordered.append(fav_map[fid])
+        return ordered
+    return rows
+
+
+def _queue_forward_tests_for(
+    db: sqlite3.Cursor, favorites: list[dict[str, Any]]
+) -> int:
+    created = 0
+    for fav in favorites:
+        fav_id = fav.get("id")
+        if fav_id is None:
+            continue
+        db.execute(
+            "SELECT status FROM forward_tests WHERE fav_id=? ORDER BY id DESC LIMIT 1",
+            (fav_id,),
+        )
+        row = db.fetchone()
+        if row is None or row["status"] in ("ok", "error"):
+            _create_forward_test(db, fav)
+            created += 1
+    _update_forward_tests(db)
+    return created
+
+
 @router.get("/forward", response_class=HTMLResponse)
 def forward_page(request: Request, db=Depends(get_db)):
     try:
-        db.execute("SELECT * FROM favorites ORDER BY id DESC")
-        favs = [row_to_dict(r, db) for r in db.fetchall()]
-        for f in favs:
-            db.execute(
-                "SELECT status FROM forward_tests WHERE fav_id=? ORDER BY id DESC LIMIT 1",
-                (f["id"],),
-            )
-            row = db.fetchone()
-            if row is None or row["status"] in ("ok", "error"):
-                _create_forward_test(db, f)
-        _update_forward_tests(db)
-        db.execute(
-            """SELECT ft.id AS ft_id, ft.fav_id, ft.ticker, ft.direction, ft.interval,
-                      ft.roi_forward, ft.option_roi_proxy, ft.hit_forward, ft.dd_forward, ft.status, ft.created_at, ft.rule
-                   FROM forward_tests ft
-                   ORDER BY ft.id DESC"""
-        )
-        tests = [row_to_dict(r, db) for r in db.fetchall()]
-        if not tests:
-            tests = [
-                {
-                    "ft_id": None,
-                    "fav_id": f["id"],
-                    "ticker": f["ticker"],
-                    "direction": f["direction"],
-                    "interval": f["interval"],
-                    "roi_forward": None,
-                    "option_roi_proxy": None,
-                    "hit_forward": None,
-                    "dd_forward": None,
-                    "status": "queued",
-                    "created_at": None,
-                    "rule": f.get("rule"),
-                }
-                for f in favs
-            ]
-        ctx = {"tests": tests, "active_tab": "forward"}
+        favorites = _load_forward_favorites(db)
+        _queue_forward_tests_for(db, favorites)
     except Exception:
-        logger.exception("Failed to load forward page")
-        ctx = {
-            "tests": [],
-            "active_tab": "forward",
-            "error": "Unable to load forward tests",
-        }
-    return templates.TemplateResponse(request, "forward.html", ctx)
+        logger.exception("Failed to prepare forward tests for page load")
+    return templates.TemplateResponse(
+        request, "forward.html", {"active_tab": "forward"}
+    )
 
 
 @router.get("/api/forward/favorites")
 def api_forward_favorites(db=Depends(get_db)):
-    db.execute("SELECT * FROM favorites ORDER BY id DESC")
-    favs = [_normalize_favorite(row_to_dict(r, db)) for r in db.fetchall()]
-    return {"favorites": favs}
+    favorites = [_serialize_forward_favorite(fav) for fav in _load_forward_favorites(db)]
+    return {"favorites": favorites}
+
+
+@router.post("/api/forward/run")
+async def api_forward_run(payload: dict | None = Body(None), db=Depends(get_db)):
+    payload = payload or {}
+    raw_ids = payload.get("favorite_ids")
+    ids: list[int] | None = None
+    if raw_ids is not None:
+        ids = []
+        seen: set[int] = set()
+        raw_iter = raw_ids if isinstance(raw_ids, list) else [raw_ids]
+        for raw in raw_iter:
+            try:
+                value = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if value in seen:
+                continue
+            seen.add(value)
+            ids.append(value)
+        if not ids:
+            return JSONResponse(
+                {"ok": False, "error": "No valid favorites selected"},
+                status_code=400,
+            )
+    favorites = _load_forward_favorites(db, ids)
+    if not favorites:
+        return JSONResponse(
+            {"ok": False, "error": "No favorites found"}, status_code=404
+        )
+
+    try:
+        queued = _queue_forward_tests_for(db, favorites)
+        total = len(favorites)
+        if queued:
+            message = f"Queued forward tests for {queued} favorite{'s' if queued != 1 else ''}"
+        else:
+            message = (
+                f"Forward tests already running for {total} favorite{'s' if total != 1 else ''}"
+            )
+        return {
+            "ok": True,
+            "queued": queued,
+            "count": total,
+            "message": message,
+        }
+    except Exception:
+        logger.exception("Failed to queue forward tests")
+        return JSONResponse(
+            {"ok": False, "error": "Server error starting forward tests"},
+            status_code=500,
+        )
 
 
 @router.post("/favorites/delete/{fav_id}")
