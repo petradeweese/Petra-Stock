@@ -145,3 +145,76 @@ def test_favorites_snapshot_values(tmp_path, monkeypatch):
     assert fav["avg_dd_pct"] == 0.5
     conn.close()
 
+
+def test_add_favorite_uses_settings_for_targets(tmp_path):
+    db.DB_PATH = str(tmp_path / "test.db")
+    db.init_db()
+
+    app = FastAPI()
+    app.include_router(routes.router)
+    client = TestClient(app)
+
+    payload = {
+        "ticker": "XYZ",
+        "direction": "UP",
+        "rule": "r3",
+        "settings_json_snapshot": {
+            "target_pct": "1.8",
+            "stop_pct": "0.7",
+            "window_value": "6",
+            "window_unit": "Hours",
+            "interval": "30m",
+            "direction": "UP",
+            "lookback_years": "1.5",
+            "min_support": "15",
+        },
+    }
+
+    res = client.post("/favorites/add", json=payload)
+    assert res.status_code == 200
+    assert res.json()["ok"]
+
+    conn = sqlite3.connect(db.DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT target_pct, stop_pct, window_value, window_unit, lookback_years, min_support, interval FROM favorites WHERE ticker='XYZ'"
+    )
+    row = cur.fetchone()
+    conn.close()
+
+    assert row is not None
+    target_pct, stop_pct, window_value, window_unit, lookback_years, min_support, interval = row
+    assert target_pct == 1.8
+    assert stop_pct == 0.7
+    assert window_value == 6.0
+    assert window_unit == "Hours"
+    assert lookback_years == 1.5
+    assert min_support == 15
+    assert interval == "30m"
+
+
+def test_normalize_favorite_preserves_existing_values_when_snapshot_missing_fields():
+    row = {
+        "ticker": "ABC",
+        "direction": "UP",
+        "interval": "1h",
+        "rule": "r1",
+        "lookback_years": 3.5,
+        "min_support": 42,
+        "target_pct": 2.2,
+        "stop_pct": 0.9,
+        "window_value": 8.0,
+        "window_unit": "Days",
+        "support_snapshot": json.dumps({}),
+        "settings_json_snapshot": json.dumps({"target_pct": "1.5"}),
+    }
+
+    normalized = routes._normalize_favorite(dict(row))
+
+    assert normalized["lookback_years"] == 3.5
+    assert normalized["min_support"] == 42
+    assert normalized["target_pct"] == 1.5
+    assert normalized["stop_pct"] == 0.9
+    assert normalized["window_value"] == 8.0
+    assert normalized["window_unit"] == "Days"
+

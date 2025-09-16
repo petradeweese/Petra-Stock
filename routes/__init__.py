@@ -93,6 +93,39 @@ def _parse_support_snapshot(raw: Any) -> tuple[int | None, dict[str, Any] | None
     return _coerce_int(raw), None
 
 
+def _parse_settings_snapshot(raw: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+    settings_dict: dict[str, Any] = {}
+    if isinstance(raw, dict):
+        settings_dict = raw
+    elif isinstance(raw, (str, bytes)):
+        text = raw.decode() if isinstance(raw, bytes) else raw
+        text = text.strip()
+        if text:
+            try:
+                data = json.loads(text)
+                if isinstance(data, dict):
+                    settings_dict = data
+            except Exception:
+                settings_dict = {}
+
+    if not settings_dict:
+        return {}, {}
+
+    coerced = coerce_scan_params(settings_dict)
+    return settings_dict, coerced
+
+
+def _snapshot_has_value(snapshot: dict[str, Any], key: str) -> bool:
+    if key not in snapshot:
+        return False
+    value = snapshot.get(key)
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    return True
+
+
 def _format_lookback(value: float | None) -> str:
     if value is None:
         return "—"
@@ -106,11 +139,37 @@ def _normalize_favorite(row: dict[str, Any]) -> dict[str, Any]:
     support_count, support_snapshot = _parse_support_snapshot(
         row.get("support_snapshot")
     )
+    settings_raw, settings_params = _parse_settings_snapshot(
+        row.get("settings_json_snapshot")
+    )
     lookback = _coerce_float(row.get("lookback_years"))
-    if lookback is None and isinstance(support_snapshot, dict):
-        lookback = _coerce_float(support_snapshot.get("lookback_years"))
+    lookback_from_support = (
+        _coerce_float(support_snapshot.get("lookback_years"))
+        if isinstance(support_snapshot, dict)
+        else None
+    )
+    lookback_from_settings = None
+    if settings_params and _snapshot_has_value(settings_raw, "lookback_years"):
+        lookback_from_settings = _coerce_float(settings_params.get("lookback_years"))
+    if lookback_from_settings is not None:
+        lookback = lookback_from_settings
+    elif lookback is None and lookback_from_support is not None:
+        lookback = lookback_from_support
 
     min_support = _coerce_int(row.get("min_support"))
+    min_support_from_support = (
+        _coerce_int(support_snapshot.get("min_support"))
+        if isinstance(support_snapshot, dict)
+        else None
+    )
+    min_support_from_settings = None
+    if settings_params and _snapshot_has_value(settings_raw, "min_support"):
+        min_support_from_settings = _coerce_int(settings_params.get("min_support"))
+    if min_support_from_settings is not None:
+        min_support = min_support_from_settings
+    elif min_support is None and min_support_from_support is not None:
+        min_support = min_support_from_support
+
     if support_count is None:
         support_count = min_support
 
@@ -120,6 +179,30 @@ def _normalize_favorite(row: dict[str, Any]) -> dict[str, Any]:
     row["support_display"] = (
         str(support_count) if support_count is not None else "—"
     )
+    if min_support is not None:
+        row["min_support"] = min_support
+
+    if settings_params:
+        if _snapshot_has_value(settings_raw, "target_pct"):
+            target = _coerce_float(settings_params.get("target_pct"))
+            if target is not None:
+                row["target_pct"] = target
+        if _snapshot_has_value(settings_raw, "stop_pct"):
+            stop = _coerce_float(settings_params.get("stop_pct"))
+            if stop is not None:
+                row["stop_pct"] = stop
+        if _snapshot_has_value(settings_raw, "window_value"):
+            window_val = _coerce_float(settings_params.get("window_value"))
+            if window_val is not None:
+                row["window_value"] = window_val
+        if _snapshot_has_value(settings_raw, "window_unit"):
+            unit = settings_params.get("window_unit")
+            if isinstance(unit, str) and unit:
+                row["window_unit"] = unit
+        if _snapshot_has_value(settings_raw, "interval") and settings_params.get("interval"):
+            row["interval"] = settings_params.get("interval")
+        if _snapshot_has_value(settings_raw, "direction") and settings_params.get("direction"):
+            row["direction"] = settings_params.get("direction")
     return row
 
 
@@ -1498,8 +1581,10 @@ async def favorites_add(request: Request, db=Depends(get_db)):
     payload = await request.json()
     t = (payload.get("ticker") or "").strip().upper()
     rule = payload.get("rule") or ""
-    direction = (payload.get("direction") or "UP").strip().upper()
-    interval = (payload.get("interval") or "15m").strip()
+    direction_raw = payload.get("direction")
+    direction = (direction_raw or "UP").strip().upper()
+    interval_raw = payload.get("interval")
+    interval = (interval_raw or "15m").strip()
     ref_dd = payload.get("ref_avg_dd")
     roi = payload.get("roi_snapshot")
     hit = payload.get("hit_pct_snapshot")
@@ -1507,6 +1592,10 @@ async def favorites_add(request: Request, db=Depends(get_db)):
     support_raw = payload.get("support_snapshot")
     rule_snap = payload.get("rule_snapshot") or rule
     settings_raw = payload.get("settings_json_snapshot")
+    target_pct = _coerce_float(payload.get("target_pct"))
+    stop_pct = _coerce_float(payload.get("stop_pct"))
+    window_value = _coerce_float(payload.get("window_value"))
+    window_unit = (payload.get("window_unit") or "").strip()
     try:
         ref_dd = float(ref_dd)
         if ref_dd > 1:
@@ -1533,15 +1622,41 @@ async def favorites_add(request: Request, db=Depends(get_db)):
     elif settings_raw not in (None, ""):
         settings_json = json.dumps(settings_raw)
 
-    lookback = None
-    min_support = None
+    params: dict[str, Any] = {}
     if settings_dict:
         params = coerce_scan_params(settings_dict)
-        lookback = params.get("lookback_years")
-        min_support = params.get("min_support")
-    else:
-        lookback = payload.get("lookback_years")
-        min_support = payload.get("min_support")
+
+    lookback = _coerce_float(payload.get("lookback_years"))
+    min_support = _coerce_int(payload.get("min_support"))
+    if params:
+        if lookback is None:
+            lookback = _coerce_float(params.get("lookback_years"))
+        if min_support is None:
+            min_support = _coerce_int(params.get("min_support"))
+        if target_pct is None:
+            target_pct = _coerce_float(params.get("target_pct"))
+        if stop_pct is None:
+            stop_pct = _coerce_float(params.get("stop_pct"))
+        if window_value is None:
+            window_value = _coerce_float(params.get("window_value"))
+        if not window_unit:
+            unit = params.get("window_unit")
+            if isinstance(unit, str):
+                window_unit = unit.strip()
+        if (interval_raw in (None, "")) and isinstance(
+            params.get("interval"), str
+        ):
+            interval = params.get("interval") or interval
+        if (direction_raw in (None, "")) and isinstance(params.get("direction"), str):
+            direction = (params.get("direction") or "UP").strip().upper()
+
+    if target_pct is None:
+        target_pct = 1.0
+    if stop_pct is None:
+        stop_pct = 0.5
+    if window_value is None:
+        window_value = 4.0
+    window_unit = window_unit or "Hours"
 
     lookback = _coerce_float(lookback)
     min_support = _coerce_int(min_support)
@@ -1559,16 +1674,22 @@ async def favorites_add(request: Request, db=Depends(get_db)):
 
     db.execute(
         """INSERT INTO favorites(
-                ticker, direction, interval, rule, ref_avg_dd,
+                ticker, direction, interval, rule,
+                target_pct, stop_pct, window_value, window_unit,
+                ref_avg_dd,
                 lookback_years, min_support, support_snapshot,
                 roi_snapshot, hit_pct_snapshot, dd_pct_snapshot,
                 rule_snapshot, settings_json_snapshot, snapshot_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             t,
             direction,
             interval,
             rule,
+            target_pct,
+            stop_pct,
+            window_value,
+            window_unit,
             ref_dd,
             lookback,
             min_support,
