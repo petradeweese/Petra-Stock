@@ -53,6 +53,8 @@ SCAN_BATCH_WRITES = os.getenv("SCAN_BATCH_WRITES", "1") not in {"0", "false", "n
 
 _perf_counter = time.perf_counter
 
+FORWARD_SLIPPAGE = 0.0008
+
 
 def _coerce_float(value: Any) -> float | None:
     try:
@@ -817,7 +819,7 @@ def compile_weekly_digest(
     db.execute("SELECT COUNT(*) FROM forward_tests WHERE created_at>=?", (start_iso,))
     new_count = db.fetchone()[0]
     db.execute(
-        "SELECT COUNT(*) FROM forward_tests WHERE status IN ('target','stop','expired') AND updated_at>=?",
+        "SELECT COUNT(*) FROM forward_tests WHERE status='ok' AND updated_at>=?",
         (start_iso,),
     )
     resolved_count = db.fetchone()[0]
@@ -969,10 +971,12 @@ def _create_forward_test(db: sqlite3.Cursor, fav: dict) -> None:
             (fav_id, ticker, direction, interval, rule, version, entry_price,
              target_pct, stop_pct, window_minutes, status, roi_forward, hit_forward, dd_forward,
              roi_1, roi_3, roi_5, roi_expiry, mae, mfe, time_to_hit, time_to_stop,
+             exit_reason, bars_to_exit, max_drawdown_pct, max_runup_pct, r_multiple,
              option_expiry, option_strike, option_delta, option_roi_proxy,
              last_run_at, next_run_at, runs_count, notes, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0.0, NULL, 0.0,
                     NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+                    NULL, NULL, NULL, NULL, NULL,
                     NULL, NULL, ?, 0.0,
                     NULL, NULL, 0, NULL, ?, ?)""",
         (
@@ -1019,94 +1023,161 @@ def _update_forward_tests(db: sqlite3.Cursor) -> None:
                     (row["id"],),
                 )
                 continue
-            entry_ts = pd.Timestamp(row["created_at"])
-            after = data[data.index > entry_ts]
-            if after.empty:
+            entry_signal_ts = pd.Timestamp(row["created_at"])
+            after = data[data.index > entry_signal_ts]
+            if after.empty or "Open" not in after.columns:
                 db.execute(
                     "UPDATE forward_tests SET status='queued' WHERE id=?",
                     (row["id"],),
                 )
                 continue
-            prices = after["Close"]
-            highs = after["High"]
-            lows = after["Low"]
-            mult = 1.0 if row["direction"] == "UP" else -1.0
-            pct_series = (prices / row["entry_price"] - 1.0) * 100 * mult
+            entry_bar = after.iloc[0]
+            try:
+                entry_underlying = float(entry_bar["Open"])
+            except (TypeError, ValueError):
+                db.execute(
+                    "UPDATE forward_tests SET status='queued' WHERE id=?",
+                    (row["id"],),
+                )
+                continue
+            entry_time = pd.Timestamp(entry_bar.name)
+            window_minutes = int(row.get("window_minutes") or 0)
+            expire_ts = entry_time + pd.Timedelta(minutes=window_minutes)
+            eligible = after[after.index <= expire_ts]
+            if eligible.empty:
+                db.execute(
+                    "UPDATE forward_tests SET status='queued', entry_price=? WHERE id=?",
+                    (entry_underlying, row["id"]),
+                )
+                continue
+            direction = (row.get("direction") or "UP").upper()
+            side = 1 if direction != "DOWN" else -1
+            slip = FORWARD_SLIPPAGE
+            entry_fill = entry_underlying * (1 + slip * side)
+            exit_factor = 1 - slip * side
+            target_pct = float(row.get("target_pct") or 0.0)
+            stop_pct = float(row.get("stop_pct") or 0.0)
+            if side == 1:
+                target_level = entry_underlying * (1 + target_pct / 100.0)
+                stop_level = entry_underlying * (1 - stop_pct / 100.0)
+            else:
+                target_level = entry_underlying * (1 - target_pct / 100.0)
+                stop_level = entry_underlying * (1 + stop_pct / 100.0)
+            closes = eligible["Close"].astype(float)
+            highs = eligible["High"].astype(float)
+            lows = eligible["Low"].astype(float)
+            roi_closes = side * ((closes * exit_factor - entry_fill) / entry_fill) * 100.0
+            favorable_prices = highs if side == 1 else lows
+            adverse_prices = lows if side == 1 else highs
+            roi_favorable = side * (
+                (favorable_prices * exit_factor - entry_fill) / entry_fill
+            ) * 100.0
+            roi_adverse = side * (
+                (adverse_prices * exit_factor - entry_fill) / entry_fill
+            ) * 100.0
+            roi_forward = float(roi_closes.iloc[-1]) if not roi_closes.empty else 0.0
             roi_curve = {1: None, 3: None, 5: None}
             for n in roi_curve:
-                if len(pct_series) >= n:
-                    roi_curve[n] = float(pct_series.iloc[n - 1])
-            expire_ts = entry_ts + pd.Timedelta(minutes=row["window_minutes"])
-            expiry_prices = prices[prices.index <= expire_ts]
-            roi_expiry = (
-                float((expiry_prices.iloc[-1] / row["entry_price"] - 1.0) * 100 * mult)
-                if not expiry_prices.empty
-                else None
-            )
-            if row["direction"] == "UP":
-                hit_cond = highs >= row["entry_price"] * (1 + row["target_pct"] / 100)
-                stop_cond = lows <= row["entry_price"] * (1 - row["stop_pct"] / 100)
-                mae_series = (lows / row["entry_price"] - 1.0) * 100 * mult
-                mfe_series = (highs / row["entry_price"] - 1.0) * 100 * mult
+                if len(roi_closes) >= n:
+                    roi_curve[n] = float(roi_closes.iloc[n - 1])
+            has_expired = after.index[-1] >= expire_ts
+            if side == 1:
+                hit_cond = highs >= target_level
+                stop_cond = lows <= stop_level
             else:
-                hit_cond = lows <= row["entry_price"] * (1 - row["target_pct"] / 100)
-                stop_cond = highs >= row["entry_price"] * (1 + row["stop_pct"] / 100)
-                mae_series = (highs / row["entry_price"] - 1.0) * 100 * mult
-                mfe_series = (lows / row["entry_price"] - 1.0) * 100 * mult
+                hit_cond = lows <= target_level
+                stop_cond = highs >= stop_level
             hit_time = hit_cond[hit_cond].index[0] if hit_cond.any() else None
             stop_time = stop_cond[stop_cond].index[0] if stop_cond.any() else None
-            mae = float(mae_series.min()) if not mae_series.empty else 0.0
-            mfe = float(mfe_series.max()) if not mfe_series.empty else 0.0
-            roi = float(pct_series.iloc[-1]) if not pct_series.empty else 0.0
             status = "ok"
             hit_pct = None
-            event_time = None
-            event_roi = roi
-            if (
-                hit_time
-                and (not stop_time or hit_time < stop_time)
-                and hit_time <= expire_ts
-            ):
-                event_time = hit_time
-                event_roi = row["target_pct"]
+            exit_reason = None
+            exit_time = None
+            exit_level = None
+
+            def _roi_from_level(level: float) -> float:
+                return float(
+                    side * (((level * exit_factor) - entry_fill) / entry_fill) * 100.0
+                )
+
+            if hit_time is not None and (stop_time is None or hit_time < stop_time):
+                exit_time = hit_time
+                exit_level = float(target_level)
+                exit_reason = "target"
                 hit_pct = 100.0
-            elif (
-                stop_time
-                and (not hit_time or stop_time <= hit_time)
-                and stop_time <= expire_ts
-            ):
-                event_time = stop_time
-                event_roi = -row["stop_pct"]
+                roi_forward = _roi_from_level(target_level)
+            elif stop_time is not None and (hit_time is None or stop_time <= hit_time):
+                exit_time = stop_time
+                exit_level = float(stop_level)
+                exit_reason = "stop"
                 hit_pct = 0.0
-            elif prices.index[-1] < expire_ts:
+                roi_forward = _roi_from_level(stop_level)
+            elif not has_expired:
                 status = "queued"
-            roi = event_roi
-            if event_time is not None:
-                event_idx = after.index.get_loc(event_time)
+            else:
+                exit_time = eligible.index[-1]
+                exit_level = float(closes.iloc[-1])
+                exit_reason = "timeout"
+                hit_pct = 0.0
+                roi_forward = float(roi_closes.iloc[-1])
+            entry_price_update = entry_underlying
+            roi_expiry = None
+            bars_to_exit = None
+            time_to_hit = None
+            time_to_stop = None
+            if exit_reason:
+                status = "ok"
+                exit_idx = eligible.index.get_loc(exit_time)
+                bars_to_exit = int(exit_idx + 1)
                 for n in roi_curve:
-                    if event_idx <= n - 1:
-                        roi_curve[n] = event_roi
-                roi_expiry = event_roi
-            dd = float(max(0.0, -mae))
-            t_hit = (
-                (hit_time - entry_ts).total_seconds() / 60
-                if hit_time and hit_time <= expire_ts
-                else None
-            )
-            t_stop = (
-                (stop_time - entry_ts).total_seconds() / 60
-                if stop_time and stop_time <= expire_ts
-                else None
-            )
+                    if exit_idx <= n - 1:
+                        roi_curve[n] = roi_forward
+                roi_expiry = roi_forward
+                roi_adverse_slice = roi_adverse.iloc[: exit_idx + 1]
+                roi_favorable_slice = roi_favorable.iloc[: exit_idx + 1]
+            else:
+                exit_idx = len(eligible) - 1
+                roi_adverse_slice = roi_adverse
+                roi_favorable_slice = roi_favorable
+                roi_expiry = float(roi_closes.iloc[-1]) if has_expired else None
+            mae = float(roi_adverse_slice.min()) if not roi_adverse_slice.empty else 0.0
+            mfe = float(roi_favorable_slice.max()) if not roi_favorable_slice.empty else 0.0
+            dd_forward = float(max(0.0, -mae))
+            max_drawdown_pct = dd_forward
+            max_runup_pct = float(max(0.0, mfe))
+            if exit_reason:
+                entry_time_dt = pd.Timestamp(entry_time)
+                elapsed = (
+                    (pd.Timestamp(exit_time) - entry_time_dt).total_seconds() / 60.0
+                )
+                if exit_reason == "target":
+                    time_to_hit = elapsed
+                elif exit_reason == "stop":
+                    time_to_stop = elapsed
+            stop_fill = stop_level * exit_factor
+            r_multiple = None
+            if exit_reason:
+                exit_fill_price = exit_level * exit_factor if exit_level is not None else None
+                if exit_fill_price is not None:
+                    if side == 1:
+                        risk = entry_fill - stop_fill
+                        if risk > 0:
+                            r_multiple = (exit_fill_price - entry_fill) / risk
+                    else:
+                        risk = stop_fill - entry_fill
+                        if risk > 0:
+                            r_multiple = (entry_fill - exit_fill_price) / risk
             delta = row.get("option_delta")
-            option_roi_proxy = roi / delta if delta else None
+            option_roi_proxy = roi_forward / delta if delta else None
+            run_iso = now_et().isoformat()
             db.execute(
                 """UPDATE forward_tests
-                       SET roi_forward=?, dd_forward=?, status=?, hit_forward=?, roi_1=?, roi_3=?, roi_5=?, roi_expiry=?, mae=?, mfe=?, time_to_hit=?, time_to_stop=?, option_roi_proxy=?, last_run_at=?, next_run_at=?, updated_at=?
+                       SET entry_price=?, roi_forward=?, dd_forward=?, status=?, hit_forward=?, roi_1=?, roi_3=?, roi_5=?, roi_expiry=?, mae=?, mfe=?, time_to_hit=?, time_to_stop=?, exit_reason=?, bars_to_exit=?, max_drawdown_pct=?, max_runup_pct=?, r_multiple=?, option_roi_proxy=?, last_run_at=?, next_run_at=?, updated_at=?
                        WHERE id=?""",
                 (
-                    roi,
-                    dd,
+                    entry_price_update,
+                    roi_forward,
+                    dd_forward,
                     status,
                     hit_pct,
                     roi_curve[1],
@@ -1115,11 +1186,16 @@ def _update_forward_tests(db: sqlite3.Cursor) -> None:
                     roi_expiry,
                     mae,
                     mfe,
-                    t_hit,
-                    t_stop,
+                    time_to_hit,
+                    time_to_stop,
+                    exit_reason,
+                    bars_to_exit,
+                    max_drawdown_pct,
+                    max_runup_pct,
+                    r_multiple,
                     option_roi_proxy,
-                    now_et().isoformat(),
-                    now_et().isoformat(),
+                    run_iso,
+                    run_iso,
                     now_iso,
                     row["id"],
                 ),
@@ -1152,6 +1228,11 @@ def _serialize_forward_favorite(fav: dict[str, Any]) -> dict[str, Any]:
             "mfe": _coerce_float(forward_row.get("mfe")),
             "time_to_hit": _coerce_float(forward_row.get("time_to_hit")),
             "time_to_stop": _coerce_float(forward_row.get("time_to_stop")),
+            "exit_reason": forward_row.get("exit_reason"),
+            "bars_to_exit": _coerce_int(forward_row.get("bars_to_exit")),
+            "max_drawdown_pct": _coerce_float(forward_row.get("max_drawdown_pct")),
+            "max_runup_pct": _coerce_float(forward_row.get("max_runup_pct")),
+            "r_multiple": _coerce_float(forward_row.get("r_multiple")),
             "option_roi_proxy": _coerce_float(forward_row.get("option_roi_proxy")),
             "runs_count": _coerce_int(forward_row.get("runs_count")),
             "created_at": forward_row.get("created_at"),
@@ -1223,6 +1304,65 @@ def _load_forward_favorites(
             fid = _coerce_int(row.get("fav_id"))
             if fid is not None:
                 forward_map[fid] = row
+
+        support_counts: dict[int, int] = {}
+        support_query = (
+            "SELECT fav_id, created_at, window_minutes, status, exit_reason "
+            f"FROM forward_tests WHERE fav_id IN ({placeholders}) ORDER BY created_at"
+        )
+        db.execute(support_query, tuple(fav_ids))
+        support_rows = [row_to_dict(row, db) for row in db.fetchall()]
+        grouped_support: dict[int, list[dict[str, Any]]] = {}
+        for row in support_rows:
+            fid = _coerce_int(row.get("fav_id"))
+            if fid is None:
+                continue
+            grouped_support.setdefault(fid, []).append(row)
+        now_ts = pd.Timestamp(now_et()).tz_convert(TZ)
+        for fav in rows:
+            fid = _coerce_int(fav.get("id"))
+            if fid is None:
+                continue
+            tests = grouped_support.get(fid)
+            if not tests:
+                continue
+            lookback = _coerce_float(fav.get("lookback_years")) or 1.0
+            window_start = now_ts - pd.Timedelta(days=365 * lookback)
+            count = 0
+            last_time: pd.Timestamp | None = None
+            for test in tests:
+                status_val = (test.get("status") or "").lower()
+                if status_val != "ok":
+                    continue
+                created_raw = test.get("created_at")
+                if not created_raw:
+                    continue
+                created_ts = pd.Timestamp(created_raw)
+                if created_ts.tzinfo is None:
+                    created_ts = created_ts.tz_localize(TZ)
+                else:
+                    created_ts = created_ts.tz_convert(TZ)
+                if created_ts < window_start:
+                    continue
+                window_minutes = int(test.get("window_minutes") or 0)
+                threshold = (
+                    last_time + pd.Timedelta(minutes=window_minutes)
+                    if last_time is not None
+                    else None
+                )
+                if threshold is None or created_ts >= threshold:
+                    count += 1
+                    last_time = created_ts
+            support_counts[fid] = count
+
+        for fav in rows:
+            fid = _coerce_int(fav.get("id"))
+            if fid is None:
+                continue
+            if fid in support_counts:
+                count = support_counts[fid]
+                fav["support_count"] = count
+                fav["support_display"] = str(count)
 
     for fav in rows:
         fid = _coerce_int(fav.get("id"))

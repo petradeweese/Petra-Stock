@@ -37,10 +37,12 @@ def test_forward_tracking_only_future_bars(tmp_path, monkeypatch):
     ts0 = pd.Timestamp("2024-01-01 10:00:00", tz="UTC")
     ts1 = pd.Timestamp("2024-01-01 10:15:00", tz="UTC")
     df_create = pd.DataFrame(
-        {"Close": [100.0], "High": [100.0], "Low": [100.0]}, index=[ts0]
+        {"Open": [100.0], "Close": [100.0], "High": [100.0], "Low": [100.0]},
+        index=[ts0],
     )
     df_update = pd.DataFrame(
         {
+            "Open": [100.0, 100.0],
             "Close": [100.0, 102.0],
             "High": [100.0, 103.0],
             "Low": [100.0, 97.0],
@@ -76,16 +78,21 @@ def test_forward_tracking_only_future_bars(tmp_path, monkeypatch):
 
     forward_page(request, db=cur)
     cur.execute(
-        "SELECT roi_forward, option_roi_proxy, status, hit_forward, dd_forward, roi_1, mae, mfe, time_to_stop FROM forward_tests"
+        "SELECT roi_forward, option_roi_proxy, status, hit_forward, dd_forward, roi_1, mae, mfe, time_to_stop, exit_reason, bars_to_exit, max_drawdown_pct, max_runup_pct, r_multiple FROM forward_tests"
     )
     row = cur.fetchone()
-    assert row["roi_forward"] == approx(-1.0)
-    assert row["option_roi_proxy"] == approx(-1.0 / 0.4)
+    assert row["roi_forward"] == approx(-1.1582733813, rel=1e-3)
+    assert row["option_roi_proxy"] == approx(-2.8956834532, rel=1e-3)
     assert row["status"] == "ok"
     assert row["hit_forward"] == 0.0
-    assert row["dd_forward"] == approx(3.0)
-    assert row["roi_1"] == approx(-1.0)
-    assert row["mae"] == approx(-3.0)
-    assert row["mfe"] == approx(3.0)
-    assert row["time_to_stop"] == approx(15.0)
+    assert row["exit_reason"] == "stop"
+    assert row["bars_to_exit"] == 1
+    assert row["dd_forward"] == approx(3.1550759392, rel=1e-3)
+    assert row["max_drawdown_pct"] == approx(3.1550759392, rel=1e-3)
+    assert row["max_runup_pct"] == approx(2.8353317346, rel=1e-3)
+    assert row["roi_1"] == approx(-1.1582733813, rel=1e-3)
+    assert row["mae"] == approx(-3.1550759392, rel=1e-3)
+    assert row["mfe"] == approx(2.8353317346, rel=1e-3)
+    assert row["time_to_stop"] == approx(0.0)
+    assert row["r_multiple"] == approx(-1.0)
     conn.close()
