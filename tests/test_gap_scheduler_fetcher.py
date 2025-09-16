@@ -16,7 +16,7 @@ async def run_job(monkeypatch, tmp_path, df_return, capture=None):
     end = pd.Timestamp("2024-01-01 20:00", tz="UTC").to_pydatetime()
     monkeypatch.setattr(scheduler.settings, "clamp_market_closed", False)
 
-    async def fake_fetch(symbols, interval, s, e):
+    async def fake_fetch(symbols, interval, s, e, **kwargs):
         if capture is not None:
             capture["start"] = s
             capture["end"] = e

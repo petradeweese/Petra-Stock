@@ -54,6 +54,18 @@ request_duration = Histogram(
 )
 
 
+class RateLimitTimeoutSoon(Exception):
+    """Raised when the rate limiter predicts a wait beyond the caller deadline."""
+
+    def __init__(self, host: str, predicted_wait: float, remaining: float) -> None:
+        self.host = host
+        self.predicted_wait = predicted_wait
+        self.remaining = remaining
+        super().__init__(
+            f"rate limit wait {predicted_wait:.2f}s exceeds remaining {remaining:.2f}s"
+        )
+
+
 class TokenBucket:
     def __init__(self, rate: float, capacity: int) -> None:
         self.rate = rate
@@ -67,13 +79,31 @@ class TokenBucket:
         self.updated = now
         self.tokens = min(self.capacity, self.tokens + delta * self.rate)
 
-    async def consume(self, amount: int = 1) -> None:
+    def predict_wait(self, amount: int = 1) -> float:
+        """Return how long we would wait to satisfy ``amount`` tokens."""
+
+        now = time.monotonic()
+        available = min(self.capacity, self.tokens + (now - self.updated) * self.rate)
+        if available >= amount:
+            return 0.0
+        if self.rate <= 0:
+            return float("inf")
+        deficit = amount - available
+        return deficit / self.rate
+
+    async def consume(self, amount: int = 1) -> float:
+        waited = 0.0
         while True:
             self._add_new_tokens()
             if self.tokens >= amount:
                 self.tokens -= amount
-                return
-            await asyncio.sleep((amount - self.tokens) / self.rate)
+                return waited
+            deficit = amount - self.tokens
+            if self.rate <= 0:
+                raise RuntimeError("token bucket rate must be positive")
+            sleep_for = deficit / self.rate
+            await asyncio.sleep(sleep_for)
+            waited += sleep_for
 
 
 def get_client() -> httpx.AsyncClient:
@@ -130,6 +160,8 @@ async def request(method: str, url: str, **kwargs) -> httpx.Response:
         if inflight:
             return await inflight
 
+    timeout_ctx = kwargs.pop("timeout_ctx", None)
+
     async def _do_request() -> httpx.Response:
         client = get_client()
         host = httpx.URL(url).host
@@ -150,9 +182,32 @@ async def request(method: str, url: str, **kwargs) -> httpx.Response:
                     _wait_cb(0)
 
             if limiter:
-                before_token = time.monotonic()
-                await limiter.consume()
-                waited = time.monotonic() - before_token
+                predicted_wait = limiter.predict_wait()
+                remaining = None
+                network_buffer = 0.0
+                safety_margin = 0.25
+                if timeout_ctx:
+                    remaining = timeout_ctx.get("remaining")
+                    deadline = timeout_ctx.get("deadline")
+                    if remaining is None and deadline is not None:
+                        remaining = deadline - time.monotonic()
+                    network_buffer = float(timeout_ctx.get("network_buffer", 1.0))
+                    safety_margin = float(timeout_ctx.get("safety_margin", 0.25))
+                if remaining is not None:
+                    remaining = max(0.0, remaining)
+                    if predicted_wait + network_buffer >= max(0.0, remaining - safety_margin):
+                        state = timeout_ctx.get("rate_state") if timeout_ctx else None
+                        if isinstance(state, dict):
+                            state["predicted"] = predicted_wait
+                            state["remaining"] = remaining
+                        raise RateLimitTimeoutSoon(host, predicted_wait, remaining)
+                waited = await limiter.consume()
+                state = timeout_ctx.get("rate_state") if timeout_ctx else None
+                if isinstance(state, dict):
+                    state.setdefault("predicted", predicted_wait)
+                    state["waited"] = state.get("waited", 0.0) + waited
+                    if remaining is not None:
+                        state["remaining"] = remaining
                 if waited > 0:
                     logger.info("rate_wait host=%s wait=%.2fs", host, waited)
 
