@@ -21,7 +21,7 @@ def test_compile_weekly_digest(tmp_path):
     start_iso = pd.Timestamp("2024-01-08", tz="America/New_York").isoformat()
     cur.execute(
         "INSERT INTO forward_tests(fav_id,ticker,direction,interval,rule,version,entry_price,target_pct,stop_pct,window_minutes,status,roi_forward,hit_forward,dd_forward,created_at,updated_at) "
-        "VALUES (1,'AAA','UP','15m','r1',1,100,1,0.5,60,'target',5,60,10,?,?)",
+        "VALUES (1,'AAA','UP','15m','r1',1,100,1,0.5,60,'ok',5,60,10,?,?)",
         (start_iso, start_iso),
     )
     cur.execute(

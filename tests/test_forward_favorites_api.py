@@ -46,7 +46,7 @@ def test_forward_list_favorites_present(tmp_path, monkeypatch):
 def test_forward_favorites_include_forward_metrics(tmp_path):
     conn, cur = _setup(tmp_path)
     cur.execute(
-        "INSERT INTO favorites(ticker,direction,interval,rule,target_pct,stop_pct,window_value,window_unit,lookback_years) VALUES('AAA','UP','15m','r',1.0,0.5,4,'Hours',1.0)"
+        "INSERT INTO favorites(ticker,direction,interval,rule,target_pct,stop_pct,window_value,window_unit,lookback_years) VALUES('AAA','UP','15m','r',1.0,0.5,4,'Hours',5.0)"
     )
     fav_id = cur.lastrowid
     cur.execute(
@@ -89,6 +89,8 @@ def test_forward_favorites_include_forward_metrics(tmp_path):
     assert res.status_code == 200
     favorites = res.json()["favorites"]
     assert len(favorites) == 1
+    assert favorites[0]["support_count"] == 1
+    assert favorites[0]["support_display"] == "1"
     forward = favorites[0]["forward"]
     assert forward is not None
     assert forward["status"] == "ok"
