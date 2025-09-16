@@ -1,3 +1,4 @@
+import json
 import sqlite3
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
@@ -172,3 +173,35 @@ def test_forward_run_invalid_ids(tmp_path, monkeypatch):
     res = client.post("/api/forward/run", json={"favorite_ids": [999]})
     assert res.status_code == 404
     assert res.json()["ok"] is False
+
+
+def test_forward_favorites_use_snapshot_params(tmp_path):
+    conn, cur = _setup(tmp_path)
+    settings = {
+        "target_pct": "2.5",
+        "stop_pct": "0.9",
+        "window_value": "8",
+        "window_unit": "Minutes",
+        "lookback_years": "3.0",
+    }
+    cur.execute(
+        "INSERT INTO favorites(ticker,direction,interval,rule,settings_json_snapshot) VALUES (?,?,?,?,?)",
+        ("CCC", "UP", "15m", "r", json.dumps(settings)),
+    )
+    conn.commit()
+
+    app = FastAPI()
+    app.include_router(routes.router)
+    app.mount("/static", StaticFiles(directory="static"), name="static")
+    client = TestClient(app)
+
+    res = client.get("/api/forward/favorites")
+    assert res.status_code == 200
+    favorites = res.json()["favorites"]
+    assert len(favorites) == 1
+    fav = favorites[0]
+    assert fav["target_pct"] == 2.5
+    assert fav["stop_pct"] == 0.9
+    assert fav["window_value"] == 8.0
+    assert fav["window_unit"] == "Minutes"
+    assert fav["lookback_years"] == 3.0

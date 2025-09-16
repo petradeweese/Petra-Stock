@@ -145,3 +145,50 @@ def test_favorites_snapshot_values(tmp_path, monkeypatch):
     assert fav["avg_dd_pct"] == 0.5
     conn.close()
 
+
+def test_add_favorite_uses_settings_for_targets(tmp_path):
+    db.DB_PATH = str(tmp_path / "test.db")
+    db.init_db()
+
+    app = FastAPI()
+    app.include_router(routes.router)
+    client = TestClient(app)
+
+    payload = {
+        "ticker": "XYZ",
+        "direction": "UP",
+        "rule": "r3",
+        "settings_json_snapshot": {
+            "target_pct": "1.8",
+            "stop_pct": "0.7",
+            "window_value": "6",
+            "window_unit": "Hours",
+            "interval": "30m",
+            "direction": "UP",
+            "lookback_years": "1.5",
+            "min_support": "15",
+        },
+    }
+
+    res = client.post("/favorites/add", json=payload)
+    assert res.status_code == 200
+    assert res.json()["ok"]
+
+    conn = sqlite3.connect(db.DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT target_pct, stop_pct, window_value, window_unit, lookback_years, min_support, interval FROM favorites WHERE ticker='XYZ'"
+    )
+    row = cur.fetchone()
+    conn.close()
+
+    assert row is not None
+    target_pct, stop_pct, window_value, window_unit, lookback_years, min_support, interval = row
+    assert target_pct == 1.8
+    assert stop_pct == 0.7
+    assert window_value == 6.0
+    assert window_unit == "Hours"
+    assert lookback_years == 1.5
+    assert min_support == 15
+    assert interval == "30m"
+
