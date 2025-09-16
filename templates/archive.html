@@ -1,10 +1,15 @@
 {% extends 'base.html' %}
 {% block title %}Pattern Finder — Archive{% endblock %}
 {% block content %}
-  <div class="card">
-    <h1 style="margin-top:0;">Archive</h1>
-    {% if runs and runs|length %}
-    <table class="table">
+  <div class="card archive-card">
+    <div class="archive-header">
+      <h1 style="margin-top:0;">Archive</h1>
+      {% if runs and runs|length %}
+      <button id="archive-clear-all" type="button" class="btn btn-danger">Clear All</button>
+      {% endif %}
+    </div>
+    <p id="archive-empty" class="muted" {% if runs and runs|length %}hidden{% endif %}>No archived runs yet.</p>
+    <table id="archive-table" class="table" {% if not runs or not runs|length %}hidden{% endif %}>
       <thead>
         <tr>
           <th>ID</th>
@@ -13,23 +18,27 @@
           <th>Universe</th>
           <th>Hits</th>
           <th>Open</th>
+          <th></th>
         </tr>
       </thead>
       <tbody>
         {% for r in runs %}
-        <tr>
+        <tr data-run-id="{{ r['id'] }}">
           <td>{{ r["id"] }}</td>
           <td>{{ r["started_display"] }}</td>
           <td>{{ r["scan_type"] }}</td>
           <td>{{ (r["universe"] or "").split(",") | length }}</td>
           <td>{{ r["hit_count"] }}</td>
           <td><a class="btn" href="/results/{{ r['id'] }}">View Results</a></td>
+          <td class="num">
+            <button type="button" class="icon-btn archive-delete" data-run-id="{{ r['id'] }}" aria-label="Delete archived run" title="Delete archived run">🗑</button>
+          </td>
         </tr>
         {% endfor %}
       </tbody>
     </table>
-    {% else %}
-    <p>No archived runs yet.</p>
-    {% endif %}
   </div>
+{% endblock %}
+{% block extra_body %}
+  <script src="{{ url_for('static', path='js/archive.js') }}" defer></script>
 {% endblock %}

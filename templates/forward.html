@@ -1,52 +1,39 @@
 {% extends 'base.html' %}
 {% block title %}Pattern Finder — Forward Test{% endblock %}
 {% block content %}
-  <div class="card">
-    <h1 style="margin-top:0;">Forward Test</h1>
-    {% if error %}
-    <p class="error">{{ error }}</p>
-    {% endif %}
-    {% if tests and tests|length %}
-    <table class="table">
+  <div class="card forward-card">
+    <div class="forward-header">
+      <h1 style="margin-top:0;">Forward Test</h1>
+      <button id="forward-run" type="button" class="btn" disabled>Run Forward Tests</button>
+    </div>
+    <p class="muted forward-note">Run your saved favorites through a fresh forward test. Forward-only hit/ROI metrics update once price data is available.</p>
+    <div id="forward-error" class="inline-error" hidden>
+      <span>Couldn't load favorites.</span>
+      <button type="button" class="btn btn-secondary btn-sm" data-action="retry">Retry</button>
+    </div>
+    <div id="forward-loading" class="muted">Loading favorites…</div>
+    <p id="forward-empty" class="muted" hidden>No favorites to test.</p>
+    <table id="forward-table" class="table" hidden aria-describedby="forward-empty">
       <thead>
         <tr>
-          <th>ID</th>
           <th>Ticker</th>
           <th>Direction</th>
           <th>Interval</th>
-          <th>ROI%</th>
-          <th>Hit%</th>
-          <th>DD%</th>
+          <th>Lookback</th>
+          <th>Target</th>
+          <th>Stop</th>
+          <th>Window</th>
+          <th>Forward Hit% / Support</th>
+          <th>Forward ROI%</th>
           <th>Status</th>
-          <th>Start</th>
           <th>Rule</th>
           <th></th>
         </tr>
       </thead>
-      <tbody>
-        {% for f in tests %}
-        <tr>
-          <td>{{ f["ft_id"] }}</td>
-          <td><strong>{{ f["ticker"] }}</strong></td>
-          <td>{{ f["direction"] }}</td>
-          <td>{{ f["interval"] }}</td>
-          <td>{{ '{:.1f}'.format(f['roi_forward']) if f['roi_forward'] is not none else '' }}</td>
-          <td>{{ '{:.0f}'.format(f['hit_forward']) if f['hit_forward'] is not none else '' }}</td>
-          <td>{{ '{:.1f}'.format(f['dd_forward']) if f['dd_forward'] is not none else '' }}</td>
-          <td>{{ f['status'] }}</td>
-          <td>{{ f["created_at"][:16] if f["created_at"] else '' }}</td>
-          <td><code>{{ f["rule"] }}</code></td>
-          <td>
-            <form method="post" action="/favorites/delete/{{ f['fav_id'] }}" style="margin:0;">
-              <button type="submit" class="del-btn">&#10005;</button>
-            </form>
-          </td>
-        </tr>
-        {% endfor %}
-      </tbody>
+      <tbody id="forward-tbody"></tbody>
     </table>
-    {% else %}
-    <p>No favorites to test.</p>
-    {% endif %}
   </div>
+{% endblock %}
+{% block extra_body %}
+  <script src="{{ url_for('static', path='js/forward.js') }}" defer></script>
 {% endblock %}

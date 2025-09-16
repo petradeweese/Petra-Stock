@@ -207,6 +207,30 @@ async def archive_run(request: Request, db=Depends(get_db)):
     return {"ok": True, "run_id": run_id}
 
 
+@router.delete("/api/archive/{run_id}")
+def archive_delete_run(run_id: int, db=Depends(get_db)):
+    db.execute("SELECT id FROM runs WHERE id=?", (run_id,))
+    if db.fetchone() is None:
+        return JSONResponse({"ok": False, "error": "Run not found"}, status_code=404)
+    db.execute("DELETE FROM run_results WHERE run_id=?", (run_id,))
+    db.execute("DELETE FROM runs WHERE id=?", (run_id,))
+    db.connection.commit()
+    return {"ok": True, "run_id": run_id}
+
+
+@router.post("/api/archive/clear")
+def archive_clear_all(db=Depends(get_db)):
+    db.execute("SELECT COUNT(*) FROM runs")
+    row = db.fetchone()
+    total = int(row[0]) if row else 0
+    if total == 0:
+        return {"ok": True, "cleared": 0}
+    db.execute("DELETE FROM run_results WHERE run_id IN (SELECT id FROM runs)")
+    db.execute("DELETE FROM runs")
+    db.connection.commit()
+    return {"ok": True, "cleared": total}
+
+
 @router.get("/results/{run_id}", response_class=HTMLResponse)
 def results_from_archive(request: Request, run_id: int, db=Depends(get_db)):
     db.execute("SELECT * FROM runs WHERE id=?", (run_id,))
