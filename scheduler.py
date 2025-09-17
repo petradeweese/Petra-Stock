@@ -15,6 +15,7 @@ from prometheus_client import Counter  # type: ignore
 from routes import _update_forward_tests  # type: ignore
 from scanner import preload_prices  # type: ignore
 from services.market_data import get_prices as provider_get_prices
+from services.http_client import RateLimitTimeoutSoon
 from services.errors import DataUnavailableError
 from services.polygon_client import compute_request_window
 from services.price_store import covers, get_coverage, missing_ranges, upsert_bars
@@ -66,6 +67,26 @@ class WorkQueue:
 
 
 work_queue = WorkQueue()
+
+
+async def fetch_polygon_prices_async(
+    symbols,
+    interval: str,
+    start,
+    end,
+    timeout_ctx=None,
+):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        None,
+        lambda: provider_get_prices(
+            symbols,
+            interval,
+            start,
+            end,
+            provider="schwab",
+        ),
+    )
 
 
 def queue_gap_fill(symbol: str, start, end, interval: str) -> None:
@@ -168,17 +189,9 @@ def queue_gap_fill(symbol: str, start, end, interval: str) -> None:
                         return
 
                     call_start = time.monotonic()
-                    loop = asyncio.get_running_loop()
                     try:
-                        df_map = await loop.run_in_executor(
-                            None,
-                            lambda: provider_get_prices(
-                                [symbol],
-                                interval,
-                                window_start,
-                                window_end,
-                                provider="schwab",
-                            ),
+                        df_map = await fetch_polygon_prices_async(
+                            [symbol], interval, window_start, window_end
                         )
                     except DataUnavailableError as err:
                         logger.info(
@@ -194,6 +207,24 @@ def queue_gap_fill(symbol: str, start, end, interval: str) -> None:
                             )
                         )
                         break
+                    except RateLimitTimeoutSoon as err:
+                        wait_s = random.uniform(0.5, 2.0)
+                        logger.info(
+                            json.dumps(
+                                {
+                                    "type": "gap_rate_limit_requeue",
+                                    "symbol": symbol,
+                                    "interval": interval,
+                                    "start": window_start.isoformat(),
+                                    "end": window_end.isoformat(),
+                                    "retry_delay_s": wait_s,
+                                    "error": str(err),
+                                }
+                            )
+                        )
+                        await asyncio.sleep(wait_s)
+                        queue_gap_fill(symbol, start, end, interval)
+                        return
                     except Exception as e:
                         import traceback as _tb
 

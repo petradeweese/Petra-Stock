@@ -2496,8 +2496,10 @@ async def settings_update(request: Request):
     form = await request.form()
     key = (form.get("key") or "").strip()
     if key == "USE_SCHWAB_PRIMARY":
-        value = form.get("value")
-        app_config.set_use_schwab_primary(bool(value))
+        raw_value = form.get("value")
+        value = (raw_value or "").strip().lower()
+        falsey = {"0", "false", "no", "off", ""}
+        app_config.set_use_schwab_primary(value not in falsey)
     return RedirectResponse(url="/settings", status_code=303)
 
 
