@@ -805,6 +805,47 @@ def analyze_roi_mode(ticker, interval, direction,
     feats = list(X.columns); paths = _paths_to_leaves(tree, feats)
 
     def _eval_slice(Xs, Gs):
+        cfg = globals().get("cfg", None)
+
+        # --- target/stop normalization (single source of truth) ---
+        # Try row fields first, then model/config defaults, then hard defaults.
+        def _read(v, *keys, default=None):
+            if isinstance(v, dict):
+                for k in keys:
+                    if k in v and v[k] is not None:
+                        return v[k]
+            # pandas Series / dict-like row
+            try:
+                for k in keys:
+                    val = v.get(k, None) if hasattr(v, "get") else (v[k] if k in v else None)
+                    if val is not None:
+                        return val
+            except Exception:
+                pass
+            return default
+
+        def _cfg_default(attr, fallback):
+            try:
+                return getattr(cfg, attr)
+            except Exception:
+                return fallback
+
+        target_fallback = target_pct if target_pct is not None else _cfg_default("DEFAULT_TARGET_PCT", 1.0)
+        stop_fallback = stop_pct if stop_pct is not None else _cfg_default("DEFAULT_STOP_PCT", 0.5)
+
+        _target_pct = _read(Gs, "target_pct", "target", default=target_fallback)
+        _stop_pct = _read(Gs, "stop_pct", "stop", default=stop_fallback)
+
+        # Final guardrails: coerce to float
+        try:
+            _target_pct = float(_target_pct)
+        except Exception:
+            _target_pct = 1.0
+        try:
+            _stop_pct = float(_stop_pct)
+        except Exception:
+            _stop_pct = 0.5
+
         rows_map={}
         cooldown_idx = -1
         for ts, nid in zip(Xs.index, tree.apply(Xs)):
@@ -814,7 +855,7 @@ def analyze_roi_mode(ticker, interval, direction,
             if p < cooldown_idx: continue
             vix_z = (float(X.loc[ts,"VIX_Z"]) if ("VIX_Z" in X and pd.notna(X.loc[ts,"VIX_Z"])) else 0.0)
             m = _per_trade_metrics(prices, high_series, low_series, p, k_bars,
-                                   abs(target_pct/100.0), abs(stop_pct/100.0),
+                                   abs(_target_pct/100.0), abs(_stop_pct/100.0),
                                    max_tt_bars, interval, False,
                                    delta, theta_bar, vix_z, direction, slippage, vega_scale)
             rows_map.setdefault(nid, []).append(m)
@@ -832,7 +873,7 @@ def analyze_roi_mode(ticker, interval, direction,
             stops = sum(1 for x in lst if x.get("outcome") == "stop")
             timeouts = sum(1 for x in lst if x.get("outcome") == "timeout")
             hit_rate = hits / supp if supp else 0.0
-            stop_pct = stops / supp if supp else 0.0
+            stop_rate = stops / supp if supp else 0.0
             timeout_pct = timeouts / supp if supp else 0.0
             avg_tt = float(np.nanmean([x["tt"] for x in lst]))
             avg_dd = float(np.mean([x["dd"] for x in lst]))
@@ -850,7 +891,7 @@ def analyze_roi_mode(ticker, interval, direction,
                 "hit_lb95": hit_lb,
                 "confidence": conf_score,
                 "confidence_label": conf_label,
-                "stop_pct": stop_pct,
+                "stop_pct": stop_rate,
                 "timeout_pct": timeout_pct,
                 "avg_tt": avg_tt,
                 "avg_dd": avg_dd,
