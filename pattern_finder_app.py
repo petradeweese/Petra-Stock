@@ -1388,9 +1388,24 @@ class App:
         if not sel:
             messagebox.showinfo("Favorites","Select one or more rows to save."); return
         favs=self._load_favs()
+        columns = list(self.tree["columns"])
+        try:
+            node_idx = columns.index("node_id")
+        except ValueError:
+            messagebox.showerror("Favorites", "Unable to locate node_id column.")
+            return
         for iid in sel:
             vals=self.tree.item(iid,"values")
-            node_id=int(vals[9]); row=df[df["node_id"]==node_id]
+            if node_idx >= len(vals):
+                continue
+            node_val = vals[node_idx]
+            if node_val in ("", None):
+                continue
+            try:
+                node_id=int(node_val)
+            except (TypeError, ValueError):
+                continue
+            row=df[df["node_id"]==node_id]
             if row.empty: continue
             favs.append({
                 "ticker":p["ticker"],"interval":p["interval"],
