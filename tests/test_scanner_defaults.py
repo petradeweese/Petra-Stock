@@ -22,6 +22,14 @@ def test_desktop_like_single_uses_defaults(monkeypatch):
                     "rule": "demo",
                     "direction": kwargs.get("direction", "UP"),
                     "sharpe": 1.5,
+                    "hit_lb95": 0.55,
+                    "stop_pct": 0.2,
+                    "timeout_pct": 0.1,
+                    "confidence": 82,
+                    "confidence_label": "High",
+                    "recent3": [
+                        {"date": "2024-01-01", "roi": 0.12, "tt": 4, "outcome": "hit"}
+                    ],
                 }
             ]
         )
@@ -30,7 +38,10 @@ def test_desktop_like_single_uses_defaults(monkeypatch):
     monkeypatch.setattr(
         scanner,
         "_pfa",
-        SimpleNamespace(analyze_roi_mode=fake_analyze_roi_mode),
+        SimpleNamespace(
+            analyze_roi_mode=fake_analyze_roi_mode,
+            _bars_for_window=lambda value, unit, interval: 16,
+        ),
     )
 
     result = scanner._desktop_like_single("AAPL", {})
@@ -46,6 +57,14 @@ def test_desktop_like_single_uses_defaults(monkeypatch):
         "stability": 10.0,
         "sharpe": 1.5,
         "rule": "demo",
+        "hit_lb95": 0.55,
+        "stop_pct": 0.2,
+        "timeout_pct": 0.1,
+        "confidence": 82,
+        "confidence_label": "High",
+        "recent3": [
+            {"date": "2024-01-01", "roi": 0.12, "tt": 4, "outcome": "hit"}
+        ],
     }
 
     assert calls == {
@@ -69,4 +88,5 @@ def test_desktop_like_single_uses_defaults(monkeypatch):
         "event_mask": None,
         "slippage_bps": 7.0,
         "vega_scale": 0.03,
+        "cooldown_bars": 16,
     }

@@ -119,6 +119,173 @@ def wilson_lb95(hits: int, n: int) -> float:
     lb = (center - margin) / denom
     return max(0.0, min(1.0, lb))
 
+
+def _conf_v1(hit_lb95, avg_roi, support) -> tuple[int, str]:
+    """Lightweight 0-100 confidence score using existing aggregates."""
+
+    def _to_float(val, default=0.0):
+        try:
+            if val is None or (isinstance(val, float) and math.isnan(val)):
+                return float(default)
+            return float(val)
+        except (TypeError, ValueError):
+            return float(default)
+
+    p_raw = _to_float(hit_lb95, 0.0)
+    p = max(0.0, min(1.0, p_raw))
+
+    exp_raw = _to_float(avg_roi, 0.0)
+    exp = max(0.0, min(1.0, exp_raw))
+
+    supp_raw = _to_float(support, 0.0)
+    stab = max(0.0, min(1.0, supp_raw / 30.0))
+
+    score = 100.0 * (0.70 * p + 0.20 * exp + 0.10 * stab)
+    s = int(round(score))
+
+    if s >= 80:
+        label = "High"
+    elif s >= 60:
+        label = "Medium"
+    else:
+        label = "Low"
+    return s, label
+
+
+def _recent3_payload(trades, price_index=None):
+    """Return up to three most recent trades with compact metadata."""
+
+    if not trades:
+        return []
+
+    normalized = []
+    idx_values = None
+    if price_index is not None:
+        try:
+            idx_values = list(price_index)
+        except Exception:
+            idx_values = None
+
+    for trade in trades:
+        idx_raw = trade.get("t_index")
+        try:
+            idx_int = int(idx_raw)
+        except (TypeError, ValueError):
+            idx_int = None
+
+        dt_val = trade.get("dt")
+        dt_ts = None
+        if isinstance(dt_val, pd.Timestamp):
+            dt_ts = dt_val
+        elif dt_val is not None:
+            try:
+                dt_ts = pd.Timestamp(dt_val)
+            except Exception:
+                dt_ts = None
+
+        if dt_ts is None and idx_int is not None and idx_values is not None:
+            if 0 <= idx_int < len(idx_values):
+                idx_dt = idx_values[idx_int]
+                if isinstance(idx_dt, pd.Timestamp):
+                    dt_ts = idx_dt
+                else:
+                    try:
+                        dt_ts = pd.Timestamp(idx_dt)
+                    except Exception:
+                        dt_ts = None
+
+        normalized.append((trade, dt_ts, idx_int))
+
+    normalized.sort(
+        key=lambda item: (
+            item[1].value if isinstance(item[1], pd.Timestamp) else pd.Timestamp.min.value,
+            item[2] if item[2] is not None else -1,
+        )
+    )
+    recent_items = normalized[-3:]
+
+    payload = []
+    for trade, dt_ts, idx_int in recent_items:
+        date_str = ""
+        if isinstance(dt_ts, pd.Timestamp):
+            date_str = dt_ts.strftime("%Y-%m-%d")
+        else:
+            raw_dt = trade.get("dt")
+            if isinstance(raw_dt, pd.Timestamp):
+                date_str = raw_dt.strftime("%Y-%m-%d")
+            elif raw_dt is not None:
+                date_str = str(raw_dt)
+            elif idx_int is not None and idx_values is not None and 0 <= idx_int < len(idx_values):
+                idx_dt = idx_values[idx_int]
+                if isinstance(idx_dt, pd.Timestamp):
+                    date_str = idx_dt.strftime("%Y-%m-%d")
+                else:
+                    try:
+                        date_str = pd.Timestamp(idx_dt).strftime("%Y-%m-%d")
+                    except Exception:
+                        date_str = str(idx_dt)
+
+        tt_raw = trade.get("tt", 0)
+        if tt_raw is None or pd.isna(tt_raw):
+            tt_val = 0
+        else:
+            try:
+                tt_val = int(round(float(tt_raw)))
+            except (TypeError, ValueError):
+                tt_val = 0
+
+        roi_raw = trade.get("roi", 0.0)
+        if roi_raw is None or pd.isna(roi_raw):
+            roi_val = 0.0
+        else:
+            try:
+                roi_val = float(roi_raw)
+            except (TypeError, ValueError):
+                roi_val = 0.0
+
+        payload.append(
+            {
+                "date": date_str,
+                "outcome": trade.get("outcome"),
+                "tt": tt_val,
+                "roi": roi_val,
+            }
+        )
+
+    return payload
+
+
+def _fmt_recent3(r3):
+    if not r3:
+        return ""
+
+    parts = []
+    for entry in r3:
+        date_val = entry.get("date")
+        date_str = "" if date_val is None else str(date_val).strip()
+        outcome = entry.get("outcome") or ""
+        tt_raw = entry.get("tt", 0)
+        if tt_raw is None or pd.isna(tt_raw):
+            tt_val = 0
+        else:
+            try:
+                tt_val = int(round(float(tt_raw)))
+            except (TypeError, ValueError):
+                tt_val = 0
+        roi_raw = entry.get("roi", 0.0)
+        if roi_raw is None or pd.isna(roi_raw):
+            roi_val = 0.0
+        else:
+            try:
+                roi_val = float(roi_raw)
+            except (TypeError, ValueError):
+                roi_val = 0.0
+        sign = "+" if roi_val >= 0 else ""
+        prefix = " ".join(part for part in [date_str, str(outcome).strip()] if part)
+        parts.append(f"{prefix} {sign}{roi_val*100:.2f}% @{tt_val}b".strip())
+    return " | ".join(parts)
+
+
 def _download_prices(ticker: str, interval: str, lookback_years: float) -> pd.DataFrame:
     def _normalize_ohlcv(records):
         if not records:
@@ -411,7 +578,8 @@ def _theta_per_bar(interval: str, theta_per_day: float) -> float:
 def _dir_return(entry: float, px: float, direction: str) -> float:
     return (px/entry - 1.0) if direction=="UP" else (entry/px - 1.0)
 
-def _per_trade_metrics(prices: pd.Series, start_idx: int, k_bars: int,
+def _per_trade_metrics(prices: pd.Series, high_series: pd.Series, low_series: pd.Series,
+                       start_idx: int, k_bars: int,
                        target_pos: float, stop_pos: float, max_tt: int,
                        interval: str, entry_next_open: bool,
                        delta: float, theta_bar: float, vix_z: float,
@@ -429,19 +597,51 @@ def _per_trade_metrics(prices: pd.Series, start_idx: int, k_bars: int,
 
     max_fav = -1e9; worst = 0.0; t_hit=None; t_stop=None
     for t in range(first+1, end+1):
-        m = _dir_return(entry, prices.iloc[t], direction)
-        max_fav = max(max_fav, m); worst = min(worst, m)
-        hit_triggered = m >= abs(target_pos)
-        stop_triggered = m <= -abs(stop_pos)
-        if hit_triggered and t_hit is None:
-            t_hit = t-first
-        if stop_triggered and t_stop is None:
+        bar_high = high_series.iloc[t] if t < len(high_series) else np.nan
+        bar_low = low_series.iloc[t] if t < len(low_series) else np.nan
+        if pd.isna(bar_high):
+            bar_high = prices.iloc[t]
+        if pd.isna(bar_low):
+            bar_low = prices.iloc[t]
+        if pd.isna(bar_high) or pd.isna(bar_low) or bar_high is None or bar_low is None:
+            continue
+        if bar_high <= 0 or bar_low <= 0 or entry <= 0:
+            continue
+
+        if direction == "UP":
+            bar_fav = (bar_high / entry) - 1.0
+            bar_adv = (bar_low / entry) - 1.0
+        else:
+            bar_fav = (entry / bar_low) - 1.0
+            bar_adv = (entry / bar_high) - 1.0
+
+        max_fav = max(max_fav, bar_fav)
+        if direction == "UP":
+            worst = min(worst, bar_adv)
+        else:
+            if bar_adv < 0:
+                worst = min(worst, -abs(bar_adv))
+
+        if bar_adv <= -abs(stop_pos) and t_stop is None:
             t_stop = t-first
-        if hit_triggered or stop_triggered:
+            break
+        if bar_fav >= abs(target_pos) and t_hit is not None:
+            # already registered hit (should not happen with current flow)
+            break
+        if bar_fav >= abs(target_pos) and t_hit is None:
+            t_hit = t-first
             break
 
     hit_first = (t_hit is not None) and (t_stop is None or t_hit <= t_stop)
-    bars = t_hit if hit_first else (t_stop if t_stop is not None else (end-first))
+    raw_bars = t_hit if hit_first else (t_stop if t_stop is not None else (end-first))
+    bars = int(raw_bars) if raw_bars is not None else 0
+    exit_index = int(first + bars)
+    entry_dt = None
+    try:
+        if 0 <= first < len(prices.index):
+            entry_dt = prices.index[first]
+    except Exception:
+        entry_dt = None
     favorable = abs(target_pos) if hit_first else max(0.0, max_fav)
     base = delta * favorable
     time_cost = theta_bar * max(0, bars)
@@ -455,8 +655,17 @@ def _per_trade_metrics(prices: pd.Series, start_idx: int, k_bars: int,
         outcome = "stop"
     else:
         outcome = "timeout"
-    return {"hit":hit, "tt":(t_hit if t_hit is not None else np.nan),
-            "dd":abs(worst), "roi":roi, "outcome":outcome}
+    return {
+        "hit": hit,
+        "tt": (t_hit if t_hit is not None else np.nan),
+        "dd": abs(worst),
+        "roi": roi,
+        "outcome": outcome,
+        "bars_held": bars,
+        "exit_index": exit_index,
+        "t_index": int(first),
+        "dt": entry_dt,
+    }
 
 # -----------------------------
 # Tree helpers
@@ -493,6 +702,7 @@ def analyze_roi_mode(ticker, interval, direction,
                      atrz_gate, slope_gate_pct,
                      use_regime, regime_trend_only, vix_z_max,
                      event_mask, slippage_bps, vega_scale,
+                     cooldown_bars=None,
                      ccp_grid=(0.0,0.0005), depth_grid=(4,5,6)):
 
     raw = _download_prices(ticker, interval, lookback_years)
@@ -500,6 +710,8 @@ def analyze_roi_mode(ticker, interval, direction,
     if raw is None:
         raise DataUnavailableError(f"{ticker} no_close_or_empty")
     prices = raw["Close"].copy()
+    high_series = raw["High"].copy() if "High" in raw.columns else prices.copy()
+    low_series = raw["Low"].copy() if "Low" in raw.columns else prices.copy()
     X = build_features(raw, interval)
     regime = build_regime_features(X.index, interval, lookback_years)
     X = X.join(regime, how="left").ffill()
@@ -508,6 +720,8 @@ def analyze_roi_mode(ticker, interval, direction,
 
     common = X.index.intersection(prices.index)
     X, prices = X.loc[common], prices.loc[common]
+    high_series = high_series.loc[common]
+    low_series = low_series.loc[common]
     if len(X) < 400: raise ValueError(f"{ticker}: not enough aligned data.")
 
     # Gates
@@ -524,6 +738,16 @@ def analyze_roi_mode(ticker, interval, direction,
     diag = f"[Diag] Tradable bars after gates: {int(gate.sum())}/{len(gate)}"
 
     k_bars = _bars_for_window(window_value, window_unit, interval)
+    if cooldown_bars is None:
+        cooldown_val = k_bars
+    else:
+        try:
+            cooldown_val = int(round(float(cooldown_bars)))
+        except (TypeError, ValueError):
+            cooldown_val = k_bars
+        if cooldown_val < 0:
+            cooldown_val = k_bars
+    cooldown_val = min(cooldown_val, len(prices)) if len(prices) else k_bars
     theta_bar = _theta_per_bar(interval, theta_per_day_pct/100.0)
     slippage = slippage_bps/10000.0
     delta = float(delta_assumed)
@@ -536,16 +760,29 @@ def analyze_roi_mode(ticker, interval, direction,
 
     def _roi_series(idxs):
         res=[]
+        cooldown_idx = -1
         for ts in idxs:
-            if not gate.loc[ts]: res.append(0.0); continue
-            p = idx_pos.get(ts); 
-            if p is None or p >= len(prices)-2: res.append(0.0); continue
+            if not gate.loc[ts]:
+                res.append(0.0)
+                continue
+            p = idx_pos.get(ts)
+            if p is None or p >= len(prices)-2:
+                res.append(0.0)
+                continue
+            if p < cooldown_idx:
+                res.append(0.0)
+                continue
             vix_z = (float(X.loc[ts,"VIX_Z"]) if ("VIX_Z" in X and pd.notna(X.loc[ts,"VIX_Z"])) else 0.0)
-            m = _per_trade_metrics(prices, p, k_bars,
+            m = _per_trade_metrics(prices, high_series, low_series, p, k_bars,
                                    abs(target_pct/100.0), abs(stop_pct/100.0),
                                    max_tt_bars, interval, False,
                                    delta, theta_bar, vix_z, direction, slippage, vega_scale)
             res.append(m["roi"])
+            exit_idx = m.get("exit_index")
+            next_cd = p + cooldown_val
+            if isinstance(exit_idx, (int, np.integer)):
+                next_cd = min(next_cd, int(exit_idx))
+            cooldown_idx = max(cooldown_idx, next_cd)
         return pd.Series(res, index=idxs)
 
     y_tr = _roi_series(X_tr.index)
@@ -569,16 +806,23 @@ def analyze_roi_mode(ticker, interval, direction,
 
     def _eval_slice(Xs, Gs):
         rows_map={}
+        cooldown_idx = -1
         for ts, nid in zip(Xs.index, tree.apply(Xs)):
             if not Gs.loc[ts]: continue
-            p = idx_pos.get(ts); 
+            p = idx_pos.get(ts);
             if p is None or p >= len(prices)-2: continue
+            if p < cooldown_idx: continue
             vix_z = (float(X.loc[ts,"VIX_Z"]) if ("VIX_Z" in X and pd.notna(X.loc[ts,"VIX_Z"])) else 0.0)
-            m = _per_trade_metrics(prices, p, k_bars,
+            m = _per_trade_metrics(prices, high_series, low_series, p, k_bars,
                                    abs(target_pct/100.0), abs(stop_pct/100.0),
                                    max_tt_bars, interval, False,
                                    delta, theta_bar, vix_z, direction, slippage, vega_scale)
             rows_map.setdefault(nid, []).append(m)
+            exit_idx = m.get("exit_index")
+            next_cd = p + cooldown_val
+            if isinstance(exit_idx, (int, np.integer)):
+                next_cd = min(next_cd, int(exit_idx))
+            cooldown_idx = max(cooldown_idx, next_cd)
         rows=[]
         for nid,lst in rows_map.items():
             if not lst:
@@ -596,17 +840,23 @@ def analyze_roi_mode(ticker, interval, direction,
             avg_roi = float(np.mean(roi_vals))
             roi_std = float(np.std(roi_vals)) if len(roi_vals) > 1 else 0.0
             sharpe = avg_roi / roi_std if roi_std > 1e-9 else 0.0
+            hit_lb = wilson_lb95(hits, supp)
+            conf_score, conf_label = _conf_v1(hit_lb, avg_roi, supp)
+            recent3 = _recent3_payload(lst, prices.index)
             rows.append({
                 "node_id": int(nid),
                 "support": supp,
                 "hit_rate": hit_rate,
-                "hit_lb95": wilson_lb95(hits, supp),
+                "hit_lb95": hit_lb,
+                "confidence": conf_score,
+                "confidence_label": conf_label,
                 "stop_pct": stop_pct,
                 "timeout_pct": timeout_pct,
                 "avg_tt": avg_tt,
                 "avg_dd": avg_dd,
                 "avg_roi": avg_roi,
                 "sharpe": sharpe,
+                "recent3": recent3,
                 "rule": _fmt_rule(paths.get(nid, [])),
             })
         df = pd.DataFrame(rows)
@@ -639,12 +889,15 @@ def analyze_roi_mode(ticker, interval, direction,
                     "support",
                     "hit_rate",
                     "hit_lb95",
+                    "confidence",
+                    "confidence_label",
                     "stop_pct",
                     "timeout_pct",
                     "avg_tt",
                     "avg_dd",
                     "avg_roi",
                     "sharpe",
+                    "recent3",
                     "rule",
                     "stability",
                     "diag",
@@ -657,7 +910,9 @@ def analyze_roi_mode(ticker, interval, direction,
         df["stability"]=stability; df["diag"]=diag
         return df
 
-    return {"tree":tree,"features":feats,"paths":paths,"k_bars":k_bars,"prices":prices,
+    return {"tree":tree,"features":feats,"paths":paths,"k_bars":k_bars,
+            "cooldown_bars":cooldown_val,
+            "prices":prices,"high_series":high_series,"low_series":low_series,
             "idx_pos":{ts:i for i,ts in enumerate(prices.index)},"stability":stability}, _filter(df_te), \
            {"X_forward":X_fw, "gate":gate.loc[X_fw.index]}
 
@@ -678,6 +933,7 @@ def _scan_worker(args):
             regime_trend_only=cfg["regime_trend_only"], vix_z_max=cfg["vix_z_max"],
             event_mask=cfg["event_mask_dict"].get(tkr, cfg["default_event_mask"]),
             slippage_bps=cfg["slippage_bps"], vega_scale=cfg["vega_scale"],
+            cooldown_bars=cfg.get("cooldown_bars"),
             ccp_grid=(0.0,0.0005), depth_grid=(4,5)
         )
         if df is None or df.empty: return None
@@ -685,9 +941,28 @@ def _scan_worker(args):
                 & (df["avg_dd"]*100.0 <= cfg["scan_max_dd"])]
         if df.empty: return None
         r = df.iloc[0]
+        conf_score = r.get("confidence")
+        conf_label = r.get("confidence_label")
+        if conf_score is None or (isinstance(conf_score, float) and math.isnan(conf_score)):
+            conf_score, conf_label = _conf_v1(r.get("hit_lb95"), r.get("avg_roi"), r.get("support"))
+        else:
+            try:
+                conf_score = int(round(float(conf_score)))
+            except (TypeError, ValueError):
+                conf_score, conf_label = _conf_v1(r.get("hit_lb95"), r.get("avg_roi"), r.get("support"))
+            else:
+                if not conf_label:
+                    _, conf_label = _conf_v1(r.get("hit_lb95"), r.get("avg_roi"), r.get("support"))
+        recent3 = r.get("recent3")
+        if isinstance(recent3, float) and math.isnan(recent3):
+            recent3 = []
+        if recent3 is None:
+            recent3 = []
         return {
             "ticker": tkr,
             "direction": r["direction"],
+            "confidence": conf_score,
+            "confidence_label": conf_label,
             "avg_roi": float(r["avg_roi"]),
             "avg_roi_pct": r["avg_roi"] * 100.0,
             "hit_pct": r["hit_rate"] * 100.0,
@@ -699,6 +974,7 @@ def _scan_worker(args):
             "timeout_pct": float(r.get("timeout_pct", 0.0)),
             "stability": r["stability"],
             "sharpe": r.get("sharpe", 0.0),
+            "recent3": recent3,
             "rule": r["rule"],
         }
     except Exception:
@@ -716,6 +992,8 @@ def scan_parallel(tickers, cfg, max_workers=None):
             columns=[
                 "ticker",
                 "direction",
+                "confidence",
+                "confidence_label",
                 "avg_roi",
                 "avg_roi_pct",
                 "hit_pct",
@@ -727,10 +1005,39 @@ def scan_parallel(tickers, cfg, max_workers=None):
                 "timeout_pct",
                 "stability",
                 "sharpe",
+                "recent3",
                 "rule",
             ]
         )
     df = pd.DataFrame(out)
+    if "recent3" not in df.columns:
+        df["recent3"] = [[] for _ in range(len(df))]
+    else:
+        def _sanitize_recent(val):
+            if isinstance(val, list):
+                return val
+            if val is None:
+                return []
+            if isinstance(val, float) and math.isnan(val):
+                return []
+            if isinstance(val, tuple):
+                return list(val)
+            if isinstance(val, str):
+                return []
+            try:
+                if pd.isna(val):  # type: ignore[arg-type]
+                    return []
+            except Exception:
+                pass
+            return []
+
+        df["recent3"] = df["recent3"].apply(_sanitize_recent)
+    conf_series = df.get("confidence", pd.Series(0, index=df.index))
+    df["confidence"] = conf_series.apply(
+        lambda x: 0 if x is None or (isinstance(x, float) and math.isnan(x)) else int(round(float(x)))
+    )
+    label_series = df.get("confidence_label", pd.Series("Low", index=df.index))
+    df["confidence_label"] = label_series.fillna("Low")
     if "hit_lb95" in df.columns:
         df["hit_lb95"] = df["hit_lb95"].fillna(0.0)
     else:
@@ -760,6 +1067,8 @@ def scan_parallel_threaded(tickers, cfg, max_workers=None):
             columns=[
                 "ticker",
                 "direction",
+                "confidence",
+                "confidence_label",
                 "avg_roi",
                 "avg_roi_pct",
                 "hit_pct",
@@ -771,10 +1080,39 @@ def scan_parallel_threaded(tickers, cfg, max_workers=None):
                 "timeout_pct",
                 "stability",
                 "sharpe",
+                "recent3",
                 "rule",
             ]
         )
     df = pd.DataFrame(out)
+    if "recent3" not in df.columns:
+        df["recent3"] = [[] for _ in range(len(df))]
+    else:
+        def _sanitize_recent(val):
+            if isinstance(val, list):
+                return val
+            if val is None:
+                return []
+            if isinstance(val, float) and math.isnan(val):
+                return []
+            if isinstance(val, tuple):
+                return list(val)
+            if isinstance(val, str):
+                return []
+            try:
+                if pd.isna(val):  # type: ignore[arg-type]
+                    return []
+            except Exception:
+                pass
+            return []
+
+        df["recent3"] = df["recent3"].apply(_sanitize_recent)
+    conf_series = df.get("confidence", pd.Series(0, index=df.index))
+    df["confidence"] = conf_series.apply(
+        lambda x: 0 if x is None or (isinstance(x, float) and math.isnan(x)) else int(round(float(x)))
+    )
+    label_series = df.get("confidence_label", pd.Series("Low", index=df.index))
+    df["confidence_label"] = label_series.fillna("Low")
     if "hit_lb95" in df.columns:
         df["hit_lb95"] = df["hit_lb95"].fillna(0.0)
     else:
@@ -816,6 +1154,11 @@ class App:
         self.win_val=tk.DoubleVar(value=4.0); ttk.Entry(f,textvariable=self.win_val,width=8).grid(row=1,column=5,padx=6)
         self.win_unit=tk.StringVar(value="Hours")
         ttk.Combobox(f,textvariable=self.win_unit,values=["Hours","Days"],state="readonly",width=8).grid(row=1,column=6,padx=6)
+
+        default_cd = _bars_for_window(self.win_val.get(), self.win_unit.get(), self.interval.get())
+        ttk.Label(f,text="Cooldown bars:").grid(row=1,column=7,sticky="w")
+        self.cooldown_bars=tk.IntVar(value=int(default_cd))
+        ttk.Entry(f,textvariable=self.cooldown_bars,width=8).grid(row=1,column=8,padx=6)
 
         ttk.Label(f,text="Max TT (bars):").grid(row=0,column=6,sticky="w")
         self.max_tt=tk.IntVar(value=12); ttk.Entry(f,textvariable=self.max_tt,width=8).grid(row=0,column=7,padx=6)
@@ -885,6 +1228,8 @@ class App:
             "rank",
             "ticker",
             "direction",
+            "confidence",
+            "confidence_label",
             "avg_roi",
             "hit_pct",
             "hit_lb95",
@@ -893,6 +1238,7 @@ class App:
             "timeout_pct",
             "avg_tt",
             "avg_dd",
+            "recent",
             "stability",
             "atrz",
             "slope",
@@ -906,6 +1252,8 @@ class App:
             ("rank", 60),
             ("ticker", 80),
             ("direction", 80),
+            ("confidence", 100),
+            ("confidence_label", 120),
             ("avg_roi", 100),
             ("hit_pct", 100),
             ("hit_lb95", 110),
@@ -914,6 +1262,7 @@ class App:
             ("timeout_pct", 110),
             ("avg_tt", 80),
             ("avg_dd", 110),
+            ("recent", 420),
             ("stability", 90),
             ("atrz", 70),
             ("slope", 70),
@@ -997,6 +1346,8 @@ class App:
         cols=(
             "rank",
             "direction",
+            "confidence",
+            "confidence_label",
             "avg_roi",
             "hit_pct",
             "hit_lb95",
@@ -1005,13 +1356,14 @@ class App:
             "timeout_pct",
             "avg_tt",
             "avg_dd",
+            "recent",
             "stability",
             "rule",
             "node_id",
             "diag",
         )
         self.tree=ttk.Treeview(self.tab_rules,columns=cols,show="headings",height=24)
-        widths=[60,80,100,100,110,80,110,110,80,110,90,840,80,250]
+        widths=[60,80,90,120,100,100,110,80,110,110,80,110,420,90,780,80,250]
         for (c,w) in zip(cols,widths):
             self.tree.heading(c,text=c.upper()); self.tree.column(c,width=w,anchor="w")
         self.tree.pack(fill="both",expand=True)
@@ -1020,6 +1372,8 @@ class App:
             "rank",
             "ticker",
             "direction",
+            "confidence",
+            "confidence_label",
             "avg_roi",
             "hit_pct",
             "hit_lb95",
@@ -1028,6 +1382,7 @@ class App:
             "timeout_pct",
             "avg_tt",
             "avg_dd",
+            "recent",
             "stability",
             "rule",
         )
@@ -1038,6 +1393,8 @@ class App:
                 ("rank",60),
                 ("ticker",80),
                 ("direction",80),
+                ("confidence",90),
+                ("confidence_label",120),
                 ("avg_roi",100),
                 ("hit_pct",100),
                 ("hit_lb95",110),
@@ -1046,8 +1403,9 @@ class App:
                 ("timeout_pct",110),
                 ("avg_tt",80),
                 ("avg_dd",110),
+                ("recent",420),
                 ("stability",90),
-                ("rule",820),
+                ("rule",780),
             ]:
                 tv.heading(c,text=c.upper()); tv.column(c,width=w,anchor="w")
             tv.pack(fill="both",expand=True)
@@ -1246,14 +1604,28 @@ class App:
         if p: self.events.set(p)
 
     def _params(self):
+        interval = self.interval.get()
+        window_value = float(self.win_val.get())
+        window_unit = self.win_unit.get()
+        k_bars = _bars_for_window(window_value, window_unit, interval)
+        try:
+            cd_raw = self.cooldown_bars.get()
+        except Exception:
+            cd_raw = k_bars
+        try:
+            cd_val = int(round(float(cd_raw)))
+        except (TypeError, ValueError):
+            cd_val = k_bars
+        if cd_val < 0:
+            cd_val = k_bars
         return dict(
             ticker=self.ticker.get().strip().upper(),
-            interval=self.interval.get(),
+            interval=interval,
             direction=self.direction.get(),
             target_pct=float(self.target.get()),
             stop_pct=float(self.stop.get()),
-            window_value=float(self.win_val.get()),
-            window_unit=self.win_unit.get(),
+            window_value=window_value,
+            window_unit=window_unit,
             lookback_years=float(self.lookback.get()),
             max_tt_bars=int(self.max_tt.get()),
             min_support=int(self.min_support.get()),
@@ -1265,7 +1637,8 @@ class App:
             regime_trend_only=bool(self.trend_only.get()),
             vix_z_max=float(self.vix_z.get()),
             slippage_bps=float(self.slip.get()),
-            vega_scale=float(self.vega_scale.get())
+            vega_scale=float(self.vega_scale.get()),
+            cooldown_bars=cd_val,
         )
 
     def on_run(self):
@@ -1295,6 +1668,7 @@ class App:
                     regime_trend_only=p["regime_trend_only"], vix_z_max=p["vix_z_max"],
                     event_mask=ev_mask,
                     slippage_bps=p["slippage_bps"], vega_scale=p["vega_scale"],
+                    cooldown_bars=p["cooldown_bars"],
                 )
                 last_model, last_forward = model, fwd
                 rules_all.append(df)
@@ -1329,6 +1703,19 @@ class App:
                     return float(val) / scale
             return 0.0
         for i,row in df.iterrows():
+            conf_score = row.get("confidence")
+            conf_label = row.get("confidence_label")
+            if conf_score is None or pd.isna(conf_score):
+                conf_score, conf_label = _conf_v1(row.get("hit_lb95"), row.get("avg_roi"), row.get("support"))
+            else:
+                try:
+                    conf_score = int(round(float(conf_score)))
+                except (TypeError, ValueError):
+                    conf_score, conf_label = _conf_v1(row.get("hit_lb95"), row.get("avg_roi"), row.get("support"))
+                else:
+                    if not conf_label:
+                        _, conf_label = _conf_v1(row.get("hit_lb95"), row.get("avg_roi"), row.get("support"))
+            conf_label = conf_label or "Low"
             row_vals = {
                 "avg_roi": fmt(_frac(row, [("avg_roi", 1.0), ("avg_roi_pct", 100.0)])),
                 "hit_pct": fmt(_frac(row, [("hit_rate", 1.0), ("hit_pct", 100.0)])),
@@ -1336,6 +1723,9 @@ class App:
                 "stop_pct": fmt(_frac(row, [("stop_pct", 1.0)])),
                 "timeout_pct": fmt(_frac(row, [("timeout_pct", 1.0)])),
                 "avg_dd": fmt(_frac(row, [("avg_dd", 1.0), ("avg_dd_pct", 100.0)])),
+                "confidence": f"{conf_score}",
+                "confidence_label": conf_label,
+                "recent": _fmt_recent3(row.get("recent3") or []),
             }
             stab_val = row.get("stability", 0)
             try:
@@ -1355,6 +1745,8 @@ class App:
                 values=(
                     i + 1,
                     row.get("direction", "UP"),
+                    row_vals["confidence"],
+                    row_vals["confidence_label"],
                     row_vals["avg_roi"],
                     row_vals["hit_pct"],
                     row_vals["hit_lb95"],
@@ -1363,6 +1755,7 @@ class App:
                     row_vals["timeout_pct"],
                     avg_tt,
                     avg_dd,
+                    row_vals["recent"],
                     stability,
                     row.get("rule", ""),
                     node_id,
@@ -1419,6 +1812,7 @@ class App:
                 "slope":p["slope_gate_pct"],"use_regime":p["use_regime"],
                 "trend_only":p["regime_trend_only"],"vix_z_max":p["vix_z_max"],
                 "slippage_bps":p["slippage_bps"],"vega_scale":p["vega_scale"],
+                "cooldown_bars":p["cooldown_bars"],
                 # store reference avg_dd for info in emails
                 "ref_avg_dd": float(row.iloc[0]["avg_dd"]) if not pd.isna(row.iloc[0]["avg_dd"]) else None
             })
@@ -1433,6 +1827,15 @@ class App:
             messagebox.showinfo("Forward Test","No favorites saved."); return
         Xf, gatef = fwd["X_forward"], fwd["gate"]
         prices, paths, k_bars = model["prices"], model["paths"], model["k_bars"]
+        high_series = model.get("high_series", prices)
+        low_series = model.get("low_series", prices)
+        model_cd_raw = model.get("cooldown_bars", k_bars)
+        try:
+            model_cd = int(round(float(model_cd_raw)))
+        except (TypeError, ValueError):
+            model_cd = k_bars
+        if model_cd < 0:
+            model_cd = k_bars
         idx_pos = model["idx_pos"]; theta_bar = _theta_per_bar(p["interval"], p["theta_per_day_pct"]/100.0)
         rows=[]
         for fav in favs:
@@ -1443,32 +1846,55 @@ class App:
                 mask &= (Xf[f]<=th) if op=="<=" else (Xf[f]>th)
             mask &= gatef
             trades=[]
+            fav_cd = fav.get("cooldown_bars")
+            try:
+                fav_cd_val = int(round(float(fav_cd))) if fav_cd is not None else model_cd
+            except (TypeError, ValueError):
+                fav_cd_val = model_cd
+            if fav_cd_val < 0:
+                fav_cd_val = model_cd
+            fav_cd_val = min(fav_cd_val, len(prices)) if len(prices) else fav_cd_val
+            cooldown_idx = -1
             for ts in Xf.index[mask]:
-                pos=idx_pos.get(ts); 
+                pos=idx_pos.get(ts);
                 if pos is None or pos >= len(prices)-2: continue
+                if pos < cooldown_idx: continue
                 vix_z=float(Xf.loc[ts,"VIX_Z"]) if "VIX_Z" in Xf.columns else 0.0
-                m=_per_trade_metrics(prices,pos,k_bars,
+                m=_per_trade_metrics(prices,high_series,low_series,pos,k_bars,
                     abs(fav["target_pct"]/100.0),abs(fav["stop_pct"]/100.0),
                     fav["max_tt_bars"],p["interval"],False,
                     fav["delta"],theta_bar,vix_z,fav.get("direction","UP"),
                     fav.get("slippage_bps",7)/10000.0,fav.get("vega_scale",0.03))
                 trades.append(m)
+                exit_idx = m.get("exit_index")
+                next_cd = pos + fav_cd_val
+                if isinstance(exit_idx, (int, np.integer)):
+                    next_cd = min(next_cd, int(exit_idx))
+                cooldown_idx = max(cooldown_idx, next_cd)
             if trades:
                 supp = len(trades)
                 hits = sum(1 for t in trades if t.get("outcome") == "hit")
                 stops = sum(1 for t in trades if t.get("outcome") == "stop")
                 timeouts = sum(1 for t in trades if t.get("outcome") == "timeout")
+                hit_lb = wilson_lb95(hits, supp)
+                roi_vals = [x["roi"] for x in trades]
+                avg_roi_val = float(np.mean(roi_vals)) if roi_vals else 0.0
+                conf_score, conf_label = _conf_v1(hit_lb, avg_roi_val, supp)
+                recent3 = _recent3_payload(trades, prices.index)
                 rows.append({
                     "direction": fav.get("direction", "UP"),
                     "node_id": fav["node_id"],
                     "support": supp,
                     "hit_rate": hits / supp if supp else 0.0,
-                    "hit_lb95": wilson_lb95(hits, supp),
+                    "hit_lb95": hit_lb,
+                    "confidence": conf_score,
+                    "confidence_label": conf_label,
                     "stop_pct": stops / supp if supp else 0.0,
                     "timeout_pct": timeouts / supp if supp else 0.0,
                     "avg_tt": float(np.nanmean([x["tt"] for x in trades])),
                     "avg_dd": float(np.mean([x["dd"] for x in trades])),
-                    "avg_roi": float(np.mean([x["roi"] for x in trades])),
+                    "avg_roi": avg_roi_val,
+                    "recent3": recent3,
                     "rule": fav["rule"],
                     "stability": "—",
                     "diag": "forward",
@@ -1505,6 +1931,7 @@ class App:
                          use_regime=p["use_regime"],regime_trend_only=p["regime_trend_only"],vix_z_max=p["vix_z_max"],
                          event_mask_dict=ev_masks,default_event_mask=pd.Series(True,index=pd.DatetimeIndex([])),
                          slippage_bps=p["slippage_bps"],vega_scale=p["vega_scale"],
+                         cooldown_bars=p["cooldown_bars"],
                          scan_min_hit=float(self.scan_min_hit.get()),scan_max_dd=float(self.scan_max_dd.get())*100.0)
                 out_all.append(scan_parallel(tickers,cfg))
             if out_all:
@@ -1528,6 +1955,19 @@ class App:
                     return 0.0
 
                 for i,row in out.iterrows():
+                    conf_score = row.get("confidence")
+                    conf_label = row.get("confidence_label")
+                    if conf_score is None or pd.isna(conf_score):
+                        conf_score, conf_label = _conf_v1(row.get("hit_lb95"), row.get("avg_roi"), row.get("support"))
+                    else:
+                        try:
+                            conf_score = int(round(float(conf_score)))
+                        except (TypeError, ValueError):
+                            conf_score, conf_label = _conf_v1(row.get("hit_lb95"), row.get("avg_roi"), row.get("support"))
+                        else:
+                            if not conf_label:
+                                _, conf_label = _conf_v1(row.get("hit_lb95"), row.get("avg_roi"), row.get("support"))
+                    conf_label = conf_label or "Low"
                     row_vals = {
                         "avg_roi": fmt(_frac(row, [("avg_roi", 1.0), ("avg_roi_pct", 100.0)])),
                         "hit_pct": fmt(_frac(row, [("hit_rate", 1.0), ("hit_pct", 100.0)])),
@@ -1535,6 +1975,9 @@ class App:
                         "stop_pct": fmt(_frac(row, [("stop_pct", 1.0)])),
                         "timeout_pct": fmt(_frac(row, [("timeout_pct", 1.0)])),
                         "avg_dd": fmt(_frac(row, [("avg_dd", 1.0), ("avg_dd_pct", 100.0)])),
+                        "confidence": f"{conf_score}",
+                        "confidence_label": conf_label,
+                        "recent": _fmt_recent3(row.get("recent3") or []),
                     }
                     support_val = row.get("support", 0)
                     support = 0 if support_val is None or pd.isna(support_val) else int(support_val)
@@ -1552,6 +1995,8 @@ class App:
                             i + 1,
                             row.get("ticker", ""),
                             row.get("direction", "UP"),
+                            row_vals["confidence"],
+                            row_vals["confidence_label"],
                             row_vals["avg_roi"],
                             row_vals["hit_pct"],
                             row_vals["hit_lb95"],
@@ -1560,6 +2005,7 @@ class App:
                             row_vals["timeout_pct"],
                             avg_tt,
                             row_vals["avg_dd"],
+                            row_vals["recent"],
                             stability,
                             row.get("rule", ""),
                         ),
@@ -1606,6 +2052,7 @@ class App:
                 theta_per_day_pct=p["theta_per_day_pct"],
                 slippage_bps=p["slippage_bps"],
                 vega_scale=p["vega_scale"],
+                cooldown_bars=p["cooldown_bars"],
                 scan_min_hit=float(self.scan_min_hit.get()),
                 scan_max_dd=float(self.scan_max_dd.get()) * 100.0,
             )
@@ -1650,6 +2097,7 @@ class App:
                             default_event_mask=pd.Series(True, index=pd.DatetimeIndex([])),
                             slippage_bps=locked["slippage_bps"],
                             vega_scale=locked["vega_scale"],
+                            cooldown_bars=locked["cooldown_bars"],
                             scan_min_hit=locked["scan_min_hit"],
                             scan_max_dd=locked["scan_max_dd"],
                         )
@@ -1686,6 +2134,19 @@ class App:
             return 0.0
 
         for _, row in df.iterrows():
+            conf_score = row.get("confidence")
+            conf_label = row.get("confidence_label")
+            if conf_score is None or pd.isna(conf_score):
+                conf_score, conf_label = _conf_v1(row.get("hit_lb95"), row.get("avg_roi"), row.get("support"))
+            else:
+                try:
+                    conf_score = int(round(float(conf_score)))
+                except (TypeError, ValueError):
+                    conf_score, conf_label = _conf_v1(row.get("hit_lb95"), row.get("avg_roi"), row.get("support"))
+                else:
+                    if not conf_label:
+                        _, conf_label = _conf_v1(row.get("hit_lb95"), row.get("avg_roi"), row.get("support"))
+            conf_label = conf_label or "Low"
             row_vals = {
                 "avg_roi": fmt(_frac(row, [("avg_roi", 1.0), ("avg_roi_pct", 100.0)])),
                 "hit_pct": fmt(_frac(row, [("hit_rate", 1.0), ("hit_pct", 100.0)])),
@@ -1693,6 +2154,9 @@ class App:
                 "stop_pct": fmt(_frac(row, [("stop_pct", 1.0)])),
                 "timeout_pct": fmt(_frac(row, [("timeout_pct", 1.0)])),
                 "avg_dd": fmt(_frac(row, [("avg_dd", 1.0), ("avg_dd_pct", 100.0)])),
+                "confidence": f"{conf_score}",
+                "confidence_label": conf_label,
+                "recent": _fmt_recent3(row.get("recent3") or []),
             }
             support_val = row.get("support", 0)
             support = 0 if support_val is None or pd.isna(support_val) else int(support_val)
@@ -1710,6 +2174,8 @@ class App:
                     rank,
                     row.get("ticker", ""),
                     row.get("direction", direction),
+                    row_vals["confidence"],
+                    row_vals["confidence_label"],
                     row_vals["avg_roi"],
                     row_vals["hit_pct"],
                     row_vals["hit_lb95"],
@@ -1718,6 +2184,7 @@ class App:
                     row_vals["timeout_pct"],
                     avg_tt,
                     row_vals["avg_dd"],
+                    row_vals["recent"],
                     stability,
                     f"{atrz:.2f}",
                     f"{slope:.2f}",
@@ -1749,6 +2216,7 @@ class App:
                 "vix_z_max": vix_cap,
                 "slippage_bps": locked["slippage_bps"],
                 "vega_scale": locked["vega_scale"],
+                "cooldown_bars": locked["cooldown_bars"],
                 "ref_avg_dd": float(row["avg_dd_pct"]) / 100.0 if pd.notna(row["avg_dd_pct"]) else None,
             }
             rank += 1

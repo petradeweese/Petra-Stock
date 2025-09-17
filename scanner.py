@@ -151,6 +151,7 @@ def _install_real_engine_adapter():
                         event_mask=None,
                         slippage_bps=params.get("slippage_bps", 7.0),
                         vega_scale=params.get("vega_scale", 0.03),
+                        cooldown_bars=params.get("cooldown_bars"),
                     )
                     if df_te is None or getattr(df_te, "empty", True):
                         return {}
@@ -315,6 +316,18 @@ def _desktop_like_single(ticker: str, params: dict) -> dict:
         scan_min_hit = _get_float("scan_min_hit", 50.0)
         scan_max_dd = _get_float("scan_max_dd", 50.0)
 
+        try:
+            cooldown_default = int(_pfa._bars_for_window(window_value, window_unit, interval))
+        except Exception:
+            cooldown_default = max_tt_bars
+        cooldown_param = params.get("cooldown_bars", cooldown_default)
+        try:
+            cooldown_bars = int(round(float(cooldown_param)))
+        except (TypeError, ValueError):
+            cooldown_bars = cooldown_default
+        if cooldown_bars < 0:
+            cooldown_bars = cooldown_default
+
         model, df, _ = _pfa.analyze_roi_mode(
             ticker=ticker,
             interval=interval,
@@ -336,6 +349,7 @@ def _desktop_like_single(ticker: str, params: dict) -> dict:
             event_mask=None,
             slippage_bps=slippage_bps,
             vega_scale=vega_scale,
+            cooldown_bars=cooldown_bars,
         )
         if df is None or df.empty:
             return {}
@@ -349,8 +363,60 @@ def _desktop_like_single(ticker: str, params: dict) -> dict:
             ["sharpe", "avg_roi", "hit_rate", "support", "stability"],
             ascending=[False, False, False, False, False],
         ).iloc[0]
-        stab = float(r.get("stability", 0.0))
+
+        def _coerce_float(value: Any, default: float = 0.0) -> float:
+            try:
+                if value is None or pd.isna(value):
+                    return float(default)
+                return float(value)
+            except Exception:
+                return float(default)
+
+        def _compute_confidence() -> tuple[int, str]:
+            try:
+                if hasattr(_pfa, "_conf_v1"):
+                    score, label = _pfa._conf_v1(
+                        r.get("hit_lb95"), r.get("avg_roi"), r.get("support")
+                    )
+                    try:
+                        score_int = int(round(float(score)))
+                    except Exception:
+                        score_int = 0
+                    return max(score_int, 0), str(label or "")
+            except Exception:
+                pass
+            return 0, ""
+
+        stab = _coerce_float(r.get("stability", 0.0))
         stab_pct = stab * 100.0 if abs(stab) <= 1.0 else stab
+        hit_lb95 = _coerce_float(r.get("hit_lb95", 0.0))
+        stop_fraction = _coerce_float(r.get("stop_pct", 0.0))
+        timeout_fraction = _coerce_float(r.get("timeout_pct", 0.0))
+
+        confidence_raw = r.get("confidence")
+        if confidence_raw is None or pd.isna(confidence_raw):
+            confidence_score, confidence_label = _compute_confidence()
+        else:
+            try:
+                confidence_score = int(round(float(confidence_raw)))
+            except (TypeError, ValueError):
+                confidence_score, confidence_label = _compute_confidence()
+            else:
+                confidence_label = str(r.get("confidence_label") or "")
+                if not confidence_label:
+                    _, confidence_label = _compute_confidence()
+
+        recent3 = r.get("recent3")
+        if isinstance(recent3, float) and pd.isna(recent3):
+            recent3 = []
+        if recent3 is None:
+            recent3 = []
+        elif not isinstance(recent3, list):
+            try:
+                recent3 = list(recent3)
+            except Exception:
+                recent3 = []
+
         return {
             "ticker": ticker,
             "direction": r.get("direction", direction),
@@ -362,6 +428,12 @@ def _desktop_like_single(ticker: str, params: dict) -> dict:
             "stability": stab_pct,
             "sharpe": float(r.get("sharpe", 0.0)),
             "rule": str(r["rule"]),
+            "hit_lb95": hit_lb95,
+            "stop_pct": stop_fraction,
+            "timeout_pct": timeout_fraction,
+            "confidence": confidence_score,
+            "confidence_label": confidence_label,
+            "recent3": recent3,
         }
     except Exception:
         logger.exception("scan computation failed for %s", ticker)
