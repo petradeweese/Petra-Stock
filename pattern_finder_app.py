@@ -105,6 +105,20 @@ def _bars_for_window(window_val: float, window_unit: str, interval: str) -> int:
     total = window_val*60 if window_unit=="Hours" else window_val*6.5*60
     return max(1, int(math.ceil(total/mbar)))
 
+
+def wilson_lb95(hits: int, n: int) -> float:
+    """Wilson 95% lower bound for binomial proportion."""
+    if n <= 0:
+        return 0.0
+    z = 1.96
+    p = hits / n
+    z2 = z * z
+    denom = 1.0 + z2 / n
+    center = p + z2 / (2.0 * n)
+    margin = z * ((p * (1.0 - p) / n + z2 / (4.0 * n * n)) ** 0.5)
+    lb = (center - margin) / denom
+    return max(0.0, min(1.0, lb))
+
 def _download_prices(ticker: str, interval: str, lookback_years: float) -> pd.DataFrame:
     def _normalize_ohlcv(records):
         if not records:
@@ -403,33 +417,46 @@ def _per_trade_metrics(prices: pd.Series, start_idx: int, k_bars: int,
                        delta: float, theta_bar: float, vix_z: float,
                        direction: str, slippage_pct: float, vega_scale: float):
     if entry_next_open:
-        if start_idx+1 >= len(prices): return {"hit":0,"tt":np.nan,"dd":np.nan,"roi":0.0}
+        if start_idx+1 >= len(prices):
+            return {"hit":0,"tt":np.nan,"dd":np.nan,"roi":0.0,"outcome":"timeout"}
         entry = prices.iloc[start_idx+1]; first = start_idx+1
     else:
         entry = prices.iloc[start_idx]; first = start_idx
 
     end = min(first+k_bars, len(prices)-1)
-    if end <= first: return {"hit":0,"tt":np.nan,"dd":np.nan,"roi":0.0}
+    if end <= first:
+        return {"hit":0,"tt":np.nan,"dd":np.nan,"roi":0.0,"outcome":"timeout"}
 
     max_fav = -1e9; worst = 0.0; t_hit=None; t_stop=None
     for t in range(first+1, end+1):
         m = _dir_return(entry, prices.iloc[t], direction)
         max_fav = max(max_fav, m); worst = min(worst, m)
-        if m <= -abs(stop_pos) and t_stop is None:
-            t_stop = t-first; break
-        if m >= abs(target_pos) and t_hit is None:
-            t_hit = t-first; break
+        hit_triggered = m >= abs(target_pos)
+        stop_triggered = m <= -abs(stop_pos)
+        if hit_triggered and t_hit is None:
+            t_hit = t-first
+        if stop_triggered and t_stop is None:
+            t_stop = t-first
+        if hit_triggered or stop_triggered:
+            break
 
-    bars = t_hit if t_hit is not None else (t_stop if t_stop is not None else (end-first))
-    favorable = abs(target_pos) if t_hit is not None else max(0.0, max_fav)
+    hit_first = (t_hit is not None) and (t_stop is None or t_hit <= t_stop)
+    bars = t_hit if hit_first else (t_stop if t_stop is not None else (end-first))
+    favorable = abs(target_pos) if hit_first else max(0.0, max_fav)
     base = delta * favorable
     time_cost = theta_bar * max(0, bars)
     vega_cost = abs(vix_z) * vega_scale * favorable
     roi = base - time_cost - vega_cost - slippage_pct
 
-    hit = 1 if (t_hit is not None and bars <= max_tt) else 0
+    hit = 1 if (hit_first and bars <= max_tt) else 0
+    if hit:
+        outcome = "hit"
+    elif t_stop is not None and not hit_first:
+        outcome = "stop"
+    else:
+        outcome = "timeout"
     return {"hit":hit, "tt":(t_hit if t_hit is not None else np.nan),
-            "dd":abs(worst), "roi":roi}
+            "dd":abs(worst), "roi":roi, "outcome":outcome}
 
 # -----------------------------
 # Tree helpers
@@ -554,17 +581,42 @@ def analyze_roi_mode(ticker, interval, direction,
             rows_map.setdefault(nid, []).append(m)
         rows=[]
         for nid,lst in rows_map.items():
-            if not lst: continue
-            supp=len(lst); hits=sum(x["hit"] for x in lst)
-            hit_rate=hits/supp; avg_tt=float(np.nanmean([x["tt"] for x in lst]))
-            avg_dd=float(np.mean([x["dd"] for x in lst]))
-            roi_vals=[x["roi"] for x in lst]; avg_roi=float(np.mean(roi_vals))
-            roi_std=float(np.std(roi_vals)) if len(roi_vals) > 1 else 0.0
-            sharpe=avg_roi/roi_std if roi_std > 1e-9 else 0.0
-            rows.append({"node_id":int(nid),"support":supp,"hit_rate":hit_rate,
-                         "avg_tt":avg_tt,"avg_dd":avg_dd,"avg_roi":avg_roi,
-                         "sharpe":sharpe,"rule":_fmt_rule(paths.get(nid,[]))})
-        return pd.DataFrame(rows).sort_values(["sharpe","avg_roi","hit_rate","support"], ascending=[False,False,False,False]).reset_index(drop=True)
+            if not lst:
+                continue
+            supp = len(lst)
+            hits = sum(1 for x in lst if x.get("outcome") == "hit")
+            stops = sum(1 for x in lst if x.get("outcome") == "stop")
+            timeouts = sum(1 for x in lst if x.get("outcome") == "timeout")
+            hit_rate = hits / supp if supp else 0.0
+            stop_pct = stops / supp if supp else 0.0
+            timeout_pct = timeouts / supp if supp else 0.0
+            avg_tt = float(np.nanmean([x["tt"] for x in lst]))
+            avg_dd = float(np.mean([x["dd"] for x in lst]))
+            roi_vals = [x["roi"] for x in lst]
+            avg_roi = float(np.mean(roi_vals))
+            roi_std = float(np.std(roi_vals)) if len(roi_vals) > 1 else 0.0
+            sharpe = avg_roi / roi_std if roi_std > 1e-9 else 0.0
+            rows.append({
+                "node_id": int(nid),
+                "support": supp,
+                "hit_rate": hit_rate,
+                "hit_lb95": wilson_lb95(hits, supp),
+                "stop_pct": stop_pct,
+                "timeout_pct": timeout_pct,
+                "avg_tt": avg_tt,
+                "avg_dd": avg_dd,
+                "avg_roi": avg_roi,
+                "sharpe": sharpe,
+                "rule": _fmt_rule(paths.get(nid, [])),
+            })
+        df = pd.DataFrame(rows)
+        if df.empty:
+            return df
+        if "hit_lb95" in df.columns:
+            df["hit_lb95"] = df["hit_lb95"].fillna(0.0)
+        else:
+            df["hit_lb95"] = 0.0
+        return df.sort_values(["hit_lb95", "avg_roi", "support"], ascending=[False, False, False]).reset_index(drop=True)
 
     df_te = _eval_slice(X_te, G_te)
 
@@ -580,7 +632,24 @@ def analyze_roi_mode(ticker, interval, direction,
 
     def _filter(df):
         if df is None or df.empty:
-            return pd.DataFrame(columns=["direction","node_id","support","hit_rate","avg_tt","avg_dd","avg_roi","sharpe","rule","stability","diag"])
+            return pd.DataFrame(
+                columns=[
+                    "direction",
+                    "node_id",
+                    "support",
+                    "hit_rate",
+                    "hit_lb95",
+                    "stop_pct",
+                    "timeout_pct",
+                    "avg_tt",
+                    "avg_dd",
+                    "avg_roi",
+                    "sharpe",
+                    "rule",
+                    "stability",
+                    "diag",
+                ]
+            )
         df = df[df["support"]>=min_support].copy()
         if df.empty:
             df["diag"]=diag; return df
@@ -616,11 +685,22 @@ def _scan_worker(args):
                 & (df["avg_dd"]*100.0 <= cfg["scan_max_dd"])]
         if df.empty: return None
         r = df.iloc[0]
-        return {"ticker":tkr,"direction":r["direction"],"avg_roi_pct":r["avg_roi"]*100.0,
-                "hit_pct":r["hit_rate"]*100.0,"support":int(r["support"]),
-                "avg_tt":r["avg_tt"],"avg_dd_pct":r["avg_dd"]*100.0,
-                "stability":r["stability"],"sharpe":r.get("sharpe",0.0),
-                "rule":r["rule"]}
+        return {
+            "ticker": tkr,
+            "direction": r["direction"],
+            "avg_roi": float(r["avg_roi"]),
+            "avg_roi_pct": r["avg_roi"] * 100.0,
+            "hit_pct": r["hit_rate"] * 100.0,
+            "hit_lb95": float(r.get("hit_lb95", 0.0)),
+            "support": int(r["support"]),
+            "avg_tt": r["avg_tt"],
+            "avg_dd_pct": r["avg_dd"] * 100.0,
+            "stop_pct": float(r.get("stop_pct", 0.0)),
+            "timeout_pct": float(r.get("timeout_pct", 0.0)),
+            "stability": r["stability"],
+            "sharpe": r.get("sharpe", 0.0),
+            "rule": r["rule"],
+        }
     except Exception:
         return None
 
@@ -632,9 +712,30 @@ def scan_parallel(tickers, cfg, max_workers=None):
         for res in pool.imap_unordered(_scan_worker, args):
             if res is not None: out.append(res)
     if not out:
-        return pd.DataFrame(columns=["ticker","direction","avg_roi_pct","hit_pct","support","avg_tt","avg_dd_pct","stability","sharpe","rule"])
-    return pd.DataFrame(out).sort_values(["sharpe","avg_roi_pct","hit_pct","support","stability"],
-                                         ascending=[False,False,False,False,False]).reset_index(drop=True)
+        return pd.DataFrame(
+            columns=[
+                "ticker",
+                "direction",
+                "avg_roi",
+                "avg_roi_pct",
+                "hit_pct",
+                "hit_lb95",
+                "support",
+                "avg_tt",
+                "avg_dd_pct",
+                "stop_pct",
+                "timeout_pct",
+                "stability",
+                "sharpe",
+                "rule",
+            ]
+        )
+    df = pd.DataFrame(out)
+    if "hit_lb95" in df.columns:
+        df["hit_lb95"] = df["hit_lb95"].fillna(0.0)
+    else:
+        df["hit_lb95"] = 0.0
+    return df.sort_values(["hit_lb95", "avg_roi", "support"], ascending=[False, False, False]).reset_index(drop=True)
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 def scan_parallel_threaded(tickers, cfg, max_workers=None):
@@ -655,11 +756,30 @@ def scan_parallel_threaded(tickers, cfg, max_workers=None):
             except Exception:
                 pass
     if not out:
-        return pd.DataFrame(columns=["ticker","direction","avg_roi_pct","hit_pct","support","avg_tt","avg_dd_pct","stability","sharpe","rule"])
-    return pd.DataFrame(out).sort_values(
-        ["sharpe","avg_roi_pct","hit_pct","support","stability"],
-        ascending=[False, False, False, False, False]
-    ).reset_index(drop=True)
+        return pd.DataFrame(
+            columns=[
+                "ticker",
+                "direction",
+                "avg_roi",
+                "avg_roi_pct",
+                "hit_pct",
+                "hit_lb95",
+                "support",
+                "avg_tt",
+                "avg_dd_pct",
+                "stop_pct",
+                "timeout_pct",
+                "stability",
+                "sharpe",
+                "rule",
+            ]
+        )
+    df = pd.DataFrame(out)
+    if "hit_lb95" in df.columns:
+        df["hit_lb95"] = df["hit_lb95"].fillna(0.0)
+    else:
+        df["hit_lb95"] = 0.0
+    return df.sort_values(["hit_lb95", "avg_roi", "support"], ascending=[False, False, False]).reset_index(drop=True)
 
 # -----------------------------
 # GUI
@@ -761,13 +881,46 @@ class App:
         self.tab_auto = ttk.Frame(nb)
         nb.add(self.tab_auto, text="Auto-Scanner")
 
-        auto_cols = ("rank","ticker","direction","avg_roi","hit_pct","support","avg_tt","avg_dd",
-                     "stability","atrz","slope","reg","trend","vix","rule")
+        auto_cols = (
+            "rank",
+            "ticker",
+            "direction",
+            "avg_roi",
+            "hit_pct",
+            "hit_lb95",
+            "support",
+            "stop_pct",
+            "timeout_pct",
+            "avg_tt",
+            "avg_dd",
+            "stability",
+            "atrz",
+            "slope",
+            "reg",
+            "trend",
+            "vix",
+            "rule",
+        )
         self.auto_tree = ttk.Treeview(self.tab_auto, columns=auto_cols, show="headings", height=22)
         for c, w in [
-            ("rank",60),("ticker",80),("direction",80),("avg_roi",100),("hit_pct",100),
-            ("support",80),("avg_tt",80),("avg_dd",100),("stability",90),
-            ("atrz",70),("slope",70),("reg",60),("trend",70),("vix",70),("rule",820)
+            ("rank", 60),
+            ("ticker", 80),
+            ("direction", 80),
+            ("avg_roi", 100),
+            ("hit_pct", 100),
+            ("hit_lb95", 110),
+            ("support", 80),
+            ("stop_pct", 110),
+            ("timeout_pct", 110),
+            ("avg_tt", 80),
+            ("avg_dd", 110),
+            ("stability", 90),
+            ("atrz", 70),
+            ("slope", 70),
+            ("reg", 60),
+            ("trend", 70),
+            ("vix", 70),
+            ("rule", 820),
         ]:
             self.auto_tree.heading(c, text=c.upper()); self.auto_tree.column(c, width=w, anchor="w")
         self.auto_tree.pack(fill="both", expand=True, padx=6, pady=(6,0))
@@ -841,19 +994,61 @@ class App:
         self.alert_status = tk.StringVar(value="Alerts idle.")
         ttk.Label(self.tab_alerts, textvariable=self.alert_status).pack(anchor="w", padx=12, pady=6)
 
-        cols=("rank","direction","hit_pct","support","avg_tt","avg_dd","avg_roi","stability","rule","node_id","diag")
+        cols=(
+            "rank",
+            "direction",
+            "avg_roi",
+            "hit_pct",
+            "hit_lb95",
+            "support",
+            "stop_pct",
+            "timeout_pct",
+            "avg_tt",
+            "avg_dd",
+            "stability",
+            "rule",
+            "node_id",
+            "diag",
+        )
         self.tree=ttk.Treeview(self.tab_rules,columns=cols,show="headings",height=24)
-        widths=[60,80,80,80,80,80,100,90,840,80,250]
+        widths=[60,80,100,100,110,80,110,110,80,110,90,840,80,250]
         for (c,w) in zip(cols,widths):
             self.tree.heading(c,text=c.upper()); self.tree.column(c,width=w,anchor="w")
         self.tree.pack(fill="both",expand=True)
 
-        scan_cols=("rank","ticker","direction","avg_roi","hit_pct","support","avg_tt","avg_dd","stability","rule")
+        scan_cols=(
+            "rank",
+            "ticker",
+            "direction",
+            "avg_roi",
+            "hit_pct",
+            "hit_lb95",
+            "support",
+            "stop_pct",
+            "timeout_pct",
+            "avg_tt",
+            "avg_dd",
+            "stability",
+            "rule",
+        )
         self.scan_sp=ttk.Treeview(self.tab_sp,columns=scan_cols,show="headings",height=24)
         self.scan_top=ttk.Treeview(self.tab_top,columns=scan_cols,show="headings",height=24)
         for tv in [self.scan_sp,self.scan_top]:
-            for c,w in [("rank",60),("ticker",80),("direction",80),("avg_roi",100),("hit_pct",100),
-                        ("support",80),("avg_tt",80),("avg_dd",100),("stability",90),("rule",820)]:
+            for c,w in [
+                ("rank",60),
+                ("ticker",80),
+                ("direction",80),
+                ("avg_roi",100),
+                ("hit_pct",100),
+                ("hit_lb95",110),
+                ("support",80),
+                ("stop_pct",110),
+                ("timeout_pct",110),
+                ("avg_tt",80),
+                ("avg_dd",110),
+                ("stability",90),
+                ("rule",820),
+            ]:
                 tv.heading(c,text=c.upper()); tv.column(c,width=w,anchor="w")
             tv.pack(fill="both",expand=True)
         ttk.Button(self.tab_sp,text="Export CSV",command=lambda:self.export_scan_csv("sp")).pack(anchor="w",padx=6,pady=6)
@@ -1105,10 +1300,15 @@ class App:
                 rules_all.append(df)
 
             out = pd.concat(rules_all, axis=0) if rules_all else pd.DataFrame()
-            out = out.sort_values(
-                ["avg_roi", "hit_rate", "support", "stability"],
-                ascending=[False, False, False, False]
-            ).reset_index(drop=True)
+            if not out.empty:
+                if "hit_lb95" in out.columns:
+                    out["hit_lb95"] = out["hit_lb95"].fillna(0.0)
+                else:
+                    out["hit_lb95"] = 0.0
+                out = out.sort_values(
+                    ["hit_lb95", "avg_roi", "support"],
+                    ascending=[False, False, False]
+                ).reset_index(drop=True)
 
             self._fill_rules(out)
             self.last_context = (last_model, out, last_forward, p)
@@ -1121,13 +1321,54 @@ class App:
     def _fill_rules(self, df):
         for r in self.tree.get_children(): self.tree.delete(r)
         if df is None or df.empty: return
+        fmt = lambda x: f"{(0.0 if x is None or pd.isna(x) else float(x))*100:5.2f}%"
+        def _frac(row, candidates):
+            for col, scale in candidates:
+                val = row.get(col)
+                if val is not None and not pd.isna(val):
+                    return float(val) / scale
+            return 0.0
         for i,row in df.iterrows():
-            self.tree.insert("", "end", values=(
-                i+1, row.get("direction","UP"), f"{row['hit_rate']*100:5.1f}%", int(row["support"]),
-                "—" if pd.isna(row["avg_tt"]) else f"{row['avg_tt']:.1f}",
-                f"{row['avg_dd']*100:5.2f}%", f"{row['avg_roi']*100:6.2f}%",
-                f"{row.get('stability',0):.3f}", row["rule"], int(row["node_id"]), row.get("diag","")
-            ))
+            row_vals = {
+                "avg_roi": fmt(_frac(row, [("avg_roi", 1.0), ("avg_roi_pct", 100.0)])),
+                "hit_pct": fmt(_frac(row, [("hit_rate", 1.0), ("hit_pct", 100.0)])),
+                "hit_lb95": fmt(_frac(row, [("hit_lb95", 1.0)])),
+                "stop_pct": fmt(_frac(row, [("stop_pct", 1.0)])),
+                "timeout_pct": fmt(_frac(row, [("timeout_pct", 1.0)])),
+                "avg_dd": fmt(_frac(row, [("avg_dd", 1.0), ("avg_dd_pct", 100.0)])),
+            }
+            stab_val = row.get("stability", 0)
+            try:
+                stability = f"{float(stab_val):.3f}"
+            except (TypeError, ValueError):
+                stability = str(stab_val) if stab_val is not None else "0.000"
+            support_val = row.get("support", 0)
+            support = 0 if support_val is None or pd.isna(support_val) else int(support_val)
+            avg_tt_val = row.get("avg_tt")
+            avg_tt = "—" if avg_tt_val is None or pd.isna(avg_tt_val) else f"{avg_tt_val:.1f}"
+            avg_dd = row_vals["avg_dd"]
+            node_val = row.get("node_id")
+            node_id = "" if node_val is None or pd.isna(node_val) else int(node_val)
+            self.tree.insert(
+                "",
+                "end",
+                values=(
+                    i + 1,
+                    row.get("direction", "UP"),
+                    row_vals["avg_roi"],
+                    row_vals["hit_pct"],
+                    row_vals["hit_lb95"],
+                    support,
+                    row_vals["stop_pct"],
+                    row_vals["timeout_pct"],
+                    avg_tt,
+                    avg_dd,
+                    stability,
+                    row.get("rule", ""),
+                    node_id,
+                    row.get("diag", ""),
+                ),
+            )
 
     # Favorites persistence
     def _load_favs(self):
@@ -1198,14 +1439,32 @@ class App:
                     fav.get("slippage_bps",7)/10000.0,fav.get("vega_scale",0.03))
                 trades.append(m)
             if trades:
-                supp=len(trades); hits=sum(t["hit"] for t in trades)
-                rows.append({"direction":fav.get("direction","UP"),"node_id":fav["node_id"],
-                             "support":supp,"hit_rate":hits/supp,
-                             "avg_tt":float(np.nanmean([x['tt'] for x in trades])),
-                             "avg_dd":float(np.mean([x['dd'] for x in trades])),
-                             "avg_roi":float(np.mean([x['roi'] for x in trades])),
-                             "rule":fav["rule"],"stability":"—","diag":"forward"})
-        out=pd.DataFrame(rows).sort_values(["avg_roi","hit_rate","support"],ascending=[False,False,False]).reset_index(drop=True)
+                supp = len(trades)
+                hits = sum(1 for t in trades if t.get("outcome") == "hit")
+                stops = sum(1 for t in trades if t.get("outcome") == "stop")
+                timeouts = sum(1 for t in trades if t.get("outcome") == "timeout")
+                rows.append({
+                    "direction": fav.get("direction", "UP"),
+                    "node_id": fav["node_id"],
+                    "support": supp,
+                    "hit_rate": hits / supp if supp else 0.0,
+                    "hit_lb95": wilson_lb95(hits, supp),
+                    "stop_pct": stops / supp if supp else 0.0,
+                    "timeout_pct": timeouts / supp if supp else 0.0,
+                    "avg_tt": float(np.nanmean([x["tt"] for x in trades])),
+                    "avg_dd": float(np.mean([x["dd"] for x in trades])),
+                    "avg_roi": float(np.mean([x["roi"] for x in trades])),
+                    "rule": fav["rule"],
+                    "stability": "—",
+                    "diag": "forward",
+                })
+        out = pd.DataFrame(rows)
+        if not out.empty:
+            if "hit_lb95" in out.columns:
+                out["hit_lb95"] = out["hit_lb95"].fillna(0.0)
+            else:
+                out["hit_lb95"] = 0.0
+            out = out.sort_values(["hit_lb95", "avg_roi", "support"], ascending=[False, False, False]).reset_index(drop=True)
         self._fill_rules(out)
 
     # ---------- Scanner ----------
@@ -1233,17 +1492,63 @@ class App:
                          slippage_bps=p["slippage_bps"],vega_scale=p["vega_scale"],
                          scan_min_hit=float(self.scan_min_hit.get()),scan_max_dd=float(self.scan_max_dd.get())*100.0)
                 out_all.append(scan_parallel(tickers,cfg))
-            out=pd.concat(out_all,axis=0).sort_values(["sharpe","avg_roi_pct","hit_pct","support","stability"],ascending=[False,False,False,False,False]).reset_index(drop=True) if out_all else pd.DataFrame()
+            if out_all:
+                out = pd.concat(out_all, axis=0)
+                if "hit_lb95" in out.columns:
+                    out["hit_lb95"] = out["hit_lb95"].fillna(0.0)
+                else:
+                    out["hit_lb95"] = 0.0
+                out = out.sort_values(["hit_lb95", "avg_roi", "support"], ascending=[False, False, False]).reset_index(drop=True)
+            else:
+                out = pd.DataFrame()
             tv=self.scan_sp if which=="sp" else self.scan_top
             for r in tv.get_children(): tv.delete(r)
             if out is not None and not out.empty:
+                fmt = lambda x: f"{(0.0 if x is None or pd.isna(x) else float(x))*100:5.2f}%"
+                def _frac(row, candidates):
+                    for col, scale in candidates:
+                        val = row.get(col)
+                        if val is not None and not pd.isna(val):
+                            return float(val) / scale
+                    return 0.0
+
                 for i,row in out.iterrows():
-                    tv.insert("", "end", values=(i+1,row["ticker"],row.get("direction","UP"),
-                                                 f"{row['avg_roi_pct']:6.2f}%",f"{row['hit_pct']:6.2f}%",
-                                                 int(row["support"]),
-                                                 "—" if pd.isna(row["avg_tt"]) else f"{row['avg_tt']:.1f}",
-                                                 f"{row['avg_dd_pct']:5.2f}%",
-                                                 f"{row.get('stability',0):.3f}", row["rule"]))
+                    row_vals = {
+                        "avg_roi": fmt(_frac(row, [("avg_roi", 1.0), ("avg_roi_pct", 100.0)])),
+                        "hit_pct": fmt(_frac(row, [("hit_rate", 1.0), ("hit_pct", 100.0)])),
+                        "hit_lb95": fmt(_frac(row, [("hit_lb95", 1.0)])),
+                        "stop_pct": fmt(_frac(row, [("stop_pct", 1.0)])),
+                        "timeout_pct": fmt(_frac(row, [("timeout_pct", 1.0)])),
+                        "avg_dd": fmt(_frac(row, [("avg_dd", 1.0), ("avg_dd_pct", 100.0)])),
+                    }
+                    support_val = row.get("support", 0)
+                    support = 0 if support_val is None or pd.isna(support_val) else int(support_val)
+                    avg_tt_val = row.get("avg_tt")
+                    avg_tt = "—" if avg_tt_val is None or pd.isna(avg_tt_val) else f"{avg_tt_val:.1f}"
+                    stab_val = row.get("stability", 0)
+                    try:
+                        stability = f"{float(stab_val):.3f}"
+                    except (TypeError, ValueError):
+                        stability = str(stab_val) if stab_val is not None else "0.000"
+                    tv.insert(
+                        "",
+                        "end",
+                        values=(
+                            i + 1,
+                            row.get("ticker", ""),
+                            row.get("direction", "UP"),
+                            row_vals["avg_roi"],
+                            row_vals["hit_pct"],
+                            row_vals["hit_lb95"],
+                            support,
+                            row_vals["stop_pct"],
+                            row_vals["timeout_pct"],
+                            avg_tt,
+                            row_vals["avg_dd"],
+                            stability,
+                            row.get("rule", ""),
+                        ),
+                    )
             if which=="sp": self.last_sp=out
             else: self.last_top=out
             self.status.set(f"Scanner done: {len(out)} rows.")
@@ -1357,26 +1662,54 @@ class App:
         if df is None or df.empty:
             return rank
 
+        fmt = lambda x: f"{(0.0 if x is None or pd.isna(x) else float(x))*100:5.2f}%"
+        def _frac(row, candidates):
+            for col, scale in candidates:
+                val = row.get(col)
+                if val is not None and not pd.isna(val):
+                    return float(val) / scale
+            return 0.0
+
         for _, row in df.iterrows():
+            row_vals = {
+                "avg_roi": fmt(_frac(row, [("avg_roi", 1.0), ("avg_roi_pct", 100.0)])),
+                "hit_pct": fmt(_frac(row, [("hit_rate", 1.0), ("hit_pct", 100.0)])),
+                "hit_lb95": fmt(_frac(row, [("hit_lb95", 1.0)])),
+                "stop_pct": fmt(_frac(row, [("stop_pct", 1.0)])),
+                "timeout_pct": fmt(_frac(row, [("timeout_pct", 1.0)])),
+                "avg_dd": fmt(_frac(row, [("avg_dd", 1.0), ("avg_dd_pct", 100.0)])),
+            }
+            support_val = row.get("support", 0)
+            support = 0 if support_val is None or pd.isna(support_val) else int(support_val)
+            avg_tt_val = row.get("avg_tt")
+            avg_tt = "—" if avg_tt_val is None or pd.isna(avg_tt_val) else f"{avg_tt_val:.1f}"
+            stab_val = row.get("stability", 0)
+            try:
+                stability = f"{float(stab_val):.3f}"
+            except (TypeError, ValueError):
+                stability = str(stab_val) if stab_val is not None else "0.000"
             iid = self.auto_tree.insert(
                 "",
                 "end",
                 values=(
                     rank,
-                    row["ticker"],
+                    row.get("ticker", ""),
                     row.get("direction", direction),
-                    f"{row['avg_roi_pct']:6.2f}%",
-                    f"{row['hit_pct']:6.2f}%",
-                    int(row["support"]),
-                    "—" if pd.isna(row["avg_tt"]) else f"{row['avg_tt']:.1f}",
-                    f"{row['avg_dd_pct']:5.2f}%",
-                    f"{row.get('stability', 0):.3f}",
+                    row_vals["avg_roi"],
+                    row_vals["hit_pct"],
+                    row_vals["hit_lb95"],
+                    support,
+                    row_vals["stop_pct"],
+                    row_vals["timeout_pct"],
+                    avg_tt,
+                    row_vals["avg_dd"],
+                    stability,
                     f"{atrz:.2f}",
                     f"{slope:.2f}",
                     "Y" if use_reg else "N",
                     "Y" if trend_only else "N",
                     f"{vix_cap:.1f}",
-                    row["rule"],
+                    row.get("rule", ""),
                 ),
             )
             self._auto_item_to_fav[iid] = {
