@@ -11,7 +11,7 @@ import time
 from concurrent.futures import as_completed
 from datetime import datetime, timedelta
 from threading import Thread
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 from uuid import uuid4
 
 import pandas as pd
@@ -54,6 +54,306 @@ SCAN_BATCH_WRITES = os.getenv("SCAN_BATCH_WRITES", "1") not in {"0", "false", "n
 
 _EMPTY_HEATMAP: Dict[str, Any] = {"index": [], "columns": [], "values": [], "meta": {}}
 _LATEST_HEATMAP: Dict[str, Any] = dict(_EMPTY_HEATMAP)
+
+_SECTOR_OVERRIDES: Dict[str, str] = {}
+_SECTOR_OVERRIDES.update(
+    dict.fromkeys(
+        [
+            "AAPL",
+            "MSFT",
+            "NVDA",
+            "AMD",
+            "INTC",
+            "ADBE",
+            "CRM",
+            "ORCL",
+            "CSCO",
+            "AVGO",
+            "QCOM",
+            "TXN",
+            "SMCI",
+            "SNOW",
+            "NOW",
+            "TEAM",
+            "PLTR",
+            "PANW",
+            "FTNT",
+            "CRWD",
+            "ZS",
+            "OKTA",
+            "DDOG",
+            "NET",
+            "INTU",
+            "ADP",
+            "WDAY",
+            "HPQ",
+            "DELL",
+            "IBM",
+            "AMAT",
+            "FSLR",
+            "ENPH",
+            "SEDG",
+            "V",
+            "MA",
+        ],
+        "Information Technology",
+    )
+)
+_SECTOR_OVERRIDES.update(
+    dict.fromkeys(
+        [
+            "META",
+            "GOOGL",
+            "GOOG",
+            "NFLX",
+            "DIS",
+            "CMCSA",
+            "CHTR",
+            "TMUS",
+            "T",
+            "VZ",
+            "ROKU",
+            "RBLX",
+        ],
+        "Communication Services",
+    )
+)
+_SECTOR_OVERRIDES.update(
+    dict.fromkeys(
+        [
+            "AMZN",
+            "TSLA",
+            "SBUX",
+            "MCD",
+            "CMG",
+            "DPZ",
+            "YUM",
+            "NKE",
+            "LOW",
+            "HD",
+            "TGT",
+            "ABNB",
+            "ORLY",
+            "AZO",
+            "CCL",
+            "RCL",
+            "BABA",
+            "JD",
+            "PDD",
+            "NIO",
+            "XPEV",
+            "LI",
+            "RIVN",
+            "LCID",
+            "GM",
+            "F",
+        ],
+        "Consumer Discretionary",
+    )
+)
+_SECTOR_OVERRIDES.update(
+    dict.fromkeys(
+        [
+            "COST",
+            "WMT",
+            "KO",
+            "PEP",
+            "PG",
+            "PM",
+            "MO",
+            "WBA",
+            "MDLZ",
+            "KHC",
+        ],
+        "Consumer Staples",
+    )
+)
+_SECTOR_OVERRIDES.update(
+    dict.fromkeys(
+        [
+            "LLY",
+            "PFE",
+            "MRK",
+            "ABBV",
+            "BMY",
+            "UNH",
+            "TMO",
+            "ISRG",
+            "MDT",
+            "CI",
+            "HUM",
+            "VRTX",
+            "REGN",
+            "GILD",
+            "AMGN",
+            "CVS",
+            "DHR",
+        ],
+        "Health Care",
+    )
+)
+_SECTOR_OVERRIDES.update(
+    dict.fromkeys(
+        [
+            "JPM",
+            "BAC",
+            "GS",
+            "MS",
+            "C",
+            "WFC",
+            "SCHW",
+            "BLK",
+            "SPGI",
+            "MSCI",
+            "ICE",
+            "CME",
+            "COIN",
+            "SOFI",
+            "PYPL",
+            "AXP",
+            "COF",
+            "USB",
+            "BRK-B",
+            "BK",
+            "MET",
+        ],
+        "Financials",
+    )
+)
+_SECTOR_OVERRIDES.update(
+    dict.fromkeys(
+        [
+            "XOM",
+            "CVX",
+            "SLB",
+            "COP",
+            "OXY",
+        ],
+        "Energy",
+    )
+)
+_SECTOR_OVERRIDES.update(
+    dict.fromkeys(
+        [
+            "CAT",
+            "DE",
+            "BA",
+            "GE",
+            "HON",
+            "MMM",
+            "RTX",
+            "LMT",
+            "NOC",
+            "UNP",
+            "UPS",
+            "FDX",
+            "DAL",
+            "UAL",
+            "LUV",
+            "UBER",
+            "EMR",
+        ],
+        "Industrials",
+    )
+)
+_SECTOR_OVERRIDES.update(
+    dict.fromkeys(
+        [
+            "LIN",
+            "APD",
+            "NUE",
+            "FCX",
+            "DOW",
+            "CF",
+            "MOS",
+        ],
+        "Materials",
+    )
+)
+_SECTOR_OVERRIDES.update(
+    dict.fromkeys(
+        [
+            "NEE",
+            "SO",
+            "DUK",
+            "EXC",
+            "AEP",
+            "D",
+        ],
+        "Utilities",
+    )
+)
+_SECTOR_OVERRIDES.update(
+    dict.fromkeys(
+        ["IYR", "O", "AMT", "PLD", "EQIX", "WELL", "ARE", "EQR", "DLR", "BXP"],
+        "Real Estate",
+    )
+)
+_SECTOR_OVERRIDES.update(dict.fromkeys(["SPY", "QQQ"], "ETF"))
+
+_CSV_EXPORT_COLUMNS: List[str] = [
+    "ticker",
+    "direction",
+    "avg_roi_pct",
+    "hit_pct",
+    "hit_lb95",
+    "support",
+    "avg_tt",
+    "avg_dd_pct",
+    "stability",
+    "sharpe",
+    "rule",
+    "stop_pct",
+    "timeout_pct",
+    "confidence",
+    "confidence_label",
+    "recent3",
+]
+
+
+def _lookup_sector(ticker: Any) -> str:
+    if not ticker:
+        return "Unknown"
+    try:
+        symbol = str(ticker).upper()
+    except Exception:
+        return "Unknown"
+    return _SECTOR_OVERRIDES.get(symbol, "Unknown")
+
+
+def _csv_value(row: dict[str, Any], column: str) -> Any:
+    value = row.get(column)
+    if column == "recent3":
+        try:
+            return json.dumps(value or [])
+        except Exception:
+            return "[]"
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    if isinstance(value, float):
+        return float(value)
+    if isinstance(value, int):
+        return int(value)
+    if isinstance(value, (list, dict)):
+        try:
+            return json.dumps(value)
+        except Exception:
+            return str(value)
+    return value
+
+
+def _rows_to_csv_table(rows: List[dict]) -> tuple[List[str], List[List[Any]]]:
+    data: List[List[Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        data.append([_csv_value(row, col) for col in _CSV_EXPORT_COLUMNS])
+    return list(_CSV_EXPORT_COLUMNS), data
 
 _perf_counter = time.perf_counter
 
@@ -197,8 +497,27 @@ def _build_heatmap(rows: list[dict[str, Any]] | None) -> Dict[str, Any]:
     if not rows:
         return dict(_EMPTY_HEATMAP)
 
+    enriched: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        item = dict(row)
+        ticker = item.get("ticker")
+        sector = item.get("sector")
+        if isinstance(sector, str):
+            sector_value = sector.strip() or "Unknown"
+        else:
+            sector_value = None
+        if not sector_value:
+            sector_value = _lookup_sector(ticker)
+        item["sector"] = sector_value or "Unknown"
+        enriched.append(item)
+
+    if not enriched:
+        return dict(_EMPTY_HEATMAP)
+
     try:
-        df = pd.DataFrame(list(rows))
+        df = pd.DataFrame(enriched)
     except Exception:
         return dict(_EMPTY_HEATMAP)
 
@@ -2219,6 +2538,7 @@ async def scanner_run(request: Request):
                 tickers, params, sort_key, progress_cb=prog
             )
             duration = time.time() - start_ts
+            csv_headers, csv_rows = _rows_to_csv_table(rows)
             ctx = {
                 "rows": rows,
                 "ran_at": now_et().strftime("%I:%M:%S %p").lstrip("0"),
@@ -2232,6 +2552,8 @@ async def scanner_run(request: Request):
                     "duration": duration,
                 },
                 "errors": [],
+                "csv_headers": csv_headers,
+                "csv_rows": csv_rows,
             }
             _task_update(
                 task_id, state="succeeded", percent=100.0, done=len(tickers), ctx=ctx
