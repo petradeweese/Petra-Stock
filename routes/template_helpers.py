@@ -23,7 +23,7 @@ def fmt_percent(value: Any, decimals: int = 2) -> str:
         if not math.isfinite(num):
             num = 0.0
 
-    if abs(num) <= 1.0:
+    if num <= 1.0:
         num *= 100.0
 
     return f"{num:.{decimals_int}f}%"
