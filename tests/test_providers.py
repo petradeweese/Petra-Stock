@@ -1,5 +1,4 @@
 import datetime as dt
-from typing import List
 
 import pandas as pd
 import pytest
@@ -19,9 +18,9 @@ def _schwab_env(monkeypatch):
     yield
 
 
-def _sample_rows() -> List[dict]:
+def _sample_rows() -> list[dict]:
     base = dt.datetime(2024, 1, 2, 14, 30, tzinfo=dt.timezone.utc)
-    rows: List[dict] = []
+    rows: list[dict] = []
     for i in range(4):
         ts = base + dt.timedelta(minutes=i)
         rows.append(
@@ -203,7 +202,7 @@ def test_schwab_interval_resampling(monkeypatch, interval):
     monkeypatch.setattr(schwab, "_get_access_token", lambda _session: "token")
 
     def _fake_fetch_raw(_session, _token, _symbol, spec, start, end):
-        rows: List[dict] = []
+        rows: list[dict] = []
         if spec.granularity == "day":
             current = start
             step = dt.timedelta(days=1)
