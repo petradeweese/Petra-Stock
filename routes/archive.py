@@ -10,9 +10,11 @@ from fastapi.templating import Jinja2Templates
 
 from db import get_db, row_to_dict
 from utils import TZ, now_et
+from .template_helpers import register_template_helpers
 
 router = APIRouter()
 templates = Jinja2Templates(directory="templates")
+register_template_helpers(templates)
 
 
 def _format_rule_summary(params: Dict[str, Any]) -> str:

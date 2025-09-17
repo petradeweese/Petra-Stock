@@ -28,11 +28,17 @@
         <tr>
           <th><button class="linklike" data-sort="ticker">Ticker</button></th>
           <th><button class="linklike" data-sort="direction">Dir</button></th>
-          <th class="num"><button class="linklike" data-sort="avg_roi_pct">ROI%</button></th>
+          <th class="num"><button class="linklike" data-sort="confidence">Conf</button></th>
+          <th><button class="linklike" data-sort="confidence_label">Label</button></th>
+          <th class="num"><button class="linklike" data-sort="avg_roi_pct">Avg ROI</button></th>
           <th class="num"><button class="linklike" data-sort="hit_pct">Hit%</button></th>
-          <th class="num">Supp</th>
-          <th class="num">DD%</th>
-          <th class="num">Stability</th>
+          <th class="num"><button class="linklike" data-sort="hit_lb95">Hit LB95</button></th>
+          <th class="num"><button class="linklike" data-sort="support">Supp</button></th>
+          <th class="num"><button class="linklike" data-sort="stop_pct">Stop%</button></th>
+          <th class="num"><button class="linklike" data-sort="timeout_pct">Timeout%</button></th>
+          <th class="num"><button class="linklike" data-sort="avg_tt">Avg TT</button></th>
+          <th class="num"><button class="linklike" data-sort="avg_dd_pct">Avg DD</button></th>
+          <th>Recent</th>
           <th>Rule</th>
           <th>Fav</th>
         </tr>
@@ -42,21 +48,34 @@
         <tr class="row-hover"
             data-tkr="{{ r.ticker }}"
             data-dir="{{ r.direction }}"
-            data-roi="{{ '%.6f'|format(r.avg_roi_pct) }}"
-            data-hit="{{ '%.6f'|format(r.hit_pct) }}"
-            data-supp="{{ r.support }}"
-            data-dd="{{ '%.6f'|format(r.avg_dd_pct) }}"
-            data-stab="{{ '%.6f'|format(r.get('stability', 0)) }}"
-            data-rule="{{ r.rule|e }}"
+            data-roi="{{ '%.6f'|format(r.get('avg_roi_pct', 0) or 0) }}"
+            data-hit="{{ '%.6f'|format(r.get('hit_pct', 0) or 0) }}"
+            data-hitlb="{{ '%.6f'|format(r.get('hit_lb95', 0) or 0) }}"
+            data-supp="{{ r.get('support', 0) or 0 }}"
+            data-stop="{{ '%.6f'|format(r.get('stop_pct', 0) or 0) }}"
+            data-timeout="{{ '%.6f'|format(r.get('timeout_pct', 0) or 0) }}"
+            data-tt="{{ '%.6f'|format(r.get('avg_tt', 0) or 0) }}"
+            data-dd="{{ '%.6f'|format(r.get('avg_dd_pct', 0) or 0) }}"
+            data-stab="{{ '%.6f'|format(r.get('stability', 0) or 0) }}"
+            data-conf="{{ r.get('confidence', 0) }}"
+            data-conf-label="{{ r.get('confidence_label', '')|e }}"
+            data-rule="{{ r.get('rule', '')|e }}"
             data-archived="{{ 'true' if r.get('archived') else 'false' }}">
           <td>{{ r.ticker }}</td>
           <td>{{ r.direction }}</td>
-          <td class="num roi {% if r.avg_roi_pct > 0 %}pos{% elif r.avg_roi_pct < 0 %}neg{% endif %}">{{ '{:.0f}'.format(r.avg_roi_pct * 100 if r.avg_roi_pct is not none and r.avg_roi_pct <= 1 else r.avg_roi_pct) }}</td>
-          <td class="num hit {% if r.hit_pct >= 90 %}high{% endif %}">{{ '%.1f'|format(r.hit_pct) }}</td>
-          <td class="num">{{ r.support }}</td>
-          <td class="num">{{ '{:.0f}'.format(r.avg_dd_pct * 100 if r.avg_dd_pct is not none and r.avg_dd_pct <= 1 else r.avg_dd_pct) }}</td>
-          <td class="num">{{ '{:.2f}'.format(r.get('stability', 0)) }}</td>
-          <td class="rule-td" title="{{ r.rule }}">{{ r.rule }}</td>
+          <td class="num">{{ r.get('confidence', 0) }}</td>
+          <td>{{ r.get('confidence_label') or '—' }}</td>
+          <td class="num roi {% if (r.get('avg_roi_pct') or 0) > 0 %}pos{% elif (r.get('avg_roi_pct') or 0) < 0 %}neg{% endif %}">{{ r.get('avg_roi_pct')|fmt_percent }}</td>
+          <td class="num hit {% if (r.get('hit_pct') or 0) >= 90 %}high{% endif %}">{{ r.get('hit_pct')|fmt_percent }}</td>
+          <td class="num">{{ r.get('hit_lb95')|fmt_percent }}</td>
+          <td class="num">{{ r.get('support', 0) }}</td>
+          <td class="num">{{ r.get('stop_pct')|fmt_percent }}</td>
+          <td class="num">{{ r.get('timeout_pct')|fmt_percent }}</td>
+          {% set avg_tt_val = r.get('avg_tt') %}
+          <td class="num">{{ '{:.1f}'.format(avg_tt_val) if avg_tt_val is not none else '—' }}</td>
+          <td class="num">{{ r.get('avg_dd_pct')|fmt_percent }}</td>
+          <td class="recent">{{ _fmt_recent3(r.get('recent3')) }}</td>
+          <td class="rule-td" title="{{ r.get('rule', '') }}">{{ r.get('rule', '') }}</td>
           <td><button class="btn-fav" title="Add to Favorites">⭐</button></td>
         </tr>
         {% endfor %}
@@ -233,13 +252,13 @@
         for (const [k, v] of fd.entries()) params[k] = v;
       }
       const rows = [...document.querySelectorAll('#results-table tbody tr.row-hover')].map(tr => {
-        const tds = tr.querySelectorAll('td');
+        const supportVal = parseInt(tr.dataset.supp || '0', 10);
         return {
           ticker: tr.dataset.tkr,
           direction: (tr.dataset.dir || 'UP'),
           avg_roi_pct: parseFloat(tr.dataset.roi || '0'),
           hit_pct: parseFloat(tr.dataset.hit || '0'),
-          support: parseInt(tr.dataset.supp || tds[4].textContent || '0', 10),
+          support: Number.isFinite(supportVal) ? supportVal : 0,
           avg_dd_pct: parseFloat(tr.dataset.dd || '0'),
           stability: parseFloat(tr.dataset.stab || '0'),
           rule: tr.dataset.rule || ''
@@ -276,15 +295,21 @@
       switch (key) {
         case 'ticker': return tr.dataset.tkr || '';
         case 'direction': return tr.dataset.dir || '';
+        case 'confidence': return parseInt(tr.dataset.conf || '0', 10);
+        case 'confidence_label': return tr.dataset.confLabel || '';
         case 'avg_roi_pct': return parseFloat(tr.dataset.roi || '0');
         case 'hit_pct': return parseFloat(tr.dataset.hit || '0');
-        case 'support': return parseInt(tr.dataset.supp || '0',10);
+        case 'hit_lb95': return parseFloat(tr.dataset.hitlb || '0');
+        case 'support': return parseInt(tr.dataset.supp || '0', 10);
+        case 'stop_pct': return parseFloat(tr.dataset.stop || '0');
+        case 'timeout_pct': return parseFloat(tr.dataset.timeout || '0');
+        case 'avg_tt': return parseFloat(tr.dataset.tt || '0');
         case 'avg_dd_pct': return parseFloat(tr.dataset.dd || '0');
         case 'stability': return parseFloat(tr.dataset.stab || '0');
         default: return '';
       }
     };
-    const isNum = ['avg_roi_pct','hit_pct','support','avg_dd_pct','stability'].includes(key);
+    const isNum = ['confidence','avg_roi_pct','hit_pct','hit_lb95','support','stop_pct','timeout_pct','avg_tt','avg_dd_pct','stability'].includes(key);
     rows.sort((ra, rb) => {
       const A = get(ra), B = get(rb);
       const base = isNum ? cmpNum(A,B) : cmpStr(String(A), String(B));

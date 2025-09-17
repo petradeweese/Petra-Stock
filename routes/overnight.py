@@ -12,6 +12,7 @@ from fastapi.templating import Jinja2Templates
 from db import get_db, row_to_dict
 from services.overnight import get_runner_state, resolve_overnight_symbols
 from services.scanner_params import coerce_scan_params
+from .template_helpers import register_template_helpers
 
 # ruff: noqa: E501
 
@@ -19,6 +20,7 @@ from services.scanner_params import coerce_scan_params
 logger = logging.getLogger(__name__)
 
 templates = Jinja2Templates(directory="templates")
+register_template_helpers(templates)
 
 router = APIRouter(prefix="/overnight")
 
