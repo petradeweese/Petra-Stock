@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}Provider Health{% endblock %}
+{% block head_extra %}
+<style>
+  .health-table {
+    width: 100%;
+    border-collapse: collapse;
+  }
+  .health-table th,
+  .health-table td {
+    border: 1px solid #2b2d42;
+    padding: 0.5rem 0.75rem;
+    text-align: left;
+  }
+  .health-table td.ok {
+    color: #3ecf8e;
+  }
+  .health-table td.err {
+    color: #ff6b6b;
+  }
+</style>
+{% endblock %}
+{% block content %}
+<div class="panel">
+  <h1>Provider Health</h1>
+  <table class="health-table">
+    <thead>
+      <tr>
+        <th>Provider</th>
+        <th>Status</th>
+        <th>RPM</th>
+        <th>Avg latency (s)</th>
+        <th>Last error</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% set providers = health.get('providers', {}) %}
+    {% for name, info in providers.items() %}
+      {% set status = info.get('status', {}) %}
+      {% set ok = status.get('ok') %}
+      <tr>
+        <td>{{ name|capitalize }}</td>
+        <td class="{{ 'ok' if ok else 'err' }}">
+          {% if ok %}
+            Connected{% if status.get('rows') is not none %} ({{ status.get('rows') }} bars){% endif %}
+          {% else %}
+            Error{% if status.get('error') %}: {{ status.get('error') }}{% endif %}
+          {% endif %}
+        </td>
+        <td>{{ info.get('rpm') or 0 }}</td>
+        <td>
+          {% if info.get('avg_latency') is not none %}
+            {{ '%.3f'|format(info.get('avg_latency')) }}
+          {% else %}
+            —
+          {% endif %}
+        </td>
+        <td>
+          {% if info.get('last_error') %}
+            {{ info.get('last_error') }}
+          {% else %}
+            —
+          {% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

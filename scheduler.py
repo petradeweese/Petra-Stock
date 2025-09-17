@@ -14,8 +14,9 @@ from db import DB_PATH, get_settings, row_to_dict, set_last_run
 from prometheus_client import Counter  # type: ignore
 from routes import _update_forward_tests  # type: ignore
 from scanner import preload_prices  # type: ignore
-from services.http_client import RateLimitTimeoutSoon
-from services.polygon_client import compute_request_window, fetch_polygon_prices_async
+from services.market_data import get_prices as provider_get_prices
+from services.errors import DataUnavailableError
+from services.polygon_client import compute_request_window
 from services.price_store import covers, get_coverage, missing_ranges, upsert_bars
 from services import favorites_alerts
 from utils import clamp_market_closed, market_is_open as util_market_is_open
@@ -27,12 +28,6 @@ job_success = Counter("scheduler_jobs_success_total", "Jobs succeeded")
 job_failure = Counter("scheduler_jobs_failure_total", "Jobs failed")
 
 RETRY_SHIFT = timedelta(minutes=15)
-FAIL_FAST_NETWORK_BUFFER = float(os.getenv("SCAN_FAIL_FAST_NETWORK_BUFFER", "1.5"))
-FAIL_FAST_SAFETY_MARGIN = float(os.getenv("SCAN_FAIL_FAST_SAFETY_MARGIN", "0.25"))
-REQUEUE_MIN_DELAY = float(os.getenv("SCAN_FAIL_FAST_REQUEUE_MIN", "0.75"))
-REQUEUE_MAX_DELAY = float(os.getenv("SCAN_FAIL_FAST_REQUEUE_MAX", "2.0"))
-
-
 class WorkQueue:
     def __init__(self) -> None:
         self.queue: asyncio.Queue[tuple[str, Callable[[], Awaitable[None]]]] = (
@@ -172,42 +167,33 @@ def queue_gap_fill(symbol: str, start, end, interval: str) -> None:
                         )
                         return
 
-                    rate_state: Dict[str, float] = {}
-                    timeout_ctx = {
-                        "deadline": job_deadline,
-                        "remaining": max(0.0, remaining_job),
-                        "network_buffer": FAIL_FAST_NETWORK_BUFFER,
-                        "safety_margin": FAIL_FAST_SAFETY_MARGIN,
-                        "rate_state": rate_state,
-                    }
-
                     call_start = time.monotonic()
+                    loop = asyncio.get_running_loop()
                     try:
-                        df_map = await fetch_polygon_prices_async(
-                            [symbol],
-                            interval,
-                            window_start,
-                            window_end,
-                            timeout_ctx=timeout_ctx,
+                        df_map = await loop.run_in_executor(
+                            None,
+                            lambda: provider_get_prices(
+                                [symbol],
+                                interval,
+                                window_start,
+                                window_end,
+                                provider="schwab",
+                            ),
                         )
-                    except RateLimitTimeoutSoon as rl:
-                        log_data = {
-                            "type": "gap_fail_fast",
-                            "symbol": symbol,
-                            "interval": interval,
-                            "predicted_wait_s": rl.predicted_wait,
-                            "remaining_s": rl.remaining,
-                        }
-                        logger.info(json.dumps(log_data))
-
-                        delay = random.uniform(REQUEUE_MIN_DELAY, REQUEUE_MAX_DELAY)
-
-                        async def _requeue() -> None:
-                            await asyncio.sleep(delay)
-                            queue_gap_fill(symbol, start, end_local, interval)
-
-                        asyncio.create_task(_requeue())
-                        return
+                    except DataUnavailableError as err:
+                        logger.info(
+                            json.dumps(
+                                {
+                                    "type": "gap_fetch_error",
+                                    "symbol": symbol,
+                                    "interval": interval,
+                                    "start": window_start.isoformat(),
+                                    "end": window_end.isoformat(),
+                                    "error": str(err),
+                                }
+                            )
+                        )
+                        break
                     except Exception as e:
                         import traceback as _tb
 
@@ -223,7 +209,7 @@ def queue_gap_fill(symbol: str, start, end, interval: str) -> None:
                     df_p = df_map.get(symbol)
                     rows = len(df_p) if df_p is not None and not df_p.empty else 0
                     duration_ms = int((time.monotonic() - call_start) * 1000)
-                    rate_wait_ms = int(rate_state.get("waited", 0.0) * 1000)
+                    rate_wait_ms = 0
 
                     logger.info(
                         json.dumps(

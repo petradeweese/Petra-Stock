@@ -9,7 +9,7 @@ import sqlite3
 import statistics
 import time
 from concurrent.futures import as_completed
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from threading import Thread
 from typing import Any, Callable, Dict, List, Optional
 from uuid import uuid4
@@ -19,6 +19,7 @@ from fastapi import APIRouter, Body, Depends, Form, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
+import config as app_config
 from config import settings
 from db import (
     DB_PATH,
@@ -39,8 +40,11 @@ from services.market_data import (
     expected_bar_count,
     fetch_prices,
     get_prices,
+    get_provider_health,
     window_from_lookback,
 )
+from services.providers import schwab as schwab_p
+from services.providers import yahoo as yahoo_p
 from utils import TZ, now_et
 
 from .archive import _format_rule_summary as _format_rule_summary
@@ -910,9 +914,69 @@ def healthz() -> dict:
 
 
 @router.get("/health")
-def health() -> dict:
-    """Return app health along with schema status information."""
-    return {**healthz(), **get_schema_status()}
+async def health(request: Request):
+    """Return provider health along with schema status information."""
+
+    base = {**healthz(), **get_schema_status()}
+    end = datetime.utcnow().replace(tzinfo=timezone.utc)
+    start = end - timedelta(days=5)
+
+    async def _probe(fetch_fn):
+        try:
+            df = await asyncio.to_thread(fetch_fn, "SPY", "1d", start, end)
+        except Exception as exc:  # pragma: no cover - defensive
+            return {"ok": False, "error": str(exc), "rows": 0}
+        rows = int(len(df)) if hasattr(df, "__len__") else 0
+        return {"ok": True, "rows": rows}
+
+    schwab_status, yahoo_status = await asyncio.gather(
+        _probe(schwab_p.fetch_prices),
+        _probe(yahoo_p.fetch_prices),
+    )
+    stats = get_provider_health()
+    schwab_stats = stats.get("schwab", {})
+    yahoo_stats = stats.get("yahoo", {})
+    payload = {
+        **base,
+        "schwab_auth": schwab_status,
+        "schwab_rpm": schwab_stats.get("rpm"),
+        "schwab_avg_latency": schwab_stats.get("avg_latency"),
+        "schwab_last_error": schwab_stats.get("last_error"),
+        "yahoo_ok": yahoo_status.get("ok"),
+        "yahoo_status": yahoo_status,
+        "yahoo_rpm": yahoo_stats.get("rpm"),
+        "yahoo_avg_latency": yahoo_stats.get("avg_latency"),
+        "yahoo_last_error": yahoo_stats.get("last_error"),
+    }
+    payload["providers"] = {
+        "schwab": {
+            "status": schwab_status,
+            "rpm": schwab_stats.get("rpm"),
+            "avg_latency": schwab_stats.get("avg_latency"),
+            "last_error": schwab_stats.get("last_error"),
+        },
+        "yahoo": {
+            "status": yahoo_status,
+            "rpm": yahoo_stats.get("rpm"),
+            "avg_latency": yahoo_stats.get("avg_latency"),
+            "last_error": yahoo_stats.get("last_error"),
+        },
+    }
+
+    wants_json = "application/json" in request.headers.get("accept", "") or (
+        request.query_params.get("format", "").lower() == "json"
+    )
+    if wants_json:
+        return JSONResponse(payload)
+
+    return templates.TemplateResponse(
+        "health.html",
+        {
+            "request": request,
+            "active_tab": "health",
+            "health": payload,
+        },
+    )
 
 
 def metrics() -> Response:
@@ -2416,6 +2480,8 @@ def settings_page(request: Request, db=Depends(get_db)):
             "smtp_missing_label": _format_missing_fields(smtp_missing),
             "smtp_warning": smtp_warning,
             "twilio_configured": False,
+            "USE_SCHWAB_PRIMARY": app_config.USE_SCHWAB_PRIMARY,
+            "SCHWAB_ENABLED": app_config.SCHWAB_ENABLED,
         },
     )
 
@@ -2423,6 +2489,30 @@ def settings_page(request: Request, db=Depends(get_db)):
 @router.get("/info", response_class=HTMLResponse)
 def info_page(request: Request):
     return templates.TemplateResponse(request, "info.html", {"active_tab": "info"})
+
+
+@router.post("/settings/update")
+async def settings_update(request: Request):
+    form = await request.form()
+    key = (form.get("key") or "").strip()
+    if key == "USE_SCHWAB_PRIMARY":
+        value = form.get("value")
+        app_config.set_use_schwab_primary(bool(value))
+    return RedirectResponse(url="/settings", status_code=303)
+
+
+@router.post("/settings/test_schwab")
+async def test_schwab():
+    try:
+        end = datetime.utcnow()
+        start = end - timedelta(days=5)
+        loop = asyncio.get_running_loop()
+        df = await loop.run_in_executor(
+            None, lambda: schwab_p.fetch_prices("SPY", "1d", start, end)
+        )
+        return JSONResponse({"ok": True, "rows": int(len(df))})
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": str(exc)})
 
 
 @router.post("/settings/save")

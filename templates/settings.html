@@ -98,6 +98,28 @@
   </div>
   <div class="card" style="margin-top:1rem;">
     <div class="card-body">
+      <strong>Market Data Providers</strong>
+      <div class="grid" style="margin-top:.75rem;">
+        <div class="field">
+          <label>Use Schwab as primary</label>
+          <form method="post" action="/settings/update">
+            <input type="hidden" name="key" value="USE_SCHWAB_PRIMARY" />
+            <input type="checkbox" name="value" {% if USE_SCHWAB_PRIMARY %}checked{% endif %} onchange="this.form.submit()" />
+          </form>
+        </div>
+        <div class="field">
+          <label>Schwab provider status</label>
+          <div>{{ 'Enabled' if SCHWAB_ENABLED else 'Disabled' }}</div>
+        </div>
+      </div>
+      <div class="field" style="margin-top:1rem;">
+        <button id="btnTestSchwab" type="button" class="btn">Test Schwab</button>
+        <span id="schwabStatus" class="note" style="margin-left:.75rem;"></span>
+      </div>
+    </div>
+  </div>
+  <div class="card" style="margin-top:1rem;">
+    <div class="card-body">
       <strong>Favorites Alerts</strong>
       <div class="grid" style="margin-top:.5rem;">
         <div>
@@ -138,6 +160,35 @@
 {% block extra_body %}
 <script>
   (function(){
+    const schwabBtn = document.getElementById('btnTestSchwab');
+    const schwabStatus = document.getElementById('schwabStatus');
+    if (schwabBtn && schwabStatus) {
+      schwabBtn.addEventListener('click', async (event) => {
+        event.preventDefault();
+        schwabBtn.disabled = true;
+        schwabStatus.textContent = 'Testing…';
+        schwabStatus.style.color = '';
+        try {
+          const response = await fetch('/settings/test_schwab', { method: 'POST' });
+          const data = await response.json();
+          if (response.ok && data.ok) {
+            const rows = typeof data.rows === 'number' ? data.rows : 0;
+            schwabStatus.textContent = `Connected (${rows} rows)`;
+            schwabStatus.style.color = 'lime';
+          } else {
+            const errMsg = data && data.error ? data.error : 'Unknown error';
+            schwabStatus.textContent = `Error: ${errMsg}`;
+            schwabStatus.style.color = 'tomato';
+          }
+        } catch (err) {
+          schwabStatus.textContent = `Error: ${err}`;
+          schwabStatus.style.color = 'tomato';
+        } finally {
+          schwabBtn.disabled = false;
+        }
+      });
+    }
+
     const sendBtn = document.getElementById('fav-test-send');
     const symbolInput = document.getElementById('fav-test-symbol');
     const channelInput = document.getElementById('fav-test-channel');
