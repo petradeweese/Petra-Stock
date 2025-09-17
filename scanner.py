@@ -151,6 +151,7 @@ def _install_real_engine_adapter():
                         event_mask=None,
                         slippage_bps=params.get("slippage_bps", 7.0),
                         vega_scale=params.get("vega_scale", 0.03),
+                        cooldown_bars=params.get("cooldown_bars"),
                     )
                     if df_te is None or getattr(df_te, "empty", True):
                         return {}
@@ -315,6 +316,18 @@ def _desktop_like_single(ticker: str, params: dict) -> dict:
         scan_min_hit = _get_float("scan_min_hit", 50.0)
         scan_max_dd = _get_float("scan_max_dd", 50.0)
 
+        try:
+            cooldown_default = int(_pfa._bars_for_window(window_value, window_unit, interval))
+        except Exception:
+            cooldown_default = max_tt_bars
+        cooldown_param = params.get("cooldown_bars", cooldown_default)
+        try:
+            cooldown_bars = int(round(float(cooldown_param)))
+        except (TypeError, ValueError):
+            cooldown_bars = cooldown_default
+        if cooldown_bars < 0:
+            cooldown_bars = cooldown_default
+
         model, df, _ = _pfa.analyze_roi_mode(
             ticker=ticker,
             interval=interval,
@@ -336,6 +349,7 @@ def _desktop_like_single(ticker: str, params: dict) -> dict:
             event_mask=None,
             slippage_bps=slippage_bps,
             vega_scale=vega_scale,
+            cooldown_bars=cooldown_bars,
         )
         if df is None or df.empty:
             return {}

@@ -30,7 +30,9 @@ def test_perform_scan_counts_skipped(monkeypatch):
     monkeypatch.setattr(routes.price_store, "covers", lambda a, b, c, d: True)
 
     rows, skipped, metrics = routes._perform_scan(tickers, {}, "")
-    assert rows == [{"ticker": "AAA"}]
+    assert len(rows) == 1
+    assert rows[0]["ticker"] == "AAA"
+    assert rows[0]["hit_lb95"] == 0.0
     assert skipped == 1
     assert metrics["symbols_no_gap"] == 2
 

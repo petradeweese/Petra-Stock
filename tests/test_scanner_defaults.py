@@ -30,7 +30,10 @@ def test_desktop_like_single_uses_defaults(monkeypatch):
     monkeypatch.setattr(
         scanner,
         "_pfa",
-        SimpleNamespace(analyze_roi_mode=fake_analyze_roi_mode),
+        SimpleNamespace(
+            analyze_roi_mode=fake_analyze_roi_mode,
+            _bars_for_window=lambda value, unit, interval: 16,
+        ),
     )
 
     result = scanner._desktop_like_single("AAPL", {})
@@ -69,4 +72,5 @@ def test_desktop_like_single_uses_defaults(monkeypatch):
         "event_mask": None,
         "slippage_bps": 7.0,
         "vega_scale": 0.03,
+        "cooldown_bars": 16,
     }

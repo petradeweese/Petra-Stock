@@ -248,7 +248,7 @@ class OvernightRunner:
             "SELECT window_start, window_end FROM overnight_prefs WHERE id=1",
         ).fetchone()
         if not row:
-            db.execute("INSERT INTO overnight_prefs(id) VALUES (1)")
+            db.execute("INSERT OR IGNORE INTO overnight_prefs(id) VALUES (1)")
             db.connection.commit()
             return "01:00", "08:00"
         return row[0], row[1]

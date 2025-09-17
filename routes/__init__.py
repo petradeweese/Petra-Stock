@@ -3,6 +3,7 @@ import asyncio
 import atexit
 import json
 import logging
+import math
 import os
 import sqlite3
 import statistics
@@ -51,6 +52,9 @@ templates = Jinja2Templates(directory="templates")
 logger = logging.getLogger(__name__)
 SCAN_BATCH_WRITES = os.getenv("SCAN_BATCH_WRITES", "1") not in {"0", "false", "no"}
 
+_EMPTY_HEATMAP: Dict[str, Any] = {"index": [], "columns": [], "values": [], "meta": {}}
+_LATEST_HEATMAP: Dict[str, Any] = dict(_EMPTY_HEATMAP)
+
 _perf_counter = time.perf_counter
 
 FORWARD_SLIPPAGE = 0.0008
@@ -72,6 +76,222 @@ def _coerce_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _heatmap_float(value: Any) -> float:
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if math.isnan(f):
+        return 0.0
+    return f
+
+
+def _heatmap_int(value: Any) -> int:
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return 0
+    if math.isnan(f):
+        return 0
+    try:
+        iv = int(round(f))
+    except Exception:
+        return 0
+    return iv if iv >= 0 else 0
+
+
+def _sort_by_lb95_roi_support(
+    out: Any,
+) -> Any:
+    """Sort scan outputs by hit_lb95, avg_roi, support descending.
+
+    Accepts either a pandas ``DataFrame`` or a list of dictionaries, matching
+    the shapes produced by the web scanner endpoints and CSV exporters.
+    Missing ``hit_lb95`` values are coerced to ``0.0`` before sorting so that
+    the ordering is deterministic.
+    """
+
+    if isinstance(out, pd.DataFrame):
+        df = out.copy()
+        if "hit_lb95" not in df.columns:
+            df["hit_lb95"] = 0.0
+        else:
+            df["hit_lb95"] = pd.to_numeric(df["hit_lb95"], errors="coerce").fillna(0.0)
+
+        if "support" not in df.columns:
+            df["support"] = 0
+        support_sort = pd.to_numeric(df.get("support"), errors="coerce").fillna(0.0)
+
+        if "avg_roi" in df.columns:
+            avg_roi_source = df["avg_roi"]
+        elif "avg_roi_pct" in df.columns:
+            avg_roi_source = df["avg_roi_pct"]
+        else:
+            avg_roi_source = 0.0
+        avg_roi_sort = pd.to_numeric(avg_roi_source, errors="coerce").fillna(0.0)
+
+        df = df.assign(
+            _avg_roi_sort=avg_roi_sort,
+            _support_sort=support_sort,
+        ).sort_values(
+            ["hit_lb95", "_avg_roi_sort", "_support_sort"],
+            ascending=[False, False, False],
+            kind="mergesort",
+        )
+        return df.drop(columns=["_avg_roi_sort", "_support_sort"])
+
+    if isinstance(out, list):
+
+        def _metric(row: dict[str, Any] | Any, key: str) -> float:
+            if not isinstance(row, dict):
+                return 0.0
+            value: Any
+            if key == "avg_roi":
+                value = row.get("avg_roi")
+                if value in (None, ""):
+                    value = row.get("avg_roi_pct")
+            else:
+                value = row.get(key)
+            try:
+                return float(value) if value not in (None, "") else 0.0
+            except (TypeError, ValueError):
+                return 0.0
+
+        for row in out:
+            if isinstance(row, dict) and ("hit_lb95" not in row or row.get("hit_lb95") is None):
+                row["hit_lb95"] = 0.0
+
+        out.sort(
+            key=lambda row: (
+                _metric(row, "hit_lb95"),
+                _metric(row, "avg_roi"),
+                _metric(row, "support"),
+            ),
+            reverse=True,
+        )
+        return out
+
+    return out
+
+
+def _wilson_lb95(hits: int, n: int) -> float:
+    if n <= 0:
+        return 0.0
+    z = 1.96
+    p = hits / n
+    z2 = z * z
+    denom = 1.0 + z2 / n
+    center = p + z2 / (2.0 * n)
+    margin = z * math.sqrt((p * (1.0 - p) / n) + z2 / (4.0 * n * n))
+    lb = (center - margin) / denom
+    if lb < 0.0:
+        return 0.0
+    if lb > 1.0:
+        return 1.0
+    return lb
+
+
+def _build_heatmap(rows: list[dict[str, Any]] | None) -> Dict[str, Any]:
+    if not rows:
+        return dict(_EMPTY_HEATMAP)
+
+    try:
+        df = pd.DataFrame(list(rows))
+    except Exception:
+        return dict(_EMPTY_HEATMAP)
+
+    if df.empty or "ticker" not in df.columns:
+        return dict(_EMPTY_HEATMAP)
+
+    df = df.copy()
+    df["ticker"] = df["ticker"].astype(str)
+
+    if "sector" not in df.columns:
+        df["sector"] = "Unknown"
+    else:
+        df["sector"] = df["sector"].apply(
+            lambda v: (str(v).strip() or "Unknown") if v not in (None, "") else "Unknown"
+        )
+
+    df["support"] = pd.to_numeric(df.get("support"), errors="coerce").fillna(0).astype(int)
+    df.loc[df["support"] < 0, "support"] = 0
+    df = df[df["support"] >= 10].copy()
+    if df.empty:
+        return dict(_EMPTY_HEATMAP)
+
+    if "avg_roi" in df.columns:
+        df["avg_roi"] = pd.to_numeric(df["avg_roi"], errors="coerce").fillna(0.0)
+    elif "avg_roi_pct" in df.columns:
+        df["avg_roi"] = pd.to_numeric(df["avg_roi_pct"], errors="coerce").fillna(0.0) / 100.0
+    else:
+        df["avg_roi"] = 0.0
+
+    if "hit_lb95" in df.columns:
+        df["hit_lb95"] = pd.to_numeric(df["hit_lb95"], errors="coerce").fillna(0.0)
+    else:
+        hit_series = pd.to_numeric(df.get("hit_pct"), errors="coerce").fillna(0.0) / 100.0
+        lb_vals: list[float] = []
+        for frac, supp in zip(hit_series.tolist(), df["support"].tolist()):
+            if supp <= 0:
+                lb_vals.append(0.0)
+                continue
+            frac = max(0.0, min(1.0, float(frac)))
+            hits = int(round(frac * supp))
+            if hits < 0:
+                hits = 0
+            elif hits > supp:
+                hits = supp
+            lb_vals.append(_wilson_lb95(hits, supp))
+        df["hit_lb95"] = lb_vals
+
+    df["hit_lb95"] = df["hit_lb95"].apply(lambda v: max(0.0, min(1.0, _heatmap_float(v))))
+
+    heat = df.pivot_table(index="sector", columns="ticker", values="hit_lb95", aggfunc="max")
+    if heat.empty:
+        return dict(_EMPTY_HEATMAP)
+
+    heat = heat.sort_index().sort_index(axis=1)
+    index_labels = [str(x) for x in heat.index]
+    column_labels = [str(x) for x in heat.columns]
+    values = [
+        [None if pd.isna(val) else float(val) for val in row]
+        for row in heat.to_numpy()
+    ]
+
+    meta = df.groupby(["sector", "ticker"]).agg(
+        support=("support", "max"),
+        avg_roi=("avg_roi", "mean"),
+        hit_lb95=("hit_lb95", "max"),
+    ).reset_index()
+
+    meta_lookup: Dict[tuple[str, str], Dict[str, Any]] = {}
+    for _, row in meta.iterrows():
+        sector = str(row.get("sector", "Unknown"))
+        ticker = str(row.get("ticker", ""))
+        meta_lookup[(sector, ticker)] = {
+            "support": _heatmap_int(row.get("support")),
+            "avg_roi": _heatmap_float(row.get("avg_roi")),
+            "hit_lb95": _heatmap_float(row.get("hit_lb95")),
+        }
+
+    meta_json = {
+        f"{sector}|{ticker}": meta_lookup.get((sector, ticker), {})
+        for sector in index_labels
+        for ticker in column_labels
+    }
+
+    return {"index": index_labels, "columns": column_labels, "values": values, "meta": meta_json}
+
+
+def _update_heatmap(rows: list[dict[str, Any]] | None) -> None:
+    global _LATEST_HEATMAP
+    try:
+        _LATEST_HEATMAP = _build_heatmap(rows)
+    except Exception:
+        logger.exception("Failed to build heatmap data")
+        _LATEST_HEATMAP = dict(_EMPTY_HEATMAP)
 
 
 def _parse_support_snapshot(raw: Any) -> tuple[int | None, dict[str, Any] | None]:
@@ -746,12 +966,18 @@ def _perform_scan(
         and (r.get("avg_dd_pct", 100.0) <= scan_max_dd)
     ]
 
+    rows = _sort_by_lb95_roi_support(rows)
+
     if sort_key == "ticker":
         rows.sort(key=lambda r: (r.get("ticker") or ""))
     elif sort_key == "roi":
         rows.sort(
             key=lambda r: (
-                r.get("avg_roi_pct", 0.0),
+                (
+                    r.get("avg_roi")
+                    if r.get("avg_roi") not in (None, "")
+                    else r.get("avg_roi_pct", 0.0)
+                ),
                 r.get("hit_pct", 0.0),
                 r.get("support", 0),
             ),
@@ -761,21 +987,17 @@ def _perform_scan(
         rows.sort(
             key=lambda r: (
                 r.get("hit_pct", 0.0),
-                r.get("avg_roi_pct", 0.0),
+                (
+                    r.get("avg_roi")
+                    if r.get("avg_roi") not in (None, "")
+                    else r.get("avg_roi_pct", 0.0)
+                ),
                 r.get("support", 0),
             ),
             reverse=True,
         )
-    else:
-        rows.sort(
-            key=lambda r: (
-                r.get("avg_roi_pct", 0.0),
-                r.get("hit_pct", 0.0),
-                r.get("support", 0),
-                r.get("stability", 0.0),
-            ),
-            reverse=True,
-        )
+
+    _update_heatmap(rows)
 
     duration = _perf_counter() - start
     scan_duration.observe(duration)
@@ -965,6 +1187,22 @@ def home(request: Request):
 @router.get("/scanner", response_class=HTMLResponse)
 def scanner_page(request: Request):
     return templates.TemplateResponse(request, "index.html", {"active_tab": "scanner"})
+
+
+@router.get("/heatmap.json")
+def heatmap_json():
+    data = _LATEST_HEATMAP or _EMPTY_HEATMAP
+    return {
+        "index": list(data.get("index", [])),
+        "columns": list(data.get("columns", [])),
+        "values": [list(row) for row in data.get("values", [])],
+        "meta": dict(data.get("meta", {})),
+    }
+
+
+@router.get("/heatmap", response_class=HTMLResponse)
+def heatmap_page(request: Request):
+    return templates.TemplateResponse(request, "heatmap.html", {"active_tab": "heatmap"})
 
 
 @router.get("/favorites", response_class=HTMLResponse)
@@ -2106,10 +2344,9 @@ def scanner_parity(request: Request):
         ):
             rows.append(r)
 
-    rows.sort(
-        key=lambda x: (x["avg_roi_pct"], x["hit_pct"], x["support"], x["stability"]),
-        reverse=True,
-    )
+    rows = _sort_by_lb95_roi_support(rows)
+
+    _update_heatmap(rows)
 
     return templates.TemplateResponse(
         request,

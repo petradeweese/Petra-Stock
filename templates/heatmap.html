@@ -1,0 +1,55 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Scanner Heatmap</title>
+  <style>
+    table { border-collapse: collapse; font: 12px system-ui; }
+    th, td { border: 1px solid #ddd; padding: 4px 6px; text-align: center; }
+    th { position: sticky; top: 0; background: #fafafa; }
+  </style>
+</head>
+<body>
+  <h3>Sector × Ticker — Hit LB% Heatmap (min support ≥ 10)</h3>
+  <div id="grid"></div>
+  <script>
+    fetch("/heatmap.json").then(r=>r.json()).then(d=>{
+      const {index, columns, values, meta} = d;
+      const tbl = document.createElement('table');
+      const thead = document.createElement('thead');
+      const hrow = document.createElement('tr');
+      hrow.appendChild(document.createElement('th')).textContent = "Sector";
+      columns.forEach(t=>{ const th=document.createElement('th'); th.textContent=t; hrow.appendChild(th); });
+      thead.appendChild(hrow); tbl.appendChild(thead);
+      const tbody = document.createElement('tbody');
+      index.forEach((sector, i)=>{
+        const tr = document.createElement('tr');
+        const th = document.createElement('th'); th.textContent = sector; tr.appendChild(th);
+        columns.forEach((ticker, j)=>{
+          const v = values[i]?.[j] ?? null;
+          const td = document.createElement('td');
+          if (v !== null) {
+            const p = Math.max(0, Math.min(1, v));
+            const g = Math.round(200 + 55*p);
+            const r = Math.round(255 - 155*p);
+            const b = Math.round(200 + 55*(1-p));
+            td.style.background = `rgb(${r}, ${g}, ${b})`;
+            td.textContent = Math.round(p*100);
+            const key = sector + "|" + ticker;
+            const m = meta[key] || {};
+            const roi = (m.avg_roi!=null)? (m.avg_roi*100).toFixed(2)+"%":"";
+            const lb  = (m.hit_lb95!=null)? (m.hit_lb95*100).toFixed(2)+"%":"";
+            td.title = `${ticker} — LB ${lb}, n=${m.support||0}, avgROI ${roi}`;
+          } else {
+            td.textContent = "";
+          }
+          tr.appendChild(td);
+        });
+        tbody.appendChild(tr);
+      });
+      tbl.appendChild(tbody);
+      document.getElementById('grid').appendChild(tbl);
+    });
+  </script>
+</body>
+</html>
