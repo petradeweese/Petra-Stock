@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import sqlite3
 import sys
@@ -13,6 +14,7 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 import db
 import routes
 from routes import favorites_delete_duplicates
+from services.favorites import ensure_favorite_directions
 from starlette.requests import Request
 
 
@@ -217,4 +219,35 @@ def test_normalize_favorite_preserves_existing_values_when_snapshot_missing_fiel
     assert normalized["stop_pct"] == 0.9
     assert normalized["window_value"] == 8.0
     assert normalized["window_unit"] == "Days"
+
+
+def test_ensure_favorite_directions_backfills(tmp_path, caplog):
+    db.DB_PATH = str(tmp_path / "test.db")
+    db.init_db()
+
+    conn = sqlite3.connect(db.DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO favorites(ticker, direction, interval, rule, settings_json_snapshot)"
+        " VALUES ('AAA', 'BOTH', '15m', 'r1', ?)",
+        (json.dumps({"direction": "down"}),),
+    )
+    cur.execute(
+        "INSERT INTO favorites(ticker, direction, interval, rule)"
+        " VALUES ('BBB', '', '15m', 'r2')"
+    )
+    conn.commit()
+
+    caplog.set_level(logging.WARNING)
+    ensure_favorite_directions(cur)
+
+    cur.execute("SELECT ticker, direction FROM favorites ORDER BY ticker")
+    rows = cur.fetchall()
+    assert rows[0]["ticker"] == "AAA"
+    assert rows[0]["direction"] == "DOWN"
+    assert rows[1]["direction"] == "UP"
+    assert any("defaulting to UP" in rec.getMessage() for rec in caplog.records)
+
+    conn.close()
 

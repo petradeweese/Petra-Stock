@@ -262,8 +262,9 @@ def _fmt_recent3(r3):
     parts = []
     for entry in r3:
         date_val = entry.get("date")
-        date_str = "" if date_val is None else str(date_val).strip()
-        outcome = entry.get("outcome") or ""
+        date_str = "" if date_val is None else str(date_val).strip().replace("\n", " ")
+        outcome_raw = entry.get("outcome") or ""
+        outcome = str(outcome_raw).strip().replace("\n", " ")
         tt_raw = entry.get("tt", 0)
         if tt_raw is None or pd.isna(tt_raw):
             tt_val = 0
@@ -281,7 +282,7 @@ def _fmt_recent3(r3):
             except (TypeError, ValueError):
                 roi_val = 0.0
         sign = "+" if roi_val >= 0 else ""
-        prefix = " ".join(part for part in [date_str, str(outcome).strip()] if part)
+        prefix = " ".join(part for part in [date_str, outcome] if part)
         parts.append(f"{prefix} {sign}{roi_val*100:.2f}% @{tt_val}b".strip())
     return " | ".join(parts)
 

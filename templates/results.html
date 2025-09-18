@@ -23,7 +23,7 @@
   <div class="card-body"><div class="error-banner">{{ error }}</div></div>
   {% endif %}
   <div class="card-body" style="overflow:auto;">
-    <table class="table" id="results-table">
+    <table class="table table-compact table-hover" id="results-table">
       <thead>
         <tr>
           <th><button class="linklike" data-sort="ticker">Ticker</button></th>
@@ -74,8 +74,10 @@
           {% set avg_tt_val = r.get('avg_tt') %}
           <td class="num">{{ '{:.1f}'.format(avg_tt_val) if avg_tt_val is not none else '—' }}</td>
           <td class="num">{{ r.get('avg_dd_pct')|fmt_percent }}</td>
-          <td class="recent">{{ _fmt_recent3(r.get('recent3')) }}</td>
-          <td class="rule-td" title="{{ r.get('rule', '') }}">{{ r.get('rule', '') }}</td>
+          {% set recent_text = _fmt_recent3(r.get('recent3')) %}
+          {% set rule_text = r.get('rule', '') %}
+          <td class="col-recent clamp1" title="{{ recent_text }}">{{ recent_text }}</td>
+          <td class="col-rule clamp1" title="{{ rule_text }}">{{ rule_text }}</td>
           <td><button class="btn-fav" title="Add to Favorites">⭐</button></td>
         </tr>
         {% endfor %}

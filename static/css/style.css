@@ -240,6 +240,16 @@ button.btn-danger:hover {
   vertical-align:top;
 }
 
+.table-compact th,
+.table-compact td {
+  padding:6px 10px;
+}
+
+.table-hover tbody tr:hover {
+  outline:1px solid var(--accent);
+  box-shadow:0 0 6px var(--accent);
+}
+
 .table thead th {
   position:sticky;
   top:0;
@@ -255,13 +265,36 @@ button.btn-danger:hover {
 
 .table tbody tr:hover { outline:1px solid var(--accent); box-shadow:0 0 6px var(--accent); }
 
+.table-scroll {
+  overflow:auto;
+}
+
 .row-hover { cursor:pointer; }
 
 .roi.pos { color:var(--pos); }
 .roi.neg { color:var(--neg); }
 .hit.high { color:var(--pos); }
 
-.rule-td { max-width:480px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.col-rule,
+.col-recent {
+  max-width:360px;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+
+.clamp1 {
+  white-space:nowrap;
+}
+
+@media (max-width: 740px) {
+  .clamp1 {
+    white-space:normal;
+    display:-webkit-box;
+    -webkit-line-clamp:2;
+    -webkit-box-orient:vertical;
+  }
+}
 
 .del-btn {
   background:none;
