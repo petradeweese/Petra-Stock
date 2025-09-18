@@ -963,11 +963,23 @@ def enrich_and_send(
 
 
 def enrich_and_send_test(
-    ticker: str, direction: str, channel: str = "mms", compact: bool = False
+    ticker: str,
+    direction: str,
+    channel: str = "mms",
+    *,
+    compact: bool = False,
+    outcomes: str = "hit",
 ) -> tuple[bool, dict[str, str]]:
     symbol = (ticker or "AAPL").upper()
     direction_norm = (direction or "UP").upper()
     side = "call" if direction_norm == "UP" else "put"
+    normalized_channel = (channel or "mms").strip().lower() or "mms"
+    normalized_outcomes = (outcomes or "hit").strip().lower() or "hit"
+    outcomes_label = (
+        "Hit + Stop + Timeout"
+        if normalized_outcomes == "all"
+        else "Hit only"
+    )
     today = datetime.utcnow().date()
     contract = options_provider.OptionContract(
         occ=f"{symbol}TEST",
@@ -1021,9 +1033,39 @@ def enrich_and_send_test(
         checks,
         targets,
         compact=compact,
-        channel=channel,
+        channel=normalized_channel,
         pattern="Manual Test",
         include_symbols=True,
     )
+    if outcomes_label:
+        body = f"{body}\n\nOutcomes Mode: {outcomes_label}".strip()
     subject = f"Favorites Alert Test: {symbol} {direction_norm}"
-    return True, {"subject": subject, "body": body}
+    return True, {
+        "subject": subject,
+        "body": body,
+        "channel": "email" if normalized_channel == "email" else "mms",
+        "outcomes": normalized_outcomes,
+    }
+
+
+def build_preview(
+    symbol: str,
+    *,
+    channel: str = "Email",
+    outcomes: str = "hit",
+    compact: bool = False,
+) -> tuple[str, str]:
+    normalized_channel = (channel or "Email").strip().lower() or "email"
+    normalized_outcomes = (outcomes or "hit").strip().lower() or "hit"
+    ok, payload = enrich_and_send_test(
+        symbol,
+        "UP",
+        channel=normalized_channel,
+        compact=compact,
+        outcomes=normalized_outcomes,
+    )
+    if not ok or not isinstance(payload, dict):
+        return "", ""
+    subject = str(payload.get("subject", ""))
+    body = str(payload.get("body", ""))
+    return subject, body

@@ -46,11 +46,19 @@ def test_favorites_test_alert_mms(tmp_path, monkeypatch):
         return True
 
     monkeypatch.setattr(routes.twilio_client, "send_mms", fake_twilio)
+    monkeypatch.setattr(routes.twilio_client, "is_enabled", lambda: True)
 
     called = {}
 
-    def fake_enrich(symbol, direction, channel="mms", compact=False):
-        called.update({"symbol": symbol, "channel": channel, "compact": compact})
+    def fake_enrich(symbol, direction, channel="mms", compact=False, outcomes="hit"):
+        called.update(
+            {
+                "symbol": symbol,
+                "channel": channel,
+                "compact": compact,
+                "outcomes": outcomes,
+            }
+        )
         return True, {"subject": "Test Subject", "body": "Alert body"}
 
     monkeypatch.setattr(routes.favorites_alerts, "enrich_and_send_test", fake_enrich)
@@ -62,7 +70,12 @@ def test_favorites_test_alert_mms(tmp_path, monkeypatch):
     assert data["channel"] == "MMS"
     assert data["outcomes"] == "all"
     assert data["subject"] == "Test Subject"
-    assert called == {"symbol": "AAPL", "channel": "mms", "compact": False}
+    assert called == {
+        "symbol": "AAPL",
+        "channel": "mms",
+        "compact": False,
+        "outcomes": "all",
+    }
     assert send_calls[0][0] == "18005550100"
     assert send_calls[0][2]["channel"] == "mms"
     assert events[-2] == {
@@ -81,13 +94,66 @@ def test_favorites_test_alert_mms(tmp_path, monkeypatch):
     }
 
 
+def test_settings_test_alert_overrides(tmp_path, monkeypatch):
+    configure_settings(monkeypatch, channel="Email", outcomes="hit", sms_to=("18005550100",))
+
+    sent: list[tuple[str, str, dict | None]] = []
+
+    def fake_twilio(number, body, *, context=None):
+        sent.append((number, body, context))
+        return True
+
+    monkeypatch.setattr(routes.twilio_client, "send_mms", fake_twilio)
+    monkeypatch.setattr(routes.twilio_client, "is_enabled", lambda: True)
+
+    captured: dict[str, object] = {}
+
+    def fake_enrich(symbol, direction, channel="mms", compact=False, outcomes="hit"):
+        captured.update(
+            {
+                "symbol": symbol,
+                "channel": channel,
+                "compact": compact,
+                "outcomes": outcomes,
+            }
+        )
+        return True, {"subject": "Alt Subject", "body": "Message"}
+
+    monkeypatch.setattr(routes.favorites_alerts, "enrich_and_send_test", fake_enrich)
+
+    client, events = setup_app(tmp_path, monkeypatch)
+    res = client.post(
+        "/settings/test-alert",
+        json={"symbol": "TSLA", "channel": "MMS", "outcomes": "all"},
+    )
+    assert res.status_code == 200
+    data = res.json()
+    assert data["channel"] == "MMS"
+    assert data["outcomes"] == "all"
+    assert captured == {
+        "symbol": "TSLA",
+        "channel": "mms",
+        "compact": False,
+        "outcomes": "all",
+    }
+    assert sent and sent[0][0] == "18005550100"
+    assert events[-1]["outcomes"] == "all"
+
+
 def test_test_alert_email_success_returns_message_id(tmp_path, monkeypatch):
     configure_settings(monkeypatch, channel="Email", outcomes="hit", sms_to=())
 
     called = {}
 
-    def fake_enrich(symbol, direction, channel="mms", compact=False):
-        called.update({"symbol": symbol, "channel": channel, "compact": compact})
+    def fake_enrich(symbol, direction, channel="mms", compact=False, outcomes="hit"):
+        called.update(
+            {
+                "symbol": symbol,
+                "channel": channel,
+                "compact": compact,
+                "outcomes": outcomes,
+            }
+        )
         return True, {"subject": "Email Subject", "body": "Line 1\nLine 2"}
 
     monkeypatch.setattr(routes.favorites_alerts, "enrich_and_send_test", fake_enrich)
@@ -140,7 +206,12 @@ def test_test_alert_email_success_returns_message_id(tmp_path, monkeypatch):
     assert data["message_id"] == "<msg-123>"
     assert data["channel"] == "Email"
     assert data["outcomes"] == "hit"
-    assert called == {"symbol": "AAPL", "channel": "email", "compact": False}
+    assert called == {
+        "symbol": "AAPL",
+        "channel": "email",
+        "compact": False,
+        "outcomes": "hit",
+    }
     assert sent_call["to"] == ["test@example.com"]
     assert sent_call["context"]["channel"] == "email"
     assert events[-2] == {
@@ -163,7 +234,7 @@ def test_test_alert_email_success_returns_message_id(tmp_path, monkeypatch):
 def test_test_alert_email_missing_config_400(tmp_path, monkeypatch):
     configure_settings(monkeypatch, channel="Email", outcomes="hit", sms_to=())
 
-    def fake_enrich(symbol, direction, channel="mms", compact=False):
+    def fake_enrich(symbol, direction, channel="mms", compact=False, outcomes="hit"):
         return True, {"subject": "Email Subject", "body": "Preview"}
 
     monkeypatch.setattr(routes.favorites_alerts, "enrich_and_send_test", fake_enrich)
@@ -212,7 +283,7 @@ def test_test_alert_email_missing_config_400(tmp_path, monkeypatch):
 
 
 def test_preview_returns_body_subject(tmp_path, monkeypatch):
-    def fake_enrich(symbol, direction, channel="mms", compact=False):
+    def fake_enrich(symbol, direction, channel="mms", compact=False, outcomes="hit"):
         return True, {"subject": f"Preview {symbol}", "body": "Example body"}
 
     monkeypatch.setattr(routes.favorites_alerts, "enrich_and_send_test", fake_enrich)
@@ -228,6 +299,7 @@ def test_preview_returns_body_subject(tmp_path, monkeypatch):
         "symbol": "MSFT",
         "channel": "email",
         "compact": True,
+        "outcomes": "hit",
         "subject": "Preview MSFT",
         "body": "Example body",
     }
@@ -241,6 +313,7 @@ def test_favorites_test_alert_mms_real_layout(tmp_path, monkeypatch):
         return True
 
     monkeypatch.setattr(routes.twilio_client, "send_mms", fake_send)
+    monkeypatch.setattr(routes.twilio_client, "is_enabled", lambda: True)
 
     client, events = setup_app(tmp_path, monkeypatch)
     res = client.post("/favorites/test_alert", json={"symbol": "AAPL"})
@@ -270,8 +343,9 @@ def test_favorites_test_alert_mms_compact_only_failures(tmp_path, monkeypatch):
         return True
 
     monkeypatch.setattr(routes.twilio_client, "send_mms", fake_send)
+    monkeypatch.setattr(routes.twilio_client, "is_enabled", lambda: True)
 
-    def fake_enrich(symbol, direction, channel="mms", compact=False):
+    def fake_enrich(symbol, direction, channel="mms", compact=False, outcomes="hit"):
         return True, {
             "subject": "Compact",
             "body": "• Delta (0.50) ❌ — too high; demo",

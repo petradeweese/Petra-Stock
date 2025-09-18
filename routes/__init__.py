@@ -2287,22 +2287,31 @@ async def favorites_add(request: Request, db=Depends(get_db)):
 
 
 @router.post("/favorites/test_alert")
+@router.post("/settings/test-alert")
 def favorites_test_alert(payload: dict = Body(...), db=Depends(get_db)):
     symbol = (payload.get("symbol") or payload.get("ticker") or "AAPL").upper()
     configured_channel = getattr(
         settings, "alert_channel", getattr(settings, "ALERT_CHANNEL", "Email")
     )
-    channel_label = configured_channel or "Email"
-    channel = channel_label.strip().lower()
+    payload_channel = payload.get("channel")
+    channel_label = (payload_channel or configured_channel or "Email").strip() or "Email"
+    channel = channel_label.lower()
     if channel not in {"email", "mms"}:
         channel = "mms"
         channel_label = "MMS"
+    else:
+        channel_label = "Email" if channel == "email" else "MMS"
     outcomes_config = getattr(
         settings, "alert_outcomes", getattr(settings, "ALERT_OUTCOMES", "hit")
     )
-    outcomes = (outcomes_config or "hit").strip().lower() or "hit"
+    payload_outcomes = payload.get("outcomes")
+    outcomes = (payload_outcomes or outcomes_config or "hit").strip().lower() or "hit"
     ok, message = favorites_alerts.enrich_and_send_test(
-        symbol, "UP", channel=channel, compact=False
+        symbol,
+        "UP",
+        channel=channel,
+        compact=False,
+        outcomes=outcomes,
     )
     subject = message.get("subject", "") if isinstance(message, dict) else ""
     body = message.get("body", "") if isinstance(message, dict) else ""
@@ -2397,6 +2406,23 @@ def favorites_test_alert(payload: dict = Body(...), db=Depends(get_db)):
         log_telemetry(base_telem)
         return response
 
+    if not twilio_client.is_enabled():
+        error = "Twilio not configured"
+        log_telemetry(
+            {
+                "type": "favorites_test_alert_send",
+                "channel": "mms",
+                "provider": "twilio",
+                "ok": False,
+                "error": error,
+                "outcomes": outcomes,
+            }
+        )
+        base_telem["ok"] = False
+        log_telemetry(base_telem)
+        response.update({"ok": False, "error": error})
+        return JSONResponse(response, status_code=400)
+
     numbers = list(settings.alert_sms_to)
     if not numbers:
         error = "MMS not configured"
@@ -2445,16 +2471,19 @@ def favorites_test_alert_preview(payload: dict = Body(...)):
     symbol = (payload.get("symbol") or payload.get("ticker") or "AAPL").upper()
     channel = (payload.get("channel") or "mms").lower()
     compact = bool(payload.get("compact"))
-    ok, subject, body = _extract_test_alert_message(
-        favorites_alerts.enrich_and_send_test(
-            symbol, "UP", channel=channel, compact=compact
-        )
+    outcomes = (payload.get("outcomes") or "hit").strip().lower() or "hit"
+    subject, body = favorites_alerts.build_preview(
+        symbol,
+        channel=channel,
+        outcomes=outcomes,
+        compact=compact,
     )
     return {
-        "ok": ok,
+        "ok": bool(body),
         "symbol": symbol,
         "channel": channel,
         "compact": compact,
+        "outcomes": outcomes,
         "subject": subject,
         "body": body,
     }

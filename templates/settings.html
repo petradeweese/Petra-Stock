@@ -78,69 +78,70 @@
       <div class="grid" style="margin-top:.5rem;">
         <div>
           <label>Symbol</label>
-          <input id="fav-test-symbol" value="AAPL" />
+          <input id="fav_symbol" value="AAPL" />
         </div>
         <div>
           <label>Channel</label>
-          <input value="{{ alert_channel }}" readonly />
+          <select id="test_channel">
+            <option value="Email" {% if alert_channel == 'Email' %}selected{% endif %}>Email</option>
+            <option value="MMS" {% if alert_channel == 'MMS' %}selected{% endif %}>MMS</option>
+          </select>
         </div>
         <div>
           <label>Outcomes</label>
-          <input value="{{ 'Hit only' if alert_outcomes == 'hit' else 'Hit + Stop + Timeout' }}" readonly />
+          <select id="test_outcomes">
+            <option value="hit" {% if alert_outcomes == 'hit' %}selected{% endif %}>Hit only</option>
+            <option value="all" {% if alert_outcomes == 'all' %}selected{% endif %}>Hit + Stop + Timeout</option>
+          </select>
         </div>
       </div>
-      <p id="fav-test-status" class="note" style="margin-top:.75rem;"></p>
-      <button id="fav-test-send" class="btn" style="margin-top:.25rem;">Send Test Alert</button>
+      <button id="send_test_alert" class="btn" style="margin-top:.75rem;">Send Test Alert</button>
     </div>
   </div>
 {% endblock %}
 {% block extra_body %}
 <script>
   (function(){
-    const sendBtn = document.getElementById('fav-test-send');
-    const symbolInput = document.getElementById('fav-test-symbol');
-    const statusEl = document.getElementById('fav-test-status');
-
-    function setStatus(message, tone) {
-      if (!statusEl) return;
-      statusEl.textContent = message || '';
-      statusEl.classList.remove('status-error','status-success');
-      if (!message) {
-        statusEl.style.visibility = 'hidden';
-        return;
-      }
-      statusEl.style.visibility = 'visible';
-      if (tone === 'error') {
-        statusEl.classList.add('status-error');
-      } else if (tone === 'success') {
-        statusEl.classList.add('status-success');
-      }
+    const toast = document.getElementById('toast');
+    function showToast(msg, ok=true) {
+      if (!toast) return;
+      toast.textContent = msg;
+      toast.style.borderColor = ok ? '#2e7d32' : '#8b0000';
+      toast.style.background  = ok ? '#0f3311' : '#2b0f0f';
+      toast.hidden = false;
+      setTimeout(() => { toast.hidden = true; }, 2000);
     }
 
+    const sendBtn = document.getElementById('send_test_alert');
+    const symbolInput = document.getElementById('fav_symbol');
+    const channelSelect = document.getElementById('test_channel');
+    const outcomesSelect = document.getElementById('test_outcomes');
+
     sendBtn?.addEventListener('click', async () => {
-      const symbol = (symbolInput?.value || 'AAPL').trim().toUpperCase();
+      const symbol = (symbolInput?.value || '').trim().toUpperCase();
       if (!symbol) {
-        setStatus('Enter a symbol to send a test alert.', 'error');
+        showToast('Enter a symbol to send a test alert.', false);
         return;
       }
-      setStatus('Sending test alert…');
       sendBtn.disabled = true;
       try {
-        const res = await fetch('/favorites/test_alert', {
+        const payload = {
+          symbol,
+          channel: channelSelect?.value || 'Email',
+          outcomes: outcomesSelect?.value || 'hit',
+        };
+        const res = await fetch('/settings/test-alert', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ symbol }),
+          body: JSON.stringify(payload),
         });
         const data = await res.json();
-        if (!res.ok || !data.ok) {
-          const err = data.error || 'Alert send failed';
-          throw new Error(err);
+        if (!res.ok || !data?.ok) {
+          throw new Error(data?.error || 'Send failed');
         }
-        const channel = data.channel || 'MMS';
-        const outcomes = data.outcomes || 'hit';
-        setStatus(`Test alert sent via ${channel} (${outcomes}).`, 'success');
+        showToast(`Test alert sent via ${data.channel} (${data.outcomes}).`);
       } catch (err) {
-        setStatus(err.message || 'Failed to send test alert', 'error');
+        showToast(err?.message || 'Failed to send test alert', false);
       } finally {
         sendBtn.disabled = false;
       }
