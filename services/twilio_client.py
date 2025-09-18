@@ -60,6 +60,13 @@ def _initialize() -> None:
         _ENABLED = False
 
 
+def is_enabled() -> bool:
+    """Return ``True`` if the Twilio client is configured for sends."""
+
+    _initialize()
+    return bool(_ENABLED and _CLIENT and _FROM_NUMBER)
+
+
 def send_mms(
     to: str,
     body: str,
@@ -97,4 +104,4 @@ def send_mms(
     return True
 
 
-__all__ = ["send_mms"]
+__all__ = ["is_enabled", "send_mms"]
