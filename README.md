@@ -43,6 +43,24 @@ derived from actual market sessions: only minutes when the market is open are
 counted. Weekends and holidays therefore no longer inflate the coverage
 requirement.
 
+## Favorites alerts
+
+Saved favorites now emit real-time alerts whenever the underlying scan detects a
+new entry signal. The detection logic runs in the shared row-finalization hook
+used by the UI, autoscan batch runner, and background scheduler so alerting
+behaves consistently regardless of how the scan was triggered. Each delivery is
+deduplicated by `(favorite_id, bar_time)` to avoid spamming repeated signals.
+
+Alerts can be delivered over email using your existing SMTP configuration or via
+Twilio-powered MMS when a mobile workflow is preferred. When MMS is enabled the
+system attempts to send the same formatted body to every number listed in
+`ALERT_SMS_TO`, counting the alert as delivered once any recipient succeeds.
+
+The 15-minute scheduler loop now calls the autoscan batch so alerts fire during
+regular market hours without manual intervention. The job runs at :00, :15, :30
+and :45 (with a small guard to prevent duplicate triggers) as long as the New
+York Stock Exchange is open.
+
 ## Environment
 
 Copy `.env.example` to `.env` and adjust:
@@ -57,6 +75,10 @@ Copy `.env.example` to `.env` and adjust:
 - `FETCH_RETRY_MAX` – max retry attempts for Polygon fetches (default 4)
 - `FETCH_RETRY_BASE_MS` – base backoff in milliseconds (default 300)
 - `FETCH_RETRY_CAP_MS` – maximum backoff in milliseconds (default 5000)
+- `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` / `TWILIO_FROM_NUMBER` – Twilio
+  credentials and sender number for MMS alerts
+- `ALERT_SMS_TO` – comma-separated list of phone numbers that should receive
+  MMS alerts
 
 ## Backfill and ETL
 

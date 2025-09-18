@@ -31,7 +31,7 @@ from db import (
 from indices import SP100, TOP150, TOP250
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 from scanner import compute_scan_for_ticker
-from services import executor, favorites_alerts, price_store
+from services import executor, favorites_alerts, price_store, twilio_client
 from services.favorites import canonical_direction, ensure_favorite_directions
 from services.notify import send_email_smtp
 from services.scanner_params import coerce_scan_params
@@ -2289,29 +2289,47 @@ async def favorites_add(request: Request, db=Depends(get_db)):
 @router.post("/favorites/test_alert")
 def favorites_test_alert(payload: dict = Body(...), db=Depends(get_db)):
     symbol = (payload.get("symbol") or payload.get("ticker") or "AAPL").upper()
-    channel = (payload.get("channel") or "mms").lower()
-    compact = bool(payload.get("compact"))
-    ok, subject, body = _extract_test_alert_message(
-        favorites_alerts.enrich_and_send_test(
-            symbol, "UP", channel=channel, compact=compact
-        )
+    configured_channel = getattr(
+        settings, "alert_channel", getattr(settings, "ALERT_CHANNEL", "Email")
     )
+    channel_label = configured_channel or "Email"
+    channel = channel_label.strip().lower()
+    if channel not in {"email", "mms"}:
+        channel = "mms"
+        channel_label = "MMS"
+    outcomes_config = getattr(
+        settings, "alert_outcomes", getattr(settings, "ALERT_OUTCOMES", "hit")
+    )
+    outcomes = (outcomes_config or "hit").strip().lower() or "hit"
+    ok, message = favorites_alerts.enrich_and_send_test(
+        symbol, "UP", channel=channel, compact=False
+    )
+    subject = message.get("subject", "") if isinstance(message, dict) else ""
+    body = message.get("body", "") if isinstance(message, dict) else ""
+
+    response = {
+        "ok": ok,
+        "symbol": symbol,
+        "channel": channel_label,
+        "outcomes": outcomes,
+        "subject": subject,
+        "body": body,
+    }
 
     base_telem = {
         "type": "favorites_test_alert",
         "symbol": symbol,
         "channel": channel,
-        "compact": compact,
+        "outcomes": outcomes,
+        "ok": ok,
     }
 
-    response = {
-        "ok": ok,
-        "symbol": symbol,
-        "channel": channel,
-        "compact": compact,
-        "subject": subject,
-        "body": body,
-    }
+    if not ok:
+        response["error"] = "Unable to generate alert body"
+        log_telemetry(base_telem)
+        return JSONResponse(response, status_code=500)
+
+    delivery_context = {"symbol": symbol, "fav_id": "test", "outcomes": outcomes}
 
     if channel == "email":
         st = get_settings(db)
@@ -2327,27 +2345,13 @@ def favorites_test_alert(payload: dict = Body(...), db=Depends(get_db)):
                     "provider": "smtp",
                     "ok": False,
                     "error": error,
+                    "outcomes": outcomes,
                 }
             )
+            response.update({"ok": False, "error": error})
             base_telem["ok"] = False
             log_telemetry(base_telem)
-            response.update({"ok": False, "error": error})
             return JSONResponse(response, status_code=400)
-        if not ok:
-            error = "Unable to generate alert body"
-            log_telemetry(
-                {
-                    "type": "favorites_test_alert_send",
-                    "channel": "email",
-                    "provider": "smtp",
-                    "ok": False,
-                    "error": error,
-                }
-            )
-            response.update({"ok": False, "error": error})
-            base_telem["ok"] = False
-            log_telemetry(base_telem)
-            return JSONResponse(response, status_code=500)
 
         send_result = send_email_smtp(
             cfg["host"],
@@ -2358,6 +2362,7 @@ def favorites_test_alert(payload: dict = Body(...), db=Depends(get_db)):
             cfg["recipients"],
             subject or f"Favorites Alert Test: {symbol}",
             body,
+            context={**delivery_context, "channel": "email"},
         )
         if not send_result.get("ok"):
             error = send_result.get("error", "SMTP send failed")
@@ -2368,6 +2373,7 @@ def favorites_test_alert(payload: dict = Body(...), db=Depends(get_db)):
                     "provider": "smtp",
                     "ok": False,
                     "error": error,
+                    "outcomes": outcomes,
                 }
             )
             response.update({"ok": False, "error": error})
@@ -2384,15 +2390,54 @@ def favorites_test_alert(payload: dict = Body(...), db=Depends(get_db)):
                 "provider": "smtp",
                 "ok": True,
                 "message_id": message_id,
+                "outcomes": outcomes,
             }
         )
         base_telem["ok"] = True
         log_telemetry(base_telem)
         return response
 
-    base_telem["ok"] = ok
+    numbers = list(settings.alert_sms_to)
+    if not numbers:
+        error = "MMS not configured"
+        log_telemetry(
+            {
+                "type": "favorites_test_alert_send",
+                "channel": "mms",
+                "provider": "twilio",
+                "ok": False,
+                "error": error,
+                "outcomes": outcomes,
+            }
+        )
+    else:
+        success = False
+        for number in numbers:
+            if twilio_client.send_mms(
+                str(number), body, context={**delivery_context, "channel": "mms"}
+            ):
+                success = True
+        log_telemetry(
+            {
+                "type": "favorites_test_alert_send",
+                "channel": "mms",
+                "provider": "twilio",
+                "ok": success,
+                "outcomes": outcomes,
+            }
+        )
+        base_telem["ok"] = success
+        log_telemetry(base_telem)
+        if success:
+            return response
+        error = "No MMS deliveries succeeded"
+        response.update({"ok": False, "error": error})
+        return JSONResponse(response, status_code=502)
+
+    base_telem["ok"] = False
     log_telemetry(base_telem)
-    return response
+    response.update({"ok": False, "error": error})
+    return JSONResponse(response, status_code=400)
 
 
 @router.post("/favorites/test_alert/preview")
@@ -2417,7 +2462,11 @@ def favorites_test_alert_preview(payload: dict = Body(...)):
 
 @router.get("/settings", response_class=HTMLResponse)
 def settings_page(request: Request, db=Depends(get_db)):
-    st = get_settings(db)
+    st = dict(get_settings(db))
+    st.setdefault(
+        "alert_outcomes",
+        getattr(settings, "alert_outcomes", getattr(settings, "ALERT_OUTCOMES", "hit")),
+    )
     _, smtp_missing, smtp_has_any = _smtp_config_status(st)
     smtp_configured = not smtp_missing
     smtp_warning = smtp_has_any and bool(smtp_missing)
@@ -2432,6 +2481,8 @@ def settings_page(request: Request, db=Depends(get_db)):
             "smtp_missing_label": _format_missing_fields(smtp_missing),
             "smtp_warning": smtp_warning,
             "twilio_configured": False,
+            "alert_channel": getattr(settings, "alert_channel", "Email"),
+            "alert_outcomes": st.get("alert_outcomes", "hit"),
         },
     )
 
@@ -2453,6 +2504,7 @@ def settings_save(
     scanner_recipients: str = Form(""),
     scheduler_enabled: int = Form(1),
     throttle_minutes: int = Form(60),
+    alert_outcomes: str = Form("hit"),
     db=Depends(get_db),
 ):
     _ensure_scanner_column(db)
@@ -2481,11 +2533,14 @@ def settings_save(
         port_value = 0
 
     password_value = smtp_pass.replace(" ", "").strip()
+    outcomes_choice = (alert_outcomes or "hit").strip().lower()
+    if outcomes_choice not in {"hit", "all"}:
+        outcomes_choice = "hit"
 
     db.execute(
         """
         UPDATE settings
-           SET smtp_host=?, smtp_port=?, smtp_user=?, smtp_pass=?, mail_from=?, recipients=?, scanner_recipients=?, scheduler_enabled=?, throttle_minutes=?
+           SET smtp_host=?, smtp_port=?, smtp_user=?, smtp_pass=?, mail_from=?, recipients=?, scanner_recipients=?, alert_outcomes=?, scheduler_enabled=?, throttle_minutes=?
          WHERE id=1
         """,
         (
@@ -2496,11 +2551,15 @@ def settings_save(
             mail_from.strip(),
             clean_fav,
             clean_scan,
+            outcomes_choice,
             int(scheduler_enabled),
             int(throttle_minutes),
         ),
     )
     db.connection.commit()
+    os.environ["ALERT_OUTCOMES"] = outcomes_choice
+    settings.alert_outcomes = outcomes_choice
+    setattr(settings, "ALERT_OUTCOMES", outcomes_choice)
     return RedirectResponse(url="/settings", status_code=302)
 
 

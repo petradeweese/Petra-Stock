@@ -8,13 +8,46 @@ logic described in the specification.
 from __future__ import annotations
 
 import json
+import logging
 import math
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
-from . import options_provider, events_provider
+from config import settings
+
+from . import events_provider, options_provider, twilio_client
+from .notify import send_email_smtp
 from .telemetry import log as log_telemetry
+
+
+logger = logging.getLogger(__name__)
+
+_SENT_ALERTS: set[Tuple[str, str]] = set()
+
+
+def _outcomes_mode() -> str:
+    raw = getattr(settings, "alert_outcomes", getattr(settings, "ALERT_OUTCOMES", "hit"))
+    value = str(raw or "hit").strip().lower()
+    return value or "hit"
+
+
+def was_sent(favorite_id: Any, bar_time: Any) -> bool:
+    """Return ``True`` if the alert for ``favorite_id``/``bar_time`` was sent."""
+
+    if favorite_id in (None, "", b"") or bar_time in (None, "", b""):
+        return False
+    key = (str(favorite_id), str(bar_time))
+    return key in _SENT_ALERTS
+
+
+def mark_sent(favorite_id: Any, bar_time: Any) -> None:
+    """Record that an alert was delivered for the given favorite/bar."""
+
+    if favorite_id in (None, "", b"") or bar_time in (None, "", b""):
+        return
+    key = (str(favorite_id), str(bar_time))
+    _SENT_ALERTS.add(key)
 
 
 @dataclass
@@ -27,6 +60,8 @@ class FavoriteHitStub:
     hit_pct: float = 0.0
     avg_roi_pct: float = 0.0
     avg_dd_pct: float = 0.0
+    favorite_id: Optional[str] = None
+    bar_time: Optional[str] = None
 
 
 @dataclass
@@ -38,6 +73,302 @@ class Check:
     explanation: str | None = None
 
 
+def _parse_list(value: Any) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [part.strip() for part in value.split(",") if part.strip()]
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        result: List[str] = []
+        for item in value:
+            if isinstance(item, str):
+                item = item.strip()
+                if item:
+                    result.append(item)
+        return result
+    return []
+
+
+def _extract_favorite_id(obj: Any) -> Optional[str]:
+    if obj is None:
+        return None
+    if isinstance(obj, FavoriteHitStub):
+        return obj.favorite_id
+    if isinstance(obj, Mapping):
+        for key in ("favorite_id", "id"):
+            value = obj.get(key)
+            if value not in (None, ""):
+                return str(value)
+    for attr in ("favorite_id", "id"):
+        value = getattr(obj, attr, None)
+        if value not in (None, ""):
+            return str(value)
+    return None
+
+
+def _extract_bar_time(row: Any) -> Optional[str]:
+    if row is None:
+        return None
+    if isinstance(row, Mapping):
+        for key in ("bar_time", "bar_ts", "timestamp", "bar_timestamp"):
+            value = row.get(key)
+            if value not in (None, ""):
+                return str(value)
+    for attr in ("bar_time", "bar_ts", "timestamp", "bar_timestamp"):
+        value = getattr(row, attr, None)
+        if value not in (None, ""):
+            return str(value)
+    return None
+
+
+def _normalize_channel(channel: Optional[str]) -> Optional[str]:
+    if channel is None:
+        return None
+    value = str(channel).strip().lower()
+    if not value:
+        return None
+    if value in {"email", "mms"}:
+        return value
+    return value
+
+
+def _should_skip_non_entry(row: Any) -> bool:
+    if row is None:
+        return False
+    if isinstance(row, Mapping):
+        values = [row.get(key) for key in ("event", "signal", "signal_type", "status", "reason")]
+    else:
+        values = [getattr(row, key, None) for key in ("event", "signal", "signal_type", "status", "reason")]
+    for value in values:
+        if not value or not isinstance(value, str):
+            continue
+        lowered = value.lower()
+        if "stop" in lowered or "timeout" in lowered:
+            return True
+    return False
+
+
+def _value(obj: Any, key: str) -> Any:
+    if isinstance(obj, Mapping):
+        return obj.get(key)
+    return getattr(obj, key, None)
+
+
+def _coerce_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None:
+            return default
+        if isinstance(value, str):
+            if not value.strip():
+                return default
+            return float(value)
+        return float(value)
+    except Exception:
+        return default
+
+
+def _coerce_int(value: Any, default: int = 0) -> int:
+    try:
+        if value is None:
+            return default
+        if isinstance(value, str):
+            if not value.strip():
+                return default
+            return int(float(value))
+        if isinstance(value, bool):
+            return int(value)
+        return int(value)
+    except Exception:
+        return default
+
+
+def should_alert_on_row(row: Any, fav: Any) -> bool:
+    """Return ``True`` when ``row`` represents an entry signal for ``fav``."""
+
+    if row is None or fav is None:
+        return False
+    include_all = _outcomes_mode() == "all"
+    if not include_all and _should_skip_non_entry(row):
+        return False
+
+    event_values: List[str] = []
+    for key in ("event", "signal", "signal_type", "status", "reason"):
+        value = _value(row, key)
+        if not value or not isinstance(value, str):
+            continue
+        lowered = value.strip().lower()
+        if not lowered:
+            continue
+        if not include_all and ("stop" in lowered or "timeout" in lowered):
+            return False
+        event_values.append(lowered)
+
+    if event_values and not include_all:
+        entry_keywords = ("entry", "detect", "pattern", "trigger", "alert")
+        if not any(any(word in ev for word in entry_keywords) for ev in event_values):
+            return False
+
+    support = _coerce_int(_value(row, "support"))
+    min_support = _coerce_int(_value(fav, "min_support"))
+    if min_support and support and support < min_support:
+        return False
+
+    hit_pct = _coerce_float(_value(row, "hit_pct"))
+    if hit_pct <= 0:
+        hit_rate = _coerce_float(_value(row, "hit_rate"))
+        if 0 <= hit_rate <= 1.0:
+            hit_pct = hit_rate * 100.0
+        else:
+            hit_pct = hit_rate
+
+    hit_threshold = _coerce_float(_value(fav, "scan_min_hit"), 50.0)
+    if hit_threshold <= 0:
+        hit_threshold = 50.0
+    if hit_pct < hit_threshold:
+        return False
+
+    avg_roi = _coerce_float(_value(row, "avg_roi_pct"))
+    if avg_roi == 0.0:
+        avg_roi = _coerce_float(_value(row, "avg_roi"))
+        if abs(avg_roi) <= 1.0:
+            avg_roi *= 100.0
+
+    min_roi = _coerce_float(_value(fav, "min_avg_roi_pct"), 0.0)
+    if avg_roi <= max(0.0, min_roi):
+        return False
+
+    return True
+
+
+def _merge_smtp_config(fav: Any, row: Any) -> Dict[str, Any]:
+    config: Dict[str, Any] = {}
+    sources: Iterable[Any] = ()
+    if isinstance(fav, Mapping):
+        sources = (fav,)
+    elif fav is not None:
+        sources = (fav.__dict__,)
+    for source in sources:
+        for key, dest in (
+            ("smtp_host", "host"),
+            ("host", "host"),
+            ("smtp_port", "port"),
+            ("port", "port"),
+            ("smtp_user", "user"),
+            ("user", "user"),
+            ("smtp_pass", "password"),
+            ("password", "password"),
+            ("mail_from", "mail_from"),
+            ("from", "mail_from"),
+        ):
+            value = source.get(key) if isinstance(source, Mapping) else getattr(source, key, None)
+            if value not in (None, ""):
+                config.setdefault(dest, value)
+    if isinstance(row, Mapping):
+        for key in ("smtp", "smtp_config"):
+            embedded = row.get(key)
+            if isinstance(embedded, Mapping):
+                for sub_key, value in embedded.items():
+                    if value not in (None, ""):
+                        config.setdefault(sub_key, value)
+    return config
+
+
+def _coalesce(values: Iterable[Any]) -> Any:
+    for value in values:
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def _deliver_alert(
+    channel: Optional[str],
+    subject: str,
+    body: str,
+    *,
+    recipients: Optional[Sequence[str]] = None,
+    favorite_id: Optional[str] = None,
+    bar_time: Optional[str] = None,
+    smtp_config: Optional[Mapping[str, Any]] = None,
+    delivery_context: Optional[Mapping[str, Any]] = None,
+) -> Tuple[bool, Optional[Tuple[str, str]], Optional[str]]:
+    normalized = _normalize_channel(channel)
+    if normalized is None:
+        return False, None, None
+
+    context_base: Dict[str, Any] = {}
+    if delivery_context:
+        context_base.update({k: v for k, v in delivery_context.items() if v is not None})
+    if favorite_id is not None and "fav_id" not in context_base:
+        context_base["fav_id"] = str(favorite_id)
+
+    dedupe_key: Optional[Tuple[str, str]] = None
+    if favorite_id and bar_time:
+        fav_id_str = str(favorite_id)
+        bar_time_str = str(bar_time)
+        dedupe_key = (fav_id_str, bar_time_str)
+        if was_sent(fav_id_str, bar_time_str):
+            logger.info(
+                "favorites alert dedupe skip favorite_id=%s bar_time=%s",
+                fav_id_str,
+                bar_time_str,
+            )
+            return False, None, normalized
+
+    success = False
+    if normalized == "email":
+        send_to = [r for r in (recipients or []) if r]
+        if not send_to:
+            logger.info("favorites alert email skipped: no recipients configured")
+        else:
+            cfg = dict(smtp_config or {})
+            host = cfg.get("host")
+            port = cfg.get("port")
+            user = cfg.get("user", "")
+            password = cfg.get("password", "")
+            mail_from = cfg.get("mail_from") or user
+            if not host or not port or not mail_from:
+                logger.warning("favorites alert email skipped: incomplete smtp config")
+            else:
+                try:
+                    result = send_email_smtp(
+                        str(host),
+                        int(port),
+                        str(user or ""),
+                        str(password or ""),
+                        str(mail_from),
+                        [str(r) for r in send_to],
+                        subject,
+                        body,
+                        context={**context_base, "channel": "email"},
+                    )
+                except Exception:
+                    logger.exception("favorites alert email send raised")
+                    result = {"ok": False}
+                if result.get("ok"):
+                    success = True
+                    logger.info(
+                        "favorites alert email sent recipients=%d", len(send_to)
+                    )
+                else:
+                    logger.warning(
+                        "favorites alert email failed: %s", result.get("error")
+                    )
+    elif normalized == "mms":
+        numbers = list(recipients) if recipients is not None else list(settings.alert_sms_to)
+        if not numbers:
+            logger.info("favorites alert mms skipped: no numbers configured")
+        else:
+            for number in numbers:
+                number_str = str(number)
+                context = {**context_base, "channel": "mms", "to": number_str}
+                if twilio_client.send_mms(number_str, body, context=context):
+                    success = True
+                else:
+                    logger.warning("favorites alert mms failed number=%s", number_str)
+    else:
+        logger.info("favorites alert skipped: unknown channel=%s", normalized)
+
+    return success, dedupe_key if success else None, normalized
 @dataclass
 class SelectionResult:
     contract: Optional[options_provider.OptionContract]
@@ -427,24 +758,104 @@ def format_favorites_alert(
     )
 
 
-def enrich_and_send(hit: FavoriteHitStub, is_test: bool = False) -> bool:  # pragma: no cover - orchestrator
-    """Orchestrate fetching data, evaluating and sending an alert.
-
-    The full implementation would interact with external services.  For tests we
-    simply run through the selection and formatting steps and log telemetry.
-    Returns ``True`` when data was available, ``False`` when falling back to the
-    legacy minimal alert.
-    """
+def enrich_and_send(
+    fav: FavoriteHitStub | Mapping[str, Any],
+    row: Optional[Mapping[str, Any]] = None,
+    channel: Optional[str] = None,
+    *,
+    recipients: Optional[Sequence[str]] = None,
+    smtp_config: Optional[Mapping[str, Any]] = None,
+    is_test: bool = False,
+) -> bool:  # pragma: no cover - orchestrator
+    """Enrich a favorites hit, format the alert and optionally deliver it."""
 
     try:
-        settings_profile = hit.__dict__.get("greeks_profile_json", "{}")
-        override_json = hit.__dict__.get("greeks_override_json")
+        if isinstance(fav, FavoriteHitStub):
+            hit = fav
+        else:
+            ticker = _coalesce(
+                [
+                    (row or {}).get("ticker") if isinstance(row, Mapping) else None,
+                    fav.get("ticker") if isinstance(fav, Mapping) else None,
+                ]
+            ) or "?"
+            direction = _coalesce(
+                [
+                    (row or {}).get("direction") if isinstance(row, Mapping) else None,
+                    fav.get("direction") if isinstance(fav, Mapping) else None,
+                ]
+            ) or "UP"
+            pattern = _coalesce(
+                [
+                    (row or {}).get("pattern") if isinstance(row, Mapping) else None,
+                    fav.get("rule") if isinstance(fav, Mapping) else None,
+                ]
+            ) or ""
+            target_pct = _coalesce(
+                [
+                    (row or {}).get("target_pct") if isinstance(row, Mapping) else None,
+                    fav.get("target_pct") if isinstance(fav, Mapping) else None,
+                ]
+            )
+            stop_pct = _coalesce(
+                [
+                    (row or {}).get("stop_pct") if isinstance(row, Mapping) else None,
+                    fav.get("stop_pct") if isinstance(fav, Mapping) else None,
+                ]
+            )
+            hit_pct = _coalesce(
+                [
+                    (row or {}).get("hit_pct") if isinstance(row, Mapping) else None,
+                    fav.get("hit_pct_snapshot") if isinstance(fav, Mapping) else None,
+                ]
+            ) or 0.0
+            avg_roi = _coalesce(
+                [
+                    (row or {}).get("avg_roi_pct") if isinstance(row, Mapping) else None,
+                    fav.get("roi_snapshot") if isinstance(fav, Mapping) else None,
+                ]
+            ) or 0.0
+            avg_dd = _coalesce(
+                [
+                    (row or {}).get("avg_dd_pct") if isinstance(row, Mapping) else None,
+                    fav.get("dd_pct_snapshot") if isinstance(fav, Mapping) else None,
+                ]
+            ) or 0.0
+            hit = FavoriteHitStub(
+                ticker=str(ticker),
+                direction=str(direction),
+                pattern=str(pattern),
+                target_pct=float(target_pct) if target_pct is not None else 0.0,
+                stop_pct=float(stop_pct) if stop_pct is not None else 0.0,
+                hit_pct=float(hit_pct),
+                avg_roi_pct=float(avg_roi),
+                avg_dd_pct=float(avg_dd),
+                favorite_id=_extract_favorite_id(fav),
+                bar_time=_extract_bar_time(row),
+            )
+            if isinstance(fav, Mapping):
+                for key in ("greeks_profile_json", "greeks_override_json"):
+                    if fav.get(key) is not None:
+                        setattr(hit, key, fav.get(key))
+
+        favorite_id = _extract_favorite_id(fav) or hit.favorite_id
+        bar_time = hit.bar_time or _extract_bar_time(row)
+        channel_choice = channel
+        if channel_choice is None:
+            if isinstance(row, Mapping):
+                channel_choice = row.get("channel") or row.get("delivery_channel")
+            if channel_choice is None and isinstance(fav, Mapping):
+                channel_choice = fav.get("channel") or fav.get("delivery_channel")
+
+        settings_profile = getattr(hit, "greeks_profile_json", "{}") or "{}"
+        override_json = getattr(hit, "greeks_override_json", None)
         profile_all = load_profile(settings_profile, override_json)
         profile = profile_all.get("direction_profiles", {}).get(hit.direction.upper(), {})
         side = "call" if hit.direction.upper() == "UP" else "put"
         sel = select_contract(hit.ticker, side, profile)
         if not sel.contract:
             return False
+
         checks = evaluate_contract(sel.contract, profile)
         targets = {
             "target": hit.target_pct,
@@ -455,27 +866,99 @@ def enrich_and_send(hit: FavoriteHitStub, is_test: bool = False) -> bool:  # pra
         }
         compact_pref = bool(profile.get("compact_mms"))
         include_symbols = bool(profile.get("include_symbols_in_alerts", True))
-        _ = format_favorites_alert(
+        format_channel = "email" if _normalize_channel(channel_choice) == "email" else "mms"
+        body = format_favorites_alert(
             hit.ticker,
             hit.direction,
             sel.contract,
             checks,
             targets,
             compact=compact_pref,
-            channel="mms",
+            channel=format_channel,
             pattern=hit.pattern,
             include_symbols=include_symbols,
         )
+        subject = f"Favorites Alert: {hit.ticker.upper()} {hit.direction.upper()}"
+        if hit.pattern:
+            subject += f" {hit.pattern}"
+
+        delivered = False
+        normalized_channel = _normalize_channel(channel_choice)
+        include_all_outcomes = _outcomes_mode() == "all"
+        skip_non_entry = _should_skip_non_entry(row)
+        symbol_for_log = (
+            (_value(row, "symbol") or _value(row, "ticker") or hit.ticker)
+            if row is not None
+            else hit.ticker
+        )
+        direction_for_log = (
+            (_value(row, "direction") or hit.direction)
+            if row is not None
+            else hit.direction
+        )
+        delivery_context = {
+            "symbol": symbol_for_log,
+            "direction": direction_for_log,
+            "bar_time": str(bar_time) if bar_time is not None else None,
+        }
+        if favorite_id:
+            delivery_context["fav_id"] = favorite_id
+
+        if channel_choice and (include_all_outcomes or not skip_non_entry):
+            email_recipients = list(recipients or [])
+            if not email_recipients:
+                if isinstance(row, Mapping):
+                    email_recipients = _parse_list(row.get("recipients"))
+                if not email_recipients and isinstance(fav, Mapping):
+                    email_recipients = _parse_list(fav.get("recipients"))
+            smtp_cfg = dict(smtp_config or {})
+            if not smtp_cfg:
+                smtp_cfg = _merge_smtp_config(fav, row)
+            recipients_arg = email_recipients if normalized_channel == "email" else None
+            delivered, dedupe_key, normalized_sent = _deliver_alert(
+                channel_choice,
+                subject,
+                body,
+                recipients=recipients_arg,
+                favorite_id=favorite_id,
+                bar_time=bar_time,
+                smtp_config=smtp_cfg,
+                delivery_context=delivery_context,
+            )
+            if delivered:
+                logger.info(
+                    "favorite_alert_sent",
+                    extra={
+                        "symbol": symbol_for_log,
+                        "direction": direction_for_log,
+                        "fav_id": favorite_id,
+                        "bar_time": str(bar_time) if bar_time is not None else None,
+                        "channel": getattr(settings, "alert_channel", "Email"),
+                        "outcomes": getattr(settings, "ALERT_OUTCOMES", getattr(settings, "alert_outcomes", "hit")),
+                        "hit_lb95": _value(row, "hit_lb95"),
+                        "support": _value(row, "support"),
+                        "avg_roi": _value(row, "avg_roi_pct") or _value(row, "avg_roi"),
+                    },
+                )
+                if dedupe_key:
+                    mark_sent(*dedupe_key)
+            normalized_channel = normalized_sent
+        elif channel_choice and not include_all_outcomes and skip_non_entry:
+            logger.info("favorites alert skipped non-entry event favorite_id=%s", favorite_id)
+
         log_telemetry(
             {
                 "type": "favorites_alert_test" if is_test else "favorites_alert",
                 "task_id": "<task_id_or_test>",
                 "ticker": hit.ticker,
                 "direction": hit.direction,
+                "channel": channel_choice,
+                "delivered": delivered,
             }
         )
-        return True
+        return delivered
     except Exception:
+        logger.exception("favorites alert enrichment failed")
         return False
 
 
