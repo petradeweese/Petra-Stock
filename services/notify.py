@@ -1,13 +1,32 @@
 """Notification helpers for sending email via SMTP."""
 from __future__ import annotations
 
+import logging
 import smtplib
 import ssl
 from email.message import EmailMessage
 from email.utils import formatdate, make_msgid, parseaddr
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Mapping, Optional
 
 import certifi
+
+
+logger = logging.getLogger(__name__)
+
+
+def _log_delivery(
+    success: bool,
+    recipients: List[str],
+    context: Optional[Mapping[str, object]],
+) -> None:
+    if not context:
+        return
+    tag = "alert_delivery_ok" if success else "alert_delivery_fail"
+    base = {k: v for k, v in context.items() if v is not None}
+    for dest in recipients:
+        payload = dict(base)
+        payload["to"] = dest
+        logger.info(tag, extra=payload)
 
 
 def send_email_smtp(
@@ -19,6 +38,8 @@ def send_email_smtp(
     to: List[str],
     subject: str,
     body: str,
+    *,
+    context: Optional[Mapping[str, object]] = None,
 ) -> Dict[str, Any]:
     """Send an email using SMTP with STARTTLS.
 
@@ -38,17 +59,19 @@ def send_email_smtp(
     msg["To"] = ", ".join(to)
     msg.set_content(body)
 
-    context = ssl.create_default_context(cafile=certifi.where())
+    tls_context = ssl.create_default_context(cafile=certifi.where())
 
     try:
         with smtplib.SMTP(host, int(port), timeout=20) as server:
             server.ehlo()
-            server.starttls(context=context)
+            server.starttls(context=tls_context)
             server.ehlo()
             if user:
                 server.login(user, password)
             server.send_message(msg, from_addr=from_email or user, to_addrs=to)
     except Exception as exc:  # pragma: no cover - network interaction
+        _log_delivery(False, to, context)
         return {"ok": False, "error": str(exc)}
 
+    _log_delivery(True, to, context)
     return {"ok": True, "provider": "smtp", "message_id": message_id}

@@ -23,3 +23,14 @@ Adjust these env vars if your plan changes.
 
 ## Rollback Provider
 - Set `provider` to `yahoo` or `db` in config to disable Polygon.
+
+## Favorites alerts
+- Alerts only fire when the scan row contains an entry/detection event; stop or
+  timeout transitions are ignored.
+- Deliveries are deduped by `(favorite_id, bar_time)` and are marked sent only
+  after at least one channel succeeds.
+- Ensure the environment includes Twilio credentials and `ALERT_SMS_TO` when
+  using MMS delivery. Missing configuration leaves MMS disabled without
+  affecting email alerts.
+- The minute scheduler now triggers the autoscan batch every 15 minutes while
+  XNYS is open so alerts dispatch automatically during the trading session.

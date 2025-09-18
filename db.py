@@ -72,6 +72,7 @@ SCHEMA = [
         mail_from TEXT,
         recipients TEXT,
         scanner_recipients TEXT,
+        alert_outcomes TEXT DEFAULT 'hit',
         scheduler_enabled INTEGER DEFAULT 0,
         throttle_minutes INTEGER DEFAULT 60,
         last_boundary TEXT,
@@ -307,6 +308,11 @@ def _ensure_scanner_column(db: sqlite3.Cursor) -> None:
         db.connection.commit()
     if "mail_from" not in cols:
         db.execute("ALTER TABLE settings ADD COLUMN mail_from TEXT DEFAULT ''")
+        db.connection.commit()
+    if "alert_outcomes" not in cols:
+        db.execute(
+            "ALTER TABLE settings ADD COLUMN alert_outcomes TEXT DEFAULT 'hit'"
+        )
         db.connection.commit()
 
 

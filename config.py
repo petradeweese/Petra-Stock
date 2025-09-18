@@ -1,9 +1,31 @@
 import os
 from dataclasses import dataclass
+from typing import Tuple
 
 
 def _bool(name: str, default: str = "false") -> bool:
     return os.getenv(name, default).lower() not in {"0", "false", ""}
+
+
+def _csv(name: str) -> Tuple[str, ...]:
+    raw = os.getenv(name, "")
+    if not raw:
+        return ()
+    parts = [segment.strip() for segment in raw.split(",")]
+    return tuple(part for part in parts if part)
+
+
+def _choice(name: str, default: str, *, allowed: Tuple[str, ...] | None = None) -> str:
+    raw = os.getenv(name, default)
+    value = raw if raw is not None else default
+    value = str(value).strip() or default
+    if allowed:
+        lowered = value.lower()
+        for option in allowed:
+            if lowered == option.lower():
+                return option
+        return default
+    return value
 
 
 @dataclass
@@ -31,5 +53,17 @@ class Settings:
     scan_symbols_per_task: int = int(os.getenv("SCAN_SYMBOLS_PER_TASK", "1"))
     scan_minimal_near_now: bool = _bool("SCAN_MINIMAL_NEAR_NOW", "1")
 
+    # Favorites alert delivery
+    twilio_account_sid: str = os.getenv("TWILIO_ACCOUNT_SID", "")
+    twilio_auth_token: str = os.getenv("TWILIO_AUTH_TOKEN", "")
+    twilio_from_number: str = os.getenv("TWILIO_FROM_NUMBER", "")
+    alert_sms_to: Tuple[str, ...] = _csv("ALERT_SMS_TO")
+    alert_channel: str = _choice("ALERT_CHANNEL", "Email", allowed=("Email", "MMS"))
+    alert_outcomes: str = _choice("ALERT_OUTCOMES", "hit", allowed=("hit", "all"))
+
 
 settings = Settings()
+settings.alert_channel = settings.alert_channel or "Email"
+settings.alert_outcomes = (settings.alert_outcomes or "hit").lower()
+setattr(settings, "ALERT_CHANNEL", settings.alert_channel)
+setattr(settings, "ALERT_OUTCOMES", settings.alert_outcomes)

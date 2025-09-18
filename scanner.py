@@ -1,10 +1,12 @@
 # ruff: noqa: E501
 import logging
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from datetime import datetime, timezone
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 import pandas as pd
 
 from db import row_to_dict
+from services import favorites, favorites_alerts, settings
 from services.market_data import (
     expected_bar_count,
     fetch_prices,
@@ -15,6 +17,65 @@ from services.price_utils import DataUnavailableError
 # Adapter to the original ROI engine
 _real_scan_single: Optional[Callable[[str, Dict[str, Any]], Dict[str, Any]]] = None
 logger = logging.getLogger(__name__)
+
+
+def _extract_bar_time_from_row(row: Mapping[str, Any]) -> Optional[str]:
+    for key in ("bar_time", "bar_ts", "timestamp", "bar_timestamp"):
+        value = row.get(key)
+        if value not in (None, ""):
+            return str(value)
+    return None
+
+
+def _finalize_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    if not row:
+        return row
+
+    try:
+        fav = favorites.match_favorite(row)
+    except Exception:
+        logger.exception("favorites match failed", exc_info=True)
+        return row
+
+    if not fav:
+        return row
+
+    try:
+        should_send = favorites_alerts.should_alert_on_row(row, fav)
+    except Exception:
+        logger.exception("favorites alert gating failed", exc_info=True)
+        return row
+
+    if not should_send:
+        return row
+
+    bar_time = _extract_bar_time_from_row(row)
+    if not bar_time:
+        bar_time = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        row.setdefault("bar_time", bar_time)
+
+    fav_id = getattr(fav, "id", None) or row.get("favorite_id")
+    if fav_id in (None, ""):
+        return row
+
+    fav_id_str = str(fav_id)
+    if favorites_alerts.was_sent(fav_id_str, bar_time):
+        return row
+
+    channel = getattr(settings, "alert_channel", "Email")
+    try:
+        delivered = favorites_alerts.enrich_and_send(fav, row, channel=channel)
+    except Exception:
+        logger.exception("favorites alert send failed", exc_info=True)
+        delivered = False
+
+    if delivered:
+        try:
+            favorites_alerts.mark_sent(fav_id_str, bar_time)
+        except Exception:
+            logger.exception("favorites alert mark failed", exc_info=True)
+
+    return row
 
 
 def _install_real_engine_adapter():
@@ -89,7 +150,7 @@ def _install_real_engine_adapter():
 
             stab_pct = to_pct(stab)
 
-            return {
+            result = {
                 "ticker": str(tkr),
                 "direction": str(direct).upper(),
                 "avg_roi_pct": float(roi_pct),
@@ -101,6 +162,7 @@ def _install_real_engine_adapter():
                 "sharpe": fnum(sharpe),
                 "rule": str(rule or ""),
             }
+            return _finalize_row(result)
 
         if mode in ("threaded", "parallel"):
 
@@ -417,7 +479,7 @@ def _desktop_like_single(ticker: str, params: dict) -> dict:
             except Exception:
                 recent3 = []
 
-        return {
+        result = {
             "ticker": ticker,
             "direction": r.get("direction", direction),
             "avg_roi_pct": float(r["avg_roi"]) * 100.0,
@@ -435,6 +497,7 @@ def _desktop_like_single(ticker: str, params: dict) -> dict:
             "confidence_label": confidence_label,
             "recent3": recent3,
         }
+        return _finalize_row(result)
     except Exception:
         logger.exception("scan computation failed for %s", ticker)
         return {}
