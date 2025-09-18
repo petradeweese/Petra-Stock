@@ -32,6 +32,7 @@ from indices import SP100, TOP150, TOP250
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 from scanner import compute_scan_for_ticker
 from services import executor, favorites_alerts, price_store
+from services.favorites import canonical_direction, ensure_favorite_directions
 from services.notify import send_email_smtp
 from services.scanner_params import coerce_scan_params
 from services.telemetry import log as log_telemetry
@@ -683,6 +684,7 @@ def _normalize_favorite(row: dict[str, Any]) -> dict[str, Any]:
     settings_raw, settings_params = _parse_settings_snapshot(
         row.get("settings_json_snapshot")
     )
+    saved_direction = canonical_direction(row.get("direction"))
     lookback = _coerce_float(row.get("lookback_years"))
     lookback_from_support = (
         _coerce_float(support_snapshot.get("lookback_years"))
@@ -723,6 +725,15 @@ def _normalize_favorite(row: dict[str, Any]) -> dict[str, Any]:
     if min_support is not None:
         row["min_support"] = min_support
 
+    snapshot_direction = None
+    if settings_params and _snapshot_has_value(settings_raw, "direction"):
+        snapshot_direction = canonical_direction(settings_params.get("direction"))
+
+    if saved_direction is None:
+        saved_direction = snapshot_direction or "UP"
+
+    row["direction"] = saved_direction
+
     if settings_params:
         if _snapshot_has_value(settings_raw, "target_pct"):
             target = _coerce_float(settings_params.get("target_pct"))
@@ -742,8 +753,6 @@ def _normalize_favorite(row: dict[str, Any]) -> dict[str, Any]:
                 row["window_unit"] = unit
         if _snapshot_has_value(settings_raw, "interval") and settings_params.get("interval"):
             row["interval"] = settings_params.get("interval")
-        if _snapshot_has_value(settings_raw, "direction") and settings_params.get("direction"):
-            row["direction"] = settings_params.get("direction")
     return row
 
 
@@ -1528,9 +1537,11 @@ def heatmap_page(request: Request):
 
 @router.get("/favorites", response_class=HTMLResponse)
 def favorites_page(request: Request, db=Depends(get_db)):
+    ensure_favorite_directions(db)
     db.execute("SELECT * FROM favorites ORDER BY id DESC")
     favs = [_normalize_favorite(row_to_dict(r, db)) for r in db.fetchall()]
     for f in favs:
+        f["direction"] = canonical_direction(f.get("direction")) or "UP"
         f["avg_roi_pct"] = f.get("roi_snapshot")
         f["hit_pct"] = f.get("hit_pct_snapshot")
         f["avg_dd_pct"] = f.get("dd_pct_snapshot")
@@ -1624,7 +1635,7 @@ def _create_forward_test(db: sqlite3.Cursor, fav: dict) -> None:
         (
             fav["id"],
             fav["ticker"],
-            fav.get("direction", "UP"),
+            canonical_direction(fav.get("direction")) or "UP",
             fav.get("interval", "15m"),
             fav.get("rule"),
             version,
@@ -1692,8 +1703,8 @@ def _update_forward_tests(db: sqlite3.Cursor) -> None:
                     (entry_underlying, row["id"]),
                 )
                 continue
-            direction = (row.get("direction") or "UP").upper()
-            side = 1 if direction != "DOWN" else -1
+            direction = canonical_direction(row.get("direction")) or "UP"
+            side = 1 if direction == "UP" else -1
             slip = FORWARD_SLIPPAGE
             entry_fill = entry_underlying * (1 + slip * side)
             exit_factor = 1 - slip * side
@@ -1884,7 +1895,7 @@ def _serialize_forward_favorite(fav: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": fav.get("id"),
         "ticker": fav.get("ticker"),
-        "direction": fav.get("direction"),
+        "direction": canonical_direction(fav.get("direction")) or "UP",
         "interval": fav.get("interval"),
         "rule": fav.get("rule"),
         "rule_snapshot": fav.get("rule_snapshot"),
@@ -1907,6 +1918,7 @@ def _serialize_forward_favorite(fav: dict[str, Any]) -> dict[str, Any]:
 def _load_forward_favorites(
     db: sqlite3.Cursor, ids: list[int] | None = None
 ) -> list[dict[str, Any]]:
+    ensure_favorite_directions(db)
     if ids:
         placeholders = ",".join("?" for _ in ids)
         query = f"SELECT * FROM favorites WHERE id IN ({placeholders})"
@@ -2141,7 +2153,7 @@ async def favorites_add(request: Request, db=Depends(get_db)):
     t = (payload.get("ticker") or "").strip().upper()
     rule = payload.get("rule") or ""
     direction_raw = payload.get("direction")
-    direction = (direction_raw or "UP").strip().upper()
+    direction = canonical_direction(direction_raw) or "UP"
     interval_raw = payload.get("interval")
     interval = (interval_raw or "15m").strip()
     ref_dd = payload.get("ref_avg_dd")
@@ -2206,8 +2218,10 @@ async def favorites_add(request: Request, db=Depends(get_db)):
             params.get("interval"), str
         ):
             interval = params.get("interval") or interval
-        if (direction_raw in (None, "")) and isinstance(params.get("direction"), str):
-            direction = (params.get("direction") or "UP").strip().upper()
+        if direction_raw in (None, ""):
+            snapshot_dir = canonical_direction(params.get("direction"))
+            if snapshot_dir:
+                direction = snapshot_dir
 
     if target_pct is None:
         target_pct = 1.0

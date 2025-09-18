@@ -9,44 +9,47 @@
         <button type="submit">Remove Duplicates</button>
       </form>
     </div>
-    <table class="table">
-      <thead>
-        <tr>
-          <th>ID</th>
-          <th>Ticker</th>
-          <th>Direction</th>
-          <th>Interval</th>
-          <th>Lookback</th>
-          <th>Hits</th>
-          <th>ROI%</th>
-          <th>Hit%</th>
-          <th>DD%</th>
-          <th>Rule</th>
-          <th></th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for f in favorites %}
-        <tr>
-          <td>{{ f["id"] }}</td>
-          <td><strong>{{ f["ticker"] }}</strong></td>
-          <td>{{ f["direction"] }}</td>
-          <td>{{ f["interval"] }}</td>
-          <td>{{ f['lookback_display'] }}</td>
-          <td>{{ f['support_display'] }}</td>
-          <td>{{ '{:.0f}'.format(f['avg_roi_pct']*100 if f['avg_roi_pct'] is not none and f['avg_roi_pct'] <= 1 else f['avg_roi_pct']) if f['avg_roi_pct'] is not none else '' }}</td>
-          <td>{{ '{:.1f}'.format(f['hit_pct']) if f['hit_pct'] is not none else '' }}</td>
-          <td>{{ '{:.0f}'.format(f['avg_dd_pct']*100 if f['avg_dd_pct'] is not none and f['avg_dd_pct'] <= 1 else f['avg_dd_pct']) if f['avg_dd_pct'] is not none else '' }}</td>
-          <td><code>{{ f["rule"] }}</code></td>
-          <td>
-            <form method="post" action="/favorites/delete/{{ f['id'] }}" style="margin:0;">
-              <button type="submit" class="del-btn">&#10005;</button>
-            </form>
-          </td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
+    <div class="table-scroll">
+      <table class="table table-compact table-hover">
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Ticker</th>
+            <th>Direction</th>
+            <th>Interval</th>
+            <th>Lookback</th>
+            <th>Hits</th>
+            <th>ROI%</th>
+            <th>Hit%</th>
+            <th>DD%</th>
+            <th>Rule</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for f in favorites %}
+          <tr>
+            <td>{{ f["id"] }}</td>
+            <td><strong>{{ f["ticker"] }}</strong></td>
+            <td>{{ f["direction"] }}</td>
+            <td>{{ f["interval"] }}</td>
+            <td>{{ f['lookback_display'] }}</td>
+            <td>{{ f['support_display'] }}</td>
+            <td class="num">{{ f['avg_roi_pct']|fmt_percent(0) if f['avg_roi_pct'] is not none else '—' }}</td>
+            <td class="num">{{ f['hit_pct']|fmt_percent(1) if f['hit_pct'] is not none else '—' }}</td>
+            <td class="num">{{ f['avg_dd_pct']|fmt_percent(0) if f['avg_dd_pct'] is not none else '—' }}</td>
+            {% set rule_text = f['rule'] %}
+            <td class="col-rule clamp1" title="{{ rule_text }}"><code>{{ rule_text }}</code></td>
+            <td>
+              <form method="post" action="/favorites/delete/{{ f['id'] }}" style="margin:0;">
+                <button type="submit" class="del-btn">&#10005;</button>
+              </form>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
     {% else %}
     <p>No favorites yet. Right-click a row in Results to add one.</p>
     {% endif %}

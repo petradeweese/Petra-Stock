@@ -1,55 +1,186 @@
-<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <title>Scanner Heatmap</title>
-  <style>
-    table { border-collapse: collapse; font: 12px system-ui; }
-    th, td { border: 1px solid #ddd; padding: 4px 6px; text-align: center; }
-    th { position: sticky; top: 0; background: #fafafa; }
-  </style>
-</head>
-<body>
-  <h3>Sector × Ticker — Hit LB% Heatmap (min support ≥ 10)</h3>
-  <div id="grid"></div>
+{% extends 'base.html' %}
+{% block title %}Pattern Finder — Heatmap{% endblock %}
+{% block head_extra %}
+  <link rel="stylesheet" href="{{ url_for('static', path='css/heatmap.css') }}">
+{% endblock %}
+{% block content %}
+  <div class="card heatmap-card">
+    <div class="heatmap-header">
+      <div>
+        <h1 class="heatmap-title">Heatmap</h1>
+        <div class="heatmap-note">Sector × Ticker — Hit LB% (min support ≥ 10)</div>
+      </div>
+    </div>
+    <div id="heatmap-message" class="heatmap-message" hidden>Loading heatmap…</div>
+    <div class="table-scroll" id="heatmap-table-container" hidden>
+      <table class="table table-compact table-hover heatmap-table" id="heatmap-table">
+        <thead></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+{% endblock %}
+{% block extra_body %}
   <script>
-    fetch("/heatmap.json").then(r=>r.json()).then(d=>{
-      const {index, columns, values, meta} = d;
-      const tbl = document.createElement('table');
-      const thead = document.createElement('thead');
-      const hrow = document.createElement('tr');
-      hrow.appendChild(document.createElement('th')).textContent = "Sector";
-      columns.forEach(t=>{ const th=document.createElement('th'); th.textContent=t; hrow.appendChild(th); });
-      thead.appendChild(hrow); tbl.appendChild(thead);
-      const tbody = document.createElement('tbody');
-      index.forEach((sector, i)=>{
+  (function(){
+    const table = document.getElementById('heatmap-table');
+    const thead = table.querySelector('thead');
+    const tbody = table.querySelector('tbody');
+    const container = document.getElementById('heatmap-table-container');
+    const message = document.getElementById('heatmap-message');
+
+    function hexToRgb(hex){
+      if(typeof hex !== 'string'){ return null; }
+      const normalized = hex.trim();
+      if(!normalized){ return null; }
+      let h = normalized;
+      if(h.startsWith('rgb')){
+        const match = h.match(/rgb\((\d+),\s*(\d+),\s*(\d+)\)/i);
+        if(match){
+          return { r: parseInt(match[1], 10), g: parseInt(match[2], 10), b: parseInt(match[3], 10) };
+        }
+        return null;
+      }
+      if(h.startsWith('#')){ h = h.slice(1); }
+      if(h.length === 3){ h = h.split('').map((c) => c + c).join(''); }
+      if(h.length !== 6){ return null; }
+      const num = parseInt(h, 16);
+      if(Number.isNaN(num)){ return null; }
+      return {
+        r: (num >> 16) & 255,
+        g: (num >> 8) & 255,
+        b: num & 255,
+      };
+    }
+
+    function mixColors(base, target, t){
+      if(!base || !target){ return null; }
+      const clampT = Math.max(0, Math.min(1, t));
+      const r = Math.round(base.r + (target.r - base.r) * clampT);
+      const g = Math.round(base.g + (target.g - base.g) * clampT);
+      const b = Math.round(base.b + (target.b - base.b) * clampT);
+      return `rgb(${r}, ${g}, ${b})`;
+    }
+
+    function showMessage(text){
+      message.textContent = text;
+      message.hidden = false;
+      container.hidden = true;
+    }
+
+    function showTable(){
+      message.hidden = true;
+      container.hidden = false;
+    }
+
+    function formatPercent(value, decimals){
+      const precision = Number.isFinite(decimals) ? Math.max(0, decimals) : 2;
+      if(typeof value !== 'number' || !Number.isFinite(value)){
+        return '—';
+      }
+      return `${(value * 100).toFixed(precision)}%`;
+    }
+
+    function renderHeatmap(data){
+      const columns = Array.isArray(data.columns) ? data.columns : [];
+      const index = Array.isArray(data.index) ? data.index : [];
+      const values = Array.isArray(data.values) ? data.values : [];
+      const meta = (data && typeof data.meta === 'object' && data.meta) ? data.meta : {};
+
+      if(columns.length === 0 || index.length === 0){
+        showMessage('No heatmap data available.');
+        return;
+      }
+
+      thead.innerHTML = '';
+      tbody.innerHTML = '';
+
+      const headRow = document.createElement('tr');
+      const corner = document.createElement('th');
+      corner.textContent = 'Sector';
+      headRow.appendChild(corner);
+      columns.forEach((ticker) => {
+        const th = document.createElement('th');
+        th.textContent = ticker;
+        headRow.appendChild(th);
+      });
+      thead.appendChild(headRow);
+
+      const styles = getComputedStyle(document.documentElement);
+      const panelColor = hexToRgb(styles.getPropertyValue('--panel')) || { r: 11, g: 14, b: 20 };
+      const positiveColor = hexToRgb(styles.getPropertyValue('--pos')) || { r: 61, g: 220, b: 132 };
+
+      index.forEach((sector, rowIndex) => {
         const tr = document.createElement('tr');
-        const th = document.createElement('th'); th.textContent = sector; tr.appendChild(th);
-        columns.forEach((ticker, j)=>{
-          const v = values[i]?.[j] ?? null;
+        const sectorCell = document.createElement('th');
+        sectorCell.textContent = sector;
+        tr.appendChild(sectorCell);
+
+        columns.forEach((ticker, colIndex) => {
+          const key = `${sector}|${ticker}`;
+          const cellMeta = meta[key] || {};
           const td = document.createElement('td');
-          if (v !== null) {
-            const p = Math.max(0, Math.min(1, v));
-            const g = Math.round(200 + 55*p);
-            const r = Math.round(255 - 155*p);
-            const b = Math.round(200 + 55*(1-p));
-            td.style.background = `rgb(${r}, ${g}, ${b})`;
-            td.textContent = Math.round(p*100);
-            const key = sector + "|" + ticker;
-            const m = meta[key] || {};
-            const roi = (m.avg_roi!=null)? (m.avg_roi*100).toFixed(2)+"%":"";
-            const lb  = (m.hit_lb95!=null)? (m.hit_lb95*100).toFixed(2)+"%":"";
-            td.title = `${ticker} — LB ${lb}, n=${m.support||0}, avgROI ${roi}`;
+          td.classList.add('heatmap-cell');
+
+          const lbRaw = typeof cellMeta.hit_lb95 === 'number' ? cellMeta.hit_lb95 : undefined;
+          const valueRow = values[rowIndex] || [];
+          const fallback = typeof valueRow[colIndex] === 'number' ? valueRow[colIndex] : undefined;
+          const lb = Number.isFinite(lbRaw) ? lbRaw : fallback;
+          const support = cellMeta.support ?? '';
+          const roiRaw = typeof cellMeta.avg_roi === 'number' ? cellMeta.avg_roi : undefined;
+
+          if(lb === undefined){
+            td.classList.add('heatmap-empty');
+            td.textContent = '—';
           } else {
-            td.textContent = "";
+            td.textContent = formatPercent(lb, 1);
+            const color = mixColors(panelColor, positiveColor, Math.max(0, Math.min(1, lb)));
+            if(color){
+              td.style.backgroundColor = color;
+            }
           }
+
+          const tooltipParts = [];
+          if(lb !== undefined){
+            tooltipParts.push(`LB ${formatPercent(lb, 2)}`);
+          }
+          if(Number.isFinite(roiRaw)){
+            tooltipParts.push(`avg ROI ${formatPercent(roiRaw, 2)}`);
+          }
+          if(support !== ''){
+            tooltipParts.push(`support ${support}`);
+          }
+          if(tooltipParts.length){
+            td.title = `${ticker} • ${tooltipParts.join(' • ')}`;
+          } else {
+            td.title = ticker;
+          }
+
           tr.appendChild(td);
         });
+
         tbody.appendChild(tr);
       });
-      tbl.appendChild(tbody);
-      document.getElementById('grid').appendChild(tbl);
-    });
+
+      showTable();
+    }
+
+    async function loadHeatmap(){
+      try {
+        const response = await fetch('/heatmap.json', { cache: 'no-store' });
+        if(!response.ok){
+          throw new Error(`Failed to load heatmap: ${response.status}`);
+        }
+        const payload = await response.json();
+        renderHeatmap(payload);
+      } catch (err) {
+        console.error(err);
+        showMessage('Unable to load heatmap data. Please try again later.');
+      }
+    }
+
+    showMessage('Loading heatmap…');
+    loadHeatmap();
+  })();
   </script>
-</body>
-</html>
+{% endblock %}

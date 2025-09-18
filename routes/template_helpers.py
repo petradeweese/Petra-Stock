@@ -15,15 +15,18 @@ def fmt_percent(value: Any, decimals: int = 2) -> str:
     except (TypeError, ValueError):
         decimals_int = 2
 
-    try:
-        num = float(value)
-    except (TypeError, ValueError):
+    if value is None or (isinstance(value, float) and math.isnan(value)):
         num = 0.0
     else:
-        if not math.isfinite(num):
+        try:
+            num = float(value)
+        except (TypeError, ValueError):
             num = 0.0
+        else:
+            if not math.isfinite(num):
+                num = 0.0
 
-    if num <= 1.0:
+    if -1.0 <= num <= 1.0:
         num *= 100.0
 
     return f"{num:.{decimals_int}f}%"
@@ -41,7 +44,7 @@ def fmt_recent3(entries: Any) -> str:
         date_val = entry.get("date")
         date_str = "" if date_val is None else str(date_val).strip()
         outcome_raw = entry.get("outcome") or ""
-        outcome = str(outcome_raw).strip()
+        outcome = str(outcome_raw).strip().replace("\n", " ")
 
         tt_raw = entry.get("tt", 0)
         if tt_raw is None or pd.isna(tt_raw):
@@ -62,7 +65,8 @@ def fmt_recent3(entries: Any) -> str:
                 roi_val = 0.0
 
         sign = "+" if roi_val >= 0 else ""
-        prefix = " ".join(part for part in [date_str, outcome] if part)
+        safe_date = (date_str or "").replace("\n", " ")
+        prefix = " ".join(part for part in [safe_date, outcome] if part)
         parts.append(f"{prefix} {sign}{roi_val * 100:.2f}% @{tt_val}b".strip())
 
     return " | ".join(parts)
