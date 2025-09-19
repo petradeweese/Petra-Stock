@@ -5,6 +5,21 @@
   #fav-test-status { min-height: 1.5rem; }
   .status-success { color: var(--pos); }
   .status-error { color: var(--neg); }
+  .recency-config {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+  }
+  .recency-halflife {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.9rem;
+  }
+  .recency-halflife input {
+    width: 5rem;
+  }
 </style>
 {% endblock %}
 {% block content %}
@@ -46,6 +61,19 @@
             <option value="hit" {% if alert_outcomes == 'hit' %}selected{% endif %}>Hit only</option>
             <option value="all" {% if alert_outcomes == 'all' %}selected{% endif %}>Hit + Stop + Timeout</option>
           </select>
+        </div>
+        <div>
+          <label>Recency weighting</label>
+          <div class="recency-config">
+            <select name="forward_recency_mode">
+              {% set recency_mode = (st.get('forward_recency_mode', 'off') or 'off')|lower %}
+              <option value="off" {% if recency_mode == 'off' %}selected{% endif %}>Off</option>
+              <option value="exp" {% if recency_mode == 'exp' %}selected{% endif %}>Exponential</option>
+            </select>
+            <label class="recency-halflife">Half-life (days)
+              <input name="forward_recency_halflife_days" type="number" step="0.1" min="1" value="{{ st.get('forward_recency_halflife_days', 30) }}" />
+            </label>
+          </div>
         </div>
         <div>
           <label>Enable Favorites Scheduler</label>
