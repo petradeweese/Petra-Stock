@@ -12,7 +12,10 @@
       <button type="button" class="btn btn-secondary btn-sm" data-action="retry">Retry</button>
     </div>
     <div id="forward-loading" class="muted">Loading favorites…</div>
-    <p id="forward-empty" class="muted" hidden>No favorites to test.</p>
+    <div id="forward-empty" class="forward-empty-card" hidden>
+      <strong>No forward runs yet—your history appears as windows complete.</strong>
+      <p class="muted">Forward windows add to your history as each trade completes.</p>
+    </div>
     <table id="forward-table" class="table" hidden aria-describedby="forward-empty">
       <thead>
         <tr>
@@ -23,6 +26,9 @@
           <th>Target</th>
           <th>Stop</th>
           <th>Window</th>
+          <th>Timeline</th>
+          <th>History</th>
+          <th>Summary</th>
           <th>Forward Hit% / Support</th>
           <th>Forward ROI%</th>
           <th>Status</th>
@@ -33,7 +39,27 @@
       <tbody id="forward-tbody"></tbody>
     </table>
   </div>
-{% endblock %}
-{% block extra_body %}
-  <script src="{{ url_for('static', path='js/forward.js') }}" defer></script>
-{% endblock %}
+  <div id="forward-history-modal" class="forward-history-modal" hidden>
+      <div class="forward-history-dialog" role="dialog" aria-modal="true" aria-labelledby="forward-history-title">
+        <div class="forward-history-header">
+          <h2 id="forward-history-title">Forward Runs</h2>
+          <button type="button" class="forward-history-close" data-action="close" aria-label="Close history modal">✕</button>
+        </div>
+        <div class="forward-history-toolbar">
+          <a id="forward-history-export" data-testid="export-csv" class="forward-history-export btn btn-secondary btn-sm" href="#" download>Export CSV</a>
+        </div>
+        <div class="forward-history-body">
+          <div id="forward-history-status" class="forward-history-status muted" hidden></div>
+          <div class="forward-history-scroll">
+            <ul id="forward-history-list" class="forward-history-list"></ul>
+          </div>
+        </div>
+        <div class="forward-history-footer">
+          <button id="forward-history-load-more" type="button" class="btn btn-secondary btn-sm">Load more</button>
+        </div>
+      </div>
+    </div>
+  {% endblock %}
+  {% block extra_body %}
+    <script src="{{ url_for('static', path='js/forward.js') }}" defer></script>
+  {% endblock %}

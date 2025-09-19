@@ -1,6 +1,8 @@
 # ruff: noqa: E501
 import asyncio
 import atexit
+import csv
+import io
 import json
 import logging
 import math
@@ -9,14 +11,19 @@ import sqlite3
 import statistics
 import time
 from concurrent.futures import as_completed
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from threading import Thread
 from typing import Any, Callable, Dict, List, Optional
 from uuid import uuid4
 
 import pandas as pd
-from fastapi import APIRouter, Body, Depends, Form, Request, Response
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi import APIRouter, Body, Depends, Form, Query, Request, Response
+from fastapi.responses import (
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+    StreamingResponse,
+)
 from fastapi.templating import Jinja2Templates
 
 from config import settings
@@ -42,6 +49,13 @@ from services.market_data import (
     get_prices,
     window_from_lookback,
 )
+from services.forward_runs import (
+    forward_rule_hash,
+    get_forward_history_for_cursor,
+    log_forward_entry,
+    log_forward_exit,
+)
+from services.forward_summary import get_cached_forward_summary
 from utils import TZ, now_et
 
 from .archive import _format_rule_summary as _format_rule_summary
@@ -379,6 +393,145 @@ def _coerce_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _interval_minutes(interval: Any) -> int:
+    try:
+        label = str(interval or "").strip().lower()
+    except Exception:
+        return 0
+    if not label:
+        return 0
+    try:
+        if label.endswith("m"):
+            return int(float(label[:-1]))
+        if label.endswith("h"):
+            return int(float(label[:-1]) * 60)
+        if label.endswith("d"):
+            return int(float(label[:-1]) * 24 * 60)
+        return int(float(label))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _parse_forward_timestamp(value: Any) -> pd.Timestamp | None:
+    if value in (None, ""):
+        return None
+    try:
+        stamp = pd.Timestamp(value)
+    except Exception:
+        return None
+    if pd.isna(stamp):
+        return None
+    try:
+        if stamp.tzinfo is None:
+            stamp = stamp.tz_localize(TZ)
+    except (TypeError, ValueError):
+        try:
+            stamp = stamp.tz_localize("UTC")
+        except Exception:
+            return None
+    if stamp.tzinfo is None:
+        return None
+    try:
+        return stamp.tz_convert("UTC")
+    except Exception:
+        return None
+
+
+def _format_event_ts(stamp: pd.Timestamp | None) -> str | None:
+    if stamp is None:
+        return None
+    iso = stamp.isoformat()
+    if iso.endswith("+00:00"):
+        return f"{iso[:-6]}Z"
+    return iso
+
+
+def _estimate_exit_price(
+    forward_row: dict[str, Any],
+    roi_pct: float | None,
+) -> float | None:
+    entry_price = _coerce_float(forward_row.get("entry_price"))
+    if entry_price is None or roi_pct is None:
+        return None
+    direction = canonical_direction(forward_row.get("direction")) or "UP"
+    side = 1 if direction == "UP" else -1
+    slip = FORWARD_SLIPPAGE
+    entry_fill = entry_price * (1 + slip * side)
+    try:
+        exit_fill = entry_fill * (1 + (roi_pct / 100.0) / side)
+    except ZeroDivisionError:
+        return None
+    exit_factor = 1 - slip * side
+    if exit_factor == 0:
+        return None
+    return float(exit_fill / exit_factor)
+
+
+def _forward_events(forward_row: dict[str, Any]) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    entry_price = _coerce_float(forward_row.get("entry_price"))
+    entry_stamp = _parse_forward_timestamp(forward_row.get("created_at"))
+    interval_mins = _interval_minutes(forward_row.get("interval"))
+    entry_time = entry_stamp
+    if entry_stamp is not None and interval_mins:
+        try:
+            entry_time = entry_stamp + pd.Timedelta(minutes=interval_mins)
+        except Exception:
+            entry_time = entry_stamp
+    entry_iso = _format_event_ts(entry_time or entry_stamp)
+    if entry_iso and entry_price is not None:
+        events.append({"t": "entry", "ts": entry_iso, "px": float(entry_price)})
+
+    exit_reason_raw = forward_row.get("exit_reason")
+    exit_reason = str(exit_reason_raw or "").strip().lower()
+    if exit_reason not in {"target", "stop", "timeout"}:
+        return events
+
+    base_entry_time = entry_time or entry_stamp
+    exit_stamp: pd.Timestamp | None = None
+    elapsed_minutes: float | None = None
+    if exit_reason == "target":
+        elapsed_minutes = _coerce_float(forward_row.get("time_to_hit"))
+    elif exit_reason == "stop":
+        elapsed_minutes = _coerce_float(forward_row.get("time_to_stop"))
+    if elapsed_minutes is not None and base_entry_time is not None:
+        try:
+            exit_stamp = base_entry_time + pd.Timedelta(minutes=float(elapsed_minutes))
+        except Exception:
+            exit_stamp = None
+    if exit_stamp is None and base_entry_time is not None:
+        bars = _coerce_int(forward_row.get("bars_to_exit"))
+        if bars and interval_mins:
+            try:
+                exit_stamp = base_entry_time + pd.Timedelta(minutes=bars * interval_mins)
+            except Exception:
+                exit_stamp = None
+    if exit_stamp is None:
+        exit_stamp = _parse_forward_timestamp(
+            forward_row.get("updated_at") or forward_row.get("last_run_at")
+        )
+
+    event: dict[str, Any] = {"t": "hit" if exit_reason == "target" else exit_reason}
+    exit_iso = _format_event_ts(exit_stamp)
+    if exit_iso:
+        event["ts"] = exit_iso
+
+    roi_pct = _coerce_float(forward_row.get("roi_forward"))
+    exit_price = _estimate_exit_price(forward_row, roi_pct)
+    if exit_price is not None:
+        event["px"] = exit_price
+
+    if roi_pct is not None:
+        event["roi"] = roi_pct / 100.0
+
+    bars_to_exit = _coerce_int(forward_row.get("bars_to_exit"))
+    if bars_to_exit is not None:
+        event["tt_bars"] = bars_to_exit
+
+    events.append(event)
+    return events
 
 
 def _heatmap_float(value: Any) -> float:
@@ -1653,7 +1806,7 @@ def _create_forward_test(db: sqlite3.Cursor, fav: dict) -> None:
 
 def _update_forward_tests(db: sqlite3.Cursor) -> None:
     db.execute(
-        """SELECT id, ticker, direction, interval, created_at, entry_price,
+        """SELECT id, fav_id, ticker, direction, interval, rule, created_at, entry_price,
                   target_pct, stop_pct, window_minutes, status, option_delta
                FROM forward_tests
                WHERE status IN ('queued','running')"""
@@ -1661,6 +1814,7 @@ def _update_forward_tests(db: sqlite3.Cursor) -> None:
     rows = [row_to_dict(r, db) for r in db.fetchall()]
     for row in rows:
         now_iso = now_et().isoformat()
+        entry_history_ts: str | None = None
         try:
             db.execute(
                 "UPDATE forward_tests SET status='running', last_run_at=?, updated_at=?, runs_count=runs_count+1 WHERE id=?",
@@ -1703,6 +1857,14 @@ def _update_forward_tests(db: sqlite3.Cursor) -> None:
                     (entry_underlying, row["id"]),
                 )
                 continue
+            entry_history_ts = entry_time.isoformat()
+            log_forward_entry(
+                db,
+                row.get("fav_id"),
+                entry_history_ts,
+                entry_underlying,
+                forward_rule_hash(row.get("rule")),
+            )
             direction = canonical_direction(row.get("direction")) or "UP"
             side = 1 if direction == "UP" else -1
             slip = FORWARD_SLIPPAGE
@@ -1798,6 +1960,21 @@ def _update_forward_tests(db: sqlite3.Cursor) -> None:
             dd_forward = float(max(0.0, -mae))
             max_drawdown_pct = dd_forward
             max_runup_pct = float(max(0.0, mfe))
+            if exit_reason and entry_history_ts:
+                exit_iso = (
+                    pd.Timestamp(exit_time).isoformat() if exit_time is not None else None
+                )
+                log_forward_exit(
+                    db,
+                    row.get("fav_id"),
+                    entry_history_ts,
+                    exit_iso,
+                    exit_level,
+                    exit_reason,
+                    (roi_forward / 100.0) if roi_forward is not None else None,
+                    bars_to_exit,
+                    (dd_forward / 100.0) if dd_forward is not None else None,
+                )
             if exit_reason:
                 entry_time_dt = pd.Timestamp(entry_time)
                 elapsed = (
@@ -1862,7 +2039,20 @@ def _update_forward_tests(db: sqlite3.Cursor) -> None:
     db.connection.commit()
 
 
-def _serialize_forward_favorite(fav: dict[str, Any]) -> dict[str, Any]:
+FORWARD_HISTORY_LIMIT = 5
+try:
+    _forward_summary_limit_raw = int(
+        os.getenv("FORWARD_SUMMARY_LIMIT", "20") or "20"
+    )
+except ValueError:
+    _forward_summary_limit_raw = 20
+FORWARD_SUMMARY_LIMIT = max(0, _forward_summary_limit_raw)
+
+
+def _serialize_forward_favorite(
+    fav: dict[str, Any],
+    db_cursor: sqlite3.Cursor | None = None,
+) -> dict[str, Any]:
     forward_row = fav.get("forward") if isinstance(fav, dict) else None
     forward: dict[str, Any] | None = None
     if isinstance(forward_row, dict) and forward_row:
@@ -1891,7 +2081,35 @@ def _serialize_forward_favorite(fav: dict[str, Any]) -> dict[str, Any]:
             "created_at": forward_row.get("created_at"),
             "updated_at": forward_row.get("updated_at"),
             "last_run_at": forward_row.get("last_run_at"),
+            "events": _forward_events(forward_row),
         }
+    history: list[dict[str, Any]] = []
+    summary = get_cached_forward_summary(None, [])
+    fav_id = fav.get("id")
+    history_rows: list[dict[str, Any]] = []
+    if fav_id is not None:
+        fetch_limit = max(FORWARD_HISTORY_LIMIT, FORWARD_SUMMARY_LIMIT)
+        if db_cursor is not None:
+            history_rows = get_forward_history_for_cursor(
+                db_cursor, fav_id, fetch_limit
+            )
+        else:
+            from services.forward_runs import get_forward_history  # local import to avoid cycle
+
+            history_rows = get_forward_history(str(fav_id), fetch_limit)
+        summary = get_cached_forward_summary(
+            fav_id, history_rows[:FORWARD_SUMMARY_LIMIT]
+        )
+    history_slice = history_rows[:FORWARD_HISTORY_LIMIT]
+    current_hash = forward_rule_hash(fav.get("rule"))
+    for run in history_slice:
+        item = dict(run)
+        rule_hash = item.get("rule_hash")
+        item["rule_mismatch"] = bool(
+            rule_hash and current_hash and rule_hash != current_hash
+        )
+        history.append(item)
+
     return {
         "id": fav.get("id"),
         "ticker": fav.get("ticker"),
@@ -1912,7 +2130,44 @@ def _serialize_forward_favorite(fav: dict[str, Any]) -> dict[str, Any]:
         "dd_pct_snapshot": _coerce_float(fav.get("dd_pct_snapshot")),
         "snapshot_at": fav.get("snapshot_at"),
         "forward": forward,
+        "summary": summary,
+        "forward_history": history,
     }
+
+
+def _fetch_favorite_metadata(
+    db_cursor: sqlite3.Cursor, favorite_id: Any
+) -> dict[str, Any] | None:
+    try:
+        fav_id = int(favorite_id)
+    except (TypeError, ValueError):
+        return None
+    db_cursor.execute(
+        "SELECT * FROM favorites WHERE id=?",
+        (fav_id,),
+    )
+    row = db_cursor.fetchone()
+    if not row:
+        return None
+    return row_to_dict(row, db_cursor)
+
+
+def _favorite_visible_to_request(
+    favorite: dict[str, Any] | None, request: Request | None
+) -> bool:
+    if not favorite:
+        return False
+    owner_keys = ("owner_id", "user_id", "account_id", "owner")
+    for key in owner_keys:
+        if key in favorite and favorite[key] not in (None, ""):
+            request_owner = None
+            if request is not None:
+                request_owner = getattr(getattr(request, "state", None), key, None)
+                if request_owner is None:
+                    request_owner = getattr(getattr(request, "state", None), "user_id", None)
+            if request_owner is None or str(request_owner) != str(favorite[key]):
+                return False
+    return True
 
 
 def _load_forward_favorites(
@@ -2068,10 +2323,178 @@ def forward_page(request: Request, db=Depends(get_db)):
     )
 
 
+def _sanitize_pagination(
+    limit: int | float | str,
+    offset: int | float | str,
+    *,
+    max_limit: int,
+    default_limit: int | None = None,
+    min_limit: int = 0,
+) -> tuple[int, int]:
+    try:
+        limit_value = int(limit)
+    except (TypeError, ValueError):
+        limit_value = None
+
+    if default_limit is not None and (limit_value is None or limit_value <= 0):
+        limit_value = default_limit
+    if limit_value is None:
+        limit_value = 0
+
+    if min_limit and limit_value < min_limit:
+        limit_value = min_limit
+    if max_limit > 0:
+        limit_value = min(limit_value, max_limit)
+
+    try:
+        offset_value = int(offset)
+    except (TypeError, ValueError):
+        offset_value = 0
+    if offset_value < 0:
+        offset_value = 0
+    return limit_value, offset_value
+
+
+def _forward_runs_csv_rows(
+    favorite: dict[str, Any], rows: list[dict[str, Any]]
+) -> tuple[list[str], list[list[Any]]]:
+    headers = [
+        "symbol",
+        "direction",
+        "entry_ts",
+        "entry_px",
+        "exit_ts",
+        "exit_px",
+        "outcome",
+        "roi",
+        "tt_bars",
+        "dd",
+        "rule_hash",
+    ]
+    ticker = (favorite.get("ticker") or "").upper()
+    direction = canonical_direction(favorite.get("direction")) or "UP"
+
+    def normalize(value: Any) -> Any:
+        return "" if value is None else value
+
+    records: list[list[Any]] = []
+    for row in rows:
+        records.append(
+            [
+                ticker,
+                (direction or "").upper(),
+                normalize(row.get("entry_ts")),
+                normalize(row.get("entry_px")),
+                normalize(row.get("exit_ts")),
+                normalize(row.get("exit_px")),
+                normalize(row.get("outcome")),
+                normalize(row.get("roi")),
+                normalize(row.get("tt_bars")),
+                normalize(row.get("dd")),
+                normalize(row.get("rule_hash")),
+            ]
+        )
+    return headers, records
+
+
+@router.get("/forward/export.csv")
+def forward_runs_export_csv(
+    favorite_id: int = Query(...),
+    limit: int = Query(1000, ge=0),
+    offset: int = Query(0, ge=0),
+    db=Depends(get_db),
+):
+    favorite = _fetch_favorite_metadata(db, favorite_id)
+    if not favorite:
+        return JSONResponse({"error": "Favorite not found"}, status_code=404)
+    limit_value, offset_value = _sanitize_pagination(
+        limit, offset, max_limit=5000, default_limit=1000, min_limit=0
+    )
+    rows = []
+    if limit_value > 0:
+        rows = get_forward_history_for_cursor(
+            db, favorite_id, limit_value, offset_value
+        )
+    headers, records = _forward_runs_csv_rows(favorite, rows)
+
+    def row_iter() -> Any:
+        buffer = io.StringIO()
+        writer = csv.writer(buffer)
+        writer.writerow(headers)
+        yield buffer.getvalue()
+        buffer.seek(0)
+        buffer.truncate(0)
+        for record in records:
+            writer.writerow(record)
+            yield buffer.getvalue()
+            buffer.seek(0)
+            buffer.truncate(0)
+
+    filename = f"forward_runs_{(favorite.get('ticker') or favorite_id)}.csv"
+    response = StreamingResponse(row_iter(), media_type="text/csv")
+    response.headers["Content-Disposition"] = f"attachment; filename={filename}"
+    return response
+
+
 @router.get("/api/forward/favorites")
 def api_forward_favorites(db=Depends(get_db)):
-    favorites = [_serialize_forward_favorite(fav) for fav in _load_forward_favorites(db)]
+    favorites = [
+        _serialize_forward_favorite(fav, db) for fav in _load_forward_favorites(db)
+    ]
     return {"favorites": favorites}
+
+
+@router.get("/api/forward/{favorite_id}")
+def api_forward_runs_detail(
+    request: Request,
+    favorite_id: int,
+    limit: int = Query(50, ge=0),
+    offset: int = Query(0, ge=0),
+    db=Depends(get_db),
+):
+    favorite = _fetch_favorite_metadata(db, favorite_id)
+    if not favorite or not _favorite_visible_to_request(favorite, request):
+        return JSONResponse({"error": "Favorite not found"}, status_code=404)
+
+    limit_value, offset_value = _sanitize_pagination(
+        limit, offset, max_limit=200, default_limit=50, min_limit=1
+    )
+
+    fav_key = str(favorite.get("id") or favorite_id)
+    db.execute(
+        "SELECT MAX(entry_ts) FROM forward_runs WHERE favorite_id=?",
+        (fav_key,),
+    )
+    max_entry_row = db.fetchone()
+    max_entry_ts = max_entry_row[0] if max_entry_row else None
+    etag_value = f'W/"forward-runs:{fav_key}:{max_entry_ts or "none"}"'
+    request_etag = request.headers.get("if-none-match") or ""
+    etag_tokens = [token.strip() for token in request_etag.split(",") if token.strip()]
+    if "*" in etag_tokens or etag_value in etag_tokens:
+        return Response(status_code=304, headers={"ETag": etag_value})
+
+    rows = get_forward_history_for_cursor(db, fav_key, limit_value, offset_value)
+    current_hash = forward_rule_hash(favorite.get("rule"))
+    payload = [
+        {
+            "entry_ts": row.get("entry_ts"),
+            "entry_px": row.get("entry_px"),
+            "exit_ts": row.get("exit_ts"),
+            "exit_px": row.get("exit_px"),
+            "outcome": row.get("outcome"),
+            "roi": row.get("roi"),
+            "tt_bars": row.get("tt_bars"),
+            "dd": row.get("dd"),
+            "rule_hash": row.get("rule_hash"),
+            "rule_mismatch": bool(
+                current_hash
+                and row.get("rule_hash")
+                and row.get("rule_hash") != current_hash
+            ),
+        }
+        for row in rows
+    ]
+    return JSONResponse(payload, headers={"ETag": etag_value})
 
 
 @router.post("/api/forward/run")
@@ -2496,6 +2919,22 @@ def settings_page(request: Request, db=Depends(get_db)):
         "alert_outcomes",
         getattr(settings, "alert_outcomes", getattr(settings, "ALERT_OUTCOMES", "hit")),
     )
+    st.setdefault(
+        "forward_recency_mode",
+        getattr(
+            settings,
+            "forward_recency_mode",
+            getattr(settings, "FORWARD_RECENCY_MODE", "off"),
+        ),
+    )
+    st.setdefault(
+        "forward_recency_halflife_days",
+        getattr(
+            settings,
+            "forward_recency_halflife_days",
+            getattr(settings, "FORWARD_RECENCY_HALFLIFE_DAYS", 30.0),
+        ),
+    )
     _, smtp_missing, smtp_has_any = _smtp_config_status(st)
     smtp_configured = not smtp_missing
     smtp_warning = smtp_has_any and bool(smtp_missing)
@@ -2534,6 +2973,8 @@ def settings_save(
     scheduler_enabled: int = Form(1),
     throttle_minutes: int = Form(60),
     alert_outcomes: str = Form("hit"),
+    forward_recency_mode: str = Form("off"),
+    forward_recency_halflife_days: str = Form("30"),
     db=Depends(get_db),
 ):
     _ensure_scanner_column(db)
@@ -2566,10 +3007,20 @@ def settings_save(
     if outcomes_choice not in {"hit", "all"}:
         outcomes_choice = "hit"
 
+    mode_choice = (forward_recency_mode or "off").strip().lower()
+    if mode_choice not in {"off", "exp"}:
+        mode_choice = "off"
+    try:
+        half_life_value = float((forward_recency_halflife_days or "").strip() or 30.0)
+    except (TypeError, ValueError):
+        half_life_value = getattr(settings, "forward_recency_halflife_days", 30.0)
+    if half_life_value <= 0:
+        half_life_value = getattr(settings, "forward_recency_halflife_days", 30.0) or 30.0
+
     db.execute(
         """
         UPDATE settings
-           SET smtp_host=?, smtp_port=?, smtp_user=?, smtp_pass=?, mail_from=?, recipients=?, scanner_recipients=?, alert_outcomes=?, scheduler_enabled=?, throttle_minutes=?
+           SET smtp_host=?, smtp_port=?, smtp_user=?, smtp_pass=?, mail_from=?, recipients=?, scanner_recipients=?, alert_outcomes=?, forward_recency_mode=?, forward_recency_halflife_days=?, scheduler_enabled=?, throttle_minutes=?
          WHERE id=1
         """,
         (
@@ -2581,6 +3032,8 @@ def settings_save(
             clean_fav,
             clean_scan,
             outcomes_choice,
+            mode_choice,
+            half_life_value,
             int(scheduler_enabled),
             int(throttle_minutes),
         ),
@@ -2589,6 +3042,12 @@ def settings_save(
     os.environ["ALERT_OUTCOMES"] = outcomes_choice
     settings.alert_outcomes = outcomes_choice
     setattr(settings, "ALERT_OUTCOMES", outcomes_choice)
+    os.environ["FORWARD_RECENCY_MODE"] = mode_choice
+    os.environ["FORWARD_RECENCY_HALFLIFE_DAYS"] = str(half_life_value)
+    settings.forward_recency_mode = mode_choice
+    setattr(settings, "FORWARD_RECENCY_MODE", mode_choice)
+    settings.forward_recency_halflife_days = half_life_value
+    setattr(settings, "FORWARD_RECENCY_HALFLIFE_DAYS", half_life_value)
     return RedirectResponse(url="/settings", status_code=302)
 
 

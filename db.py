@@ -73,6 +73,8 @@ SCHEMA = [
         recipients TEXT,
         scanner_recipients TEXT,
         alert_outcomes TEXT DEFAULT 'hit',
+        forward_recency_mode TEXT DEFAULT 'off',
+        forward_recency_halflife_days REAL DEFAULT 30,
         scheduler_enabled INTEGER DEFAULT 0,
         throttle_minutes INTEGER DEFAULT 60,
         last_boundary TEXT,
@@ -179,6 +181,23 @@ SCHEMA = [
     );
     """,
     "CREATE INDEX IF NOT EXISTS idx_forward_tests_fav ON forward_tests(fav_id);",
+    """
+    CREATE TABLE IF NOT EXISTS forward_runs (
+        favorite_id TEXT NOT NULL,
+        entry_ts TEXT NOT NULL,
+        entry_px REAL,
+        exit_ts TEXT,
+        exit_px REAL,
+        outcome TEXT,
+        roi REAL,
+        tt_bars INTEGER,
+        dd REAL,
+        rule_hash TEXT,
+        PRIMARY KEY(favorite_id, entry_ts)
+    );
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_forward_runs_fav_entry ON forward_runs(favorite_id, entry_ts DESC);",
+    "CREATE INDEX IF NOT EXISTS idx_forward_runs_fav_exit ON forward_runs(favorite_id, exit_ts DESC);",
     # Guardrail skip log
     """
     CREATE TABLE IF NOT EXISTS guardrail_skips (
@@ -312,6 +331,16 @@ def _ensure_scanner_column(db: sqlite3.Cursor) -> None:
     if "alert_outcomes" not in cols:
         db.execute(
             "ALTER TABLE settings ADD COLUMN alert_outcomes TEXT DEFAULT 'hit'"
+        )
+        db.connection.commit()
+    if "forward_recency_mode" not in cols:
+        db.execute(
+            "ALTER TABLE settings ADD COLUMN forward_recency_mode TEXT DEFAULT 'off'"
+        )
+        db.connection.commit()
+    if "forward_recency_halflife_days" not in cols:
+        db.execute(
+            "ALTER TABLE settings ADD COLUMN forward_recency_halflife_days REAL DEFAULT 30"
         )
         db.connection.commit()
 

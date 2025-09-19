@@ -28,6 +28,16 @@ def _choice(name: str, default: str, *, allowed: Tuple[str, ...] | None = None) 
     return value
 
 
+def _float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return float(default)
+    try:
+        return float(str(raw).strip() or default)
+    except (TypeError, ValueError):
+        return float(default)
+
+
 @dataclass
 class Settings:
     run_migrations: bool = _bool("RUN_MIGRATIONS", "true")
@@ -60,6 +70,12 @@ class Settings:
     alert_sms_to: Tuple[str, ...] = _csv("ALERT_SMS_TO")
     alert_channel: str = _choice("ALERT_CHANNEL", "Email", allowed=("Email", "MMS"))
     alert_outcomes: str = _choice("ALERT_OUTCOMES", "hit", allowed=("hit", "all"))
+    forward_recency_mode: str = _choice(
+        "FORWARD_RECENCY_MODE", "off", allowed=("off", "exp")
+    )
+    forward_recency_halflife_days: float = _float(
+        "FORWARD_RECENCY_HALFLIFE_DAYS", 30.0
+    )
 
 
 settings = Settings()
@@ -67,3 +83,16 @@ settings.alert_channel = settings.alert_channel or "Email"
 settings.alert_outcomes = (settings.alert_outcomes or "hit").lower()
 setattr(settings, "ALERT_CHANNEL", settings.alert_channel)
 setattr(settings, "ALERT_OUTCOMES", settings.alert_outcomes)
+mode_value = (getattr(settings, "forward_recency_mode", "off") or "off").lower()
+if mode_value not in {"off", "exp"}:
+    mode_value = "off"
+settings.forward_recency_mode = mode_value
+setattr(settings, "FORWARD_RECENCY_MODE", mode_value)
+try:
+    half_life_value = float(getattr(settings, "forward_recency_halflife_days", 30.0))
+except (TypeError, ValueError):
+    half_life_value = 30.0
+if half_life_value <= 0:
+    half_life_value = 30.0
+settings.forward_recency_halflife_days = half_life_value
+setattr(settings, "FORWARD_RECENCY_HALFLIFE_DAYS", half_life_value)
