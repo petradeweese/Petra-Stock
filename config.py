@@ -1,5 +1,6 @@
 import os
 from dataclasses import dataclass
+from typing import Any
 
 
 _FALSEY = {"0", "false", "", "no", "off"}
@@ -9,7 +10,24 @@ def env_bool(name: str, default: bool = False) -> bool:
     """Return ``True`` if the environment variable is truthy."""
 
     default_val = "1" if default else "0"
-    return os.getenv(name, default_val).strip().lower() not in _FALSEY
+    return parse_bool(os.getenv(name, default_val))
+
+
+def parse_bool(value: Any) -> bool:
+    """Coerce ``value`` to ``True``/``False`` using typical string semantics.
+
+    ``bool("false")`` evaluates to ``True`` in Python which makes it unsafe
+    for parsing HTML form submissions.  Centralise the conversion so that the
+    UI and runtime configuration code share the same rules.
+    """
+
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value).strip().lower() not in _FALSEY
 
 
 def _bool(name: str, default: str = "false") -> bool:
@@ -59,11 +77,11 @@ def _apply_provider_priority() -> None:
 _apply_provider_priority()
 
 
-def set_use_schwab_primary(value: bool) -> None:
+def set_use_schwab_primary(value: Any) -> None:
     """Update provider priority at runtime based on ``value``."""
 
     global USE_SCHWAB_PRIMARY
-    USE_SCHWAB_PRIMARY = bool(value)
+    USE_SCHWAB_PRIMARY = parse_bool(value)
     os.environ["USE_SCHWAB_PRIMARY"] = "1" if USE_SCHWAB_PRIMARY else "0"
     _apply_provider_priority()
 

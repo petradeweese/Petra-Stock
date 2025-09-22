@@ -112,6 +112,27 @@
           <div>{{ 'Enabled' if SCHWAB_ENABLED else 'Disabled' }}</div>
         </div>
       </div>
+      {% set stats = provider_stats or {} %}
+      {% set schwab_stats = stats.get('schwab', {}) %}
+      {% set yahoo_stats = stats.get('yahoo', {}) %}
+      <div class="grid" style="margin-top:1rem; gap: 1.5rem;">
+        <div class="field">
+          <label>Schwab health</label>
+          <div class="note">
+            <div>RPM: {{ (schwab_stats.get('rpm') or 0) | round(2) }}</div>
+            <div>Avg latency: {{ (schwab_stats.get('avg_latency') or 0) | round(3) }}s</div>
+            <div>Last error: {{ schwab_stats.get('last_error') or '—' }}</div>
+          </div>
+        </div>
+        <div class="field">
+          <label>Yahoo health</label>
+          <div class="note">
+            <div>RPM: {{ (yahoo_stats.get('rpm') or 0) | round(2) }}</div>
+            <div>Avg latency: {{ (yahoo_stats.get('avg_latency') or 0) | round(3) }}s</div>
+            <div>Last error: {{ yahoo_stats.get('last_error') or '—' }}</div>
+          </div>
+        </div>
+      </div>
       <div class="field" style="margin-top:1rem;">
         <button id="btnTestSchwab" type="button" class="btn">Test Schwab</button>
         <span id="schwabStatus" class="note" style="margin-left:.75rem;"></span>

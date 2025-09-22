@@ -20,7 +20,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 import config as app_config
-from config import settings
+from config import parse_bool, settings
 from db import (
     DB_PATH,
     _ensure_scanner_column,
@@ -2469,21 +2469,20 @@ def settings_page(request: Request, db=Depends(get_db)):
     _, smtp_missing, smtp_has_any = _smtp_config_status(st)
     smtp_configured = not smtp_missing
     smtp_warning = smtp_has_any and bool(smtp_missing)
-    return templates.TemplateResponse(
-        request,
-        "settings.html",
-        {
-            "st": st,
-            "active_tab": "settings",
-            "smtp_configured": smtp_configured,
-            "smtp_missing": smtp_missing,
-            "smtp_missing_label": _format_missing_fields(smtp_missing),
-            "smtp_warning": smtp_warning,
-            "twilio_configured": False,
-            "USE_SCHWAB_PRIMARY": app_config.USE_SCHWAB_PRIMARY,
-            "SCHWAB_ENABLED": app_config.SCHWAB_ENABLED,
-        },
-    )
+    provider_stats = get_provider_health()
+    context = {
+        "st": st,
+        "active_tab": "settings",
+        "smtp_configured": smtp_configured,
+        "smtp_missing": smtp_missing,
+        "smtp_missing_label": _format_missing_fields(smtp_missing),
+        "smtp_warning": smtp_warning,
+        "twilio_configured": False,
+        "USE_SCHWAB_PRIMARY": app_config.USE_SCHWAB_PRIMARY,
+        "SCHWAB_ENABLED": app_config.SCHWAB_ENABLED,
+        "provider_stats": provider_stats,
+    }
+    return templates.TemplateResponse(request, "settings.html", context)
 
 
 @router.get("/info", response_class=HTMLResponse)
@@ -2496,10 +2495,7 @@ async def settings_update(request: Request):
     form = await request.form()
     key = (form.get("key") or "").strip()
     if key == "USE_SCHWAB_PRIMARY":
-        raw_value = form.get("value")
-        value = (raw_value or "").strip().lower()
-        falsey = {"0", "false", "no", "off", ""}
-        app_config.set_use_schwab_primary(value not in falsey)
+        app_config.set_use_schwab_primary(parse_bool(form.get("value")))
     return RedirectResponse(url="/settings", status_code=303)
 
 
