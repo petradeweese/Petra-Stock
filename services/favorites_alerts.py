@@ -16,7 +16,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from config import settings
 
-from . import events_provider, options_provider, twilio_client
+from . import events_provider, options_provider, sms_consent, twilio_client
 from .notify import send_email_smtp
 from .telemetry import log as log_telemetry
 
@@ -354,14 +354,50 @@ def _deliver_alert(
                         "favorites alert email failed: %s", result.get("error")
                     )
     elif normalized == "mms":
-        numbers = list(recipients) if recipients is not None else list(settings.alert_sms_to)
-        if not numbers:
-            logger.info("favorites alert mms skipped: no numbers configured")
+        destinations = []
+        if recipients is not None:
+            for entry in recipients:
+                if isinstance(entry, Mapping):
+                    phone = entry.get("phone_e164") or entry.get("phone") or entry.get("to")
+                    if phone:
+                        destinations.append(
+                            {
+                                "phone_e164": str(phone),
+                                "user_id": entry.get("user_id"),
+                            }
+                        )
+                else:
+                    destinations.append({"phone_e164": str(entry)})
         else:
-            for number in numbers:
-                number_str = str(number)
-                context = {**context_base, "channel": "mms", "to": number_str}
-                if twilio_client.send_mms(number_str, body, context=context):
+            destinations = sms_consent.active_destinations()
+
+        if not destinations:
+            logger.info("favorites alert mms skipped: no consented numbers configured")
+        else:
+            seen: set[str] = set()
+            message_body = sms_consent.append_footer(body)
+            for dest in destinations:
+                number_raw = dest.get("phone_e164") or dest.get("phone") or dest.get("to")
+                number_str = sms_consent.normalize_phone(str(number_raw or ""))
+                if not number_str or number_str in seen:
+                    continue
+                seen.add(number_str)
+                allowed, consent_row = sms_consent.allow_sending(number_str)
+                if not allowed:
+                    logger.info(
+                        "favorites alert mms skipped number=%s reason=no-consent-or-rate",
+                        number_str,
+                    )
+                    continue
+                user_for_log = (consent_row or {}).get("user_id") or dest.get("user_id")
+                context = {
+                    **context_base,
+                    "channel": "mms",
+                    "to": number_str,
+                    "user_id": user_for_log,
+                }
+                if twilio_client.send_mms(number_str, message_body, context=context):
+                    sms_consent.record_delivery(number_str, user_for_log, message_body)
                     success = True
                 else:
                     logger.warning("favorites alert mms failed number=%s", number_str)

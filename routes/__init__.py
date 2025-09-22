@@ -2,11 +2,13 @@
 import asyncio
 import atexit
 import csv
+import html
 import io
 import json
 import logging
 import math
 import os
+import re
 import sqlite3
 import statistics
 import time
@@ -38,7 +40,7 @@ from db import (
 from indices import SP100, TOP150, TOP250
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 from scanner import compute_scan_for_ticker
-from services import executor, favorites_alerts, price_store, twilio_client
+from services import executor, favorites_alerts, price_store, sms_consent, twilio_client
 from services.favorites import canonical_direction, ensure_favorite_directions
 from services.notify import send_email_smtp
 from services.scanner_params import coerce_scan_params
@@ -71,6 +73,24 @@ SCAN_BATCH_WRITES = os.getenv("SCAN_BATCH_WRITES", "1") not in {"0", "false", "n
 
 _EMPTY_HEATMAP: Dict[str, Any] = {"index": [], "columns": [], "values": [], "meta": {}}
 _LATEST_HEATMAP: Dict[str, Any] = dict(_EMPTY_HEATMAP)
+
+_SMS_CONSENT_TEXT = (
+    "I agree to receive automated Petra Stock SMS alerts. Msg & data rates may apply."
+)
+
+
+def _request_user_id(request: Request | None) -> str:
+    if request is not None:
+        state = getattr(request, "state", None)
+        for attr in ("user_id", "owner_id", "account_id", "user"):
+            value = getattr(state, attr, None) if state is not None else None
+            if value not in (None, ""):
+                return str(value)
+        for header in ("x-user-id", "x-account-id", "x-owner-id"):
+            header_val = request.headers.get(header)
+            if header_val:
+                return header_val
+    return sms_consent.DEFAULT_USER_ID
 
 _SECTOR_OVERRIDES: Dict[str, str] = {}
 _SECTOR_OVERRIDES.update(
@@ -2846,9 +2866,9 @@ def favorites_test_alert(payload: dict = Body(...), db=Depends(get_db)):
         response.update({"ok": False, "error": error})
         return JSONResponse(response, status_code=400)
 
-    numbers = list(settings.alert_sms_to)
-    if not numbers:
-        error = "MMS not configured"
+    destinations = sms_consent.active_destinations()
+    if not destinations:
+        error = "No SMS recipients opted-in"
         log_telemetry(
             {
                 "type": "favorites_test_alert_send",
@@ -2861,10 +2881,27 @@ def favorites_test_alert(payload: dict = Body(...), db=Depends(get_db)):
         )
     else:
         success = False
-        for number in numbers:
-            if twilio_client.send_mms(
-                str(number), body, context={**delivery_context, "channel": "mms"}
-            ):
+        message_body = sms_consent.append_footer(body)
+        for dest in destinations:
+            number = sms_consent.normalize_phone(str(dest.get("phone_e164") or ""))
+            if not number:
+                continue
+            allowed, consent_row = sms_consent.allow_sending(number)
+            if not allowed:
+                continue
+            context = {
+                **delivery_context,
+                "channel": "mms",
+                "to": number,
+                "user_id": (consent_row or {}).get("user_id"),
+            }
+            if twilio_client.send_mms(number, message_body, context=context):
+                sms_consent.record_delivery(
+                    number,
+                    (consent_row or {}).get("user_id"),
+                    message_body,
+                    message_type="test",
+                )
                 success = True
         log_telemetry(
             {
@@ -2914,6 +2951,7 @@ def favorites_test_alert_preview(payload: dict = Body(...)):
 
 @router.get("/settings", response_class=HTMLResponse)
 def settings_page(request: Request, db=Depends(get_db)):
+    user_id = _request_user_id(request)
     st = dict(get_settings(db))
     st.setdefault(
         "alert_outcomes",
@@ -2938,6 +2976,16 @@ def settings_page(request: Request, db=Depends(get_db)):
     _, smtp_missing, smtp_has_any = _smtp_config_status(st)
     smtp_configured = not smtp_missing
     smtp_warning = smtp_has_any and bool(smtp_missing)
+    sms_active = sms_consent.latest_for_user(user_id, db_cursor=db)
+    sms_history = sms_consent.history_for_user(user_id, limit=10, db_cursor=db)
+    sms_state = {
+        "active": bool(sms_active),
+        "phone": (sms_active or {}).get("phone_e164"),
+        "consent_at": (sms_active or {}).get("consent_at"),
+        "method": (sms_active or {}).get("method"),
+        "user_id": user_id,
+        "history": sms_history,
+    }
     return templates.TemplateResponse(
         request,
         "settings.html",
@@ -2951,6 +2999,8 @@ def settings_page(request: Request, db=Depends(get_db)):
             "twilio_configured": False,
             "alert_channel": getattr(settings, "alert_channel", "Email"),
             "alert_outcomes": st.get("alert_outcomes", "hit"),
+            "sms_consent_text": _SMS_CONSENT_TEXT,
+            "sms_state": sms_state,
         },
     )
 
@@ -2958,6 +3008,21 @@ def settings_page(request: Request, db=Depends(get_db)):
 @router.get("/info", response_class=HTMLResponse)
 def info_page(request: Request):
     return templates.TemplateResponse(request, "info.html", {"active_tab": "info"})
+
+
+@router.get("/sms-consent", response_class=HTMLResponse)
+def sms_consent_page(request: Request):
+    return templates.TemplateResponse(request, "sms_consent.html", {})
+
+
+@router.get("/privacy", response_class=HTMLResponse)
+def privacy_page(request: Request):
+    return templates.TemplateResponse(request, "privacy.html", {})
+
+
+@router.get("/terms", response_class=HTMLResponse)
+def terms_page(request: Request):
+    return templates.TemplateResponse(request, "terms.html", {})
 
 
 @router.post("/settings/save")
@@ -3243,4 +3308,144 @@ def scanner_parity(request: Request):
         },
     )
 
+
+def _client_ip(request: Request) -> str | None:
+    forwarded = request.headers.get("x-forwarded-for") or request.headers.get("x-real-ip")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    if request.client:
+        return request.client.host
+    return None
+
+
+def _twiml_response(message: str) -> Response:
+    payload = (
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+        f"<Response><Message>{html.escape(message)}</Message></Response>"
+    )
+    return Response(content=payload, media_type="application/xml")
+
+
+@router.post("/api/sms/verify/start")
+async def sms_verify_start(request: Request, payload: dict = Body(...)):
+    user_id = _request_user_id(request)
+    phone_raw = str(payload.get("phone") or "")
+    consent_text = str(payload.get("consent_text") or _SMS_CONSENT_TEXT).strip()
+    method = str(payload.get("method") or "settings").strip() or "settings"
+    normalized = sms_consent.normalize_phone(phone_raw)
+    if not normalized:
+        return JSONResponse({"ok": False, "error": "Invalid phone number"}, status_code=400)
+    if not consent_text:
+        return JSONResponse({"ok": False, "error": "Consent text required"}, status_code=400)
+    verification_id = twilio_client.start_verification(normalized)
+    if not verification_id:
+        return JSONResponse(
+            {"ok": False, "error": "Verification is unavailable"}, status_code=503
+        )
+    logger.info(
+        "sms_verify_start",
+        extra={"user_id": user_id, "phone": normalized, "method": method},
+    )
+    return {"ok": True, "phone": normalized, "verification_id": verification_id}
+
+
+@router.post("/api/sms/verify/check")
+async def sms_verify_check(
+    request: Request,
+    payload: dict = Body(...),
+    db=Depends(get_db),
+):
+    user_id = _request_user_id(request)
+    phone = sms_consent.normalize_phone(str(payload.get("phone") or ""))
+    code = str(payload.get("code") or "").strip()
+    consent_text = str(payload.get("consent_text") or _SMS_CONSENT_TEXT).strip()
+    method = str(payload.get("method") or "settings").strip() or "settings"
+    if not phone:
+        return JSONResponse({"ok": False, "error": "Invalid phone number"}, status_code=400)
+    if not code:
+        return JSONResponse({"ok": False, "error": "Verification code required"}, status_code=400)
+    if not consent_text:
+        return JSONResponse({"ok": False, "error": "Consent text required"}, status_code=400)
+    ok, verification_id = twilio_client.check_verification(phone, code)
+    if not ok:
+        return JSONResponse(
+            {"ok": False, "error": "Invalid verification code"}, status_code=400
+        )
+    ip = _client_ip(request)
+    user_agent = request.headers.get("user-agent")
+    record = sms_consent.record_consent(
+        user_id,
+        phone,
+        consent_text,
+        ip=ip,
+        user_agent=user_agent,
+        verification_id=verification_id,
+        method=method,
+        db_cursor=db,
+    )
+    logger.info(
+        "sms_verify_check_ok",
+        extra={"user_id": user_id, "phone": phone, "method": method},
+    )
+    return {"ok": True, "consent": record}
+
+
+@router.post("/twilio/inbound-sms")
+async def twilio_inbound_sms(request: Request, db=Depends(get_db)):
+    form = await request.form()
+    from_number = sms_consent.normalize_phone(
+        str(form.get("From") or form.get("from") or "")
+    )
+    body_raw = str(form.get("Body") or form.get("body") or "").strip()
+    lowered = body_raw.lower()
+
+    if not from_number:
+        return _twiml_response("Missing sender number.")
+
+    if lowered in {"stop", "stopall", "unsubscribe", "quit"}:
+        sms_consent.revoke_phone(from_number, db_cursor=db)
+        return _twiml_response(
+            "You’re opted out of Petra Stock SMS alerts. Reply START to opt back in."
+        )
+
+    if lowered in {"start", "unstop"}:
+        latest = sms_consent.latest_for_phone(from_number, db_cursor=db)
+        verification_id = twilio_client.start_verification(from_number)
+        if not verification_id:
+            return _twiml_response("Verification is unavailable. Please try again later.")
+        logger.info(
+            "sms_inbound_start",
+            extra={"phone": from_number, "user_id": latest.get("user_id") if latest else None},
+        )
+        return _twiml_response(
+            "Reply with the verification code we just sent to complete opt-in."
+        )
+
+    if lowered == "help":
+        return _twiml_response(
+            "Petra Stock alerts. Msg&data rates may apply. STOP to cancel. help@yourdomain.com"
+        )
+
+    if re.fullmatch(r"\d{4,8}", lowered):
+        latest = sms_consent.latest_for_phone(from_number, db_cursor=db)
+        consent_text = (latest or {}).get("consent_text") or _SMS_CONSENT_TEXT
+        user_id = (latest or {}).get("user_id")
+        ok, verification_id = twilio_client.check_verification(from_number, lowered)
+        if not ok:
+            return _twiml_response("Invalid verification code. Reply START for a new one.")
+        sms_consent.record_consent(
+            user_id,
+            from_number,
+            consent_text,
+            ip=_client_ip(request),
+            user_agent=request.headers.get("user-agent"),
+            verification_id=verification_id,
+            method="sms-keyword",
+            db_cursor=db,
+        )
+        return _twiml_response("You’re opted in to Petra Stock SMS alerts.")
+
+    return _twiml_response(
+        "Unrecognized response. Reply HELP for info or START to opt back in."
+    )
 

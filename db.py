@@ -268,6 +268,35 @@ SCHEMA = [
         updated_at TEXT
     );
     """,
+    # SMS consent + delivery log
+    """
+    CREATE TABLE IF NOT EXISTS sms_consent (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT NOT NULL,
+        phone_e164 TEXT NOT NULL,
+        consent_text TEXT NOT NULL,
+        consent_at TEXT NOT NULL,
+        ip TEXT,
+        user_agent TEXT,
+        revoked_at TEXT,
+        method TEXT NOT NULL DEFAULT 'settings',
+        verification_id TEXT
+    );
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_sms_consent_user ON sms_consent(user_id, revoked_at);",
+    "CREATE INDEX IF NOT EXISTS idx_sms_consent_phone ON sms_consent(phone_e164, consent_at DESC);",
+    """
+    CREATE TABLE IF NOT EXISTS sms_delivery_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT NOT NULL,
+        phone_e164 TEXT NOT NULL,
+        sent_at TEXT NOT NULL,
+        message_type TEXT,
+        body_hash TEXT
+    );
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_sms_delivery_user ON sms_delivery_log(user_id, sent_at);",
+    "CREATE INDEX IF NOT EXISTS idx_sms_delivery_phone ON sms_delivery_log(phone_e164, sent_at DESC);",
 ]
 
 

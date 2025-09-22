@@ -938,3 +938,23 @@ select:focus,
 
 #scan-overlay.htmx-request { display:grid !important; }
 .htmx-request #scan-results { opacity:.4; filter:grayscale(30%); }
+
+.site-footer {
+  margin:32px auto 24px;
+  max-width:1200px;
+  padding:0 16px;
+  text-align:center;
+  color:var(--muted);
+  font-size:0.9rem;
+}
+
+.site-footer a {
+  color:var(--accent);
+  text-decoration:none;
+  margin:0 6px;
+}
+
+.site-footer a:hover,
+.site-footer a:focus {
+  text-decoration:underline;
+}

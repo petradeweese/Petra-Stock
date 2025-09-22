@@ -20,6 +20,77 @@
   .recency-halflife input {
     width: 5rem;
   }
+  .sms-card {
+    margin-top: 1rem;
+  }
+  .sms-status {
+    margin: 0.5rem 0 1rem;
+  }
+  .sms-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 280px) auto;
+    align-items: end;
+    gap: 1rem;
+    margin-bottom: 1rem;
+  }
+  .sms-history {
+    margin-top: 1rem;
+  }
+  .sms-history ul {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+  }
+  .sms-history li {
+    display: flex;
+    flex-direction: column;
+    padding: 0.4rem 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  }
+  .sms-history li:last-child {
+    border-bottom: none;
+  }
+  .sms-history .status-active {
+    color: var(--pos);
+  }
+  .sms-history .status-revoked {
+    color: var(--neg);
+  }
+  #sms-code-modal {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.65);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 99;
+  }
+  #sms-code-modal[hidden] {
+    display: none;
+  }
+  .modal-card {
+    background: #111;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 8px;
+    padding: 1.5rem;
+    max-width: 22rem;
+    width: 100%;
+    box-shadow: 0 12px 28px rgba(0, 0, 0, 0.4);
+  }
+  .modal-card h3 {
+    margin-top: 0;
+  }
+  .modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.5rem;
+    margin-top: 1rem;
+  }
+  .btn-secondary {
+    background: transparent;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    color: inherit;
+  }
 </style>
 {% endblock %}
 {% block content %}
@@ -100,6 +171,55 @@
   </div>
     </form>
   </div>
+  <div class="card sms-card">
+    <div class="card-body">
+      <h2>SMS Alerts (Opt-in)</h2>
+      <p id="sms-status-text" class="note sms-status {{ 'status-success' if sms_state.active else 'status-error' }}">
+        {% if sms_state.active and sms_state.phone %}
+          SMS alerts are enabled for <strong>{{ sms_state.phone }}</strong>.
+        {% else %}
+          SMS alerts are currently disabled. Verify your number to opt in.
+        {% endif %}
+      </p>
+      <label class="checkbox" style="gap:0.5rem; align-items:flex-start;">
+        <input type="checkbox" id="sms-consent-checkbox" />
+        <span id="sms-consent-copy" data-consent="{{ sms_consent_text }}">{{ sms_consent_text }}</span>
+      </label>
+      <div class="sms-grid">
+        <div>
+          <label for="sms-phone">Phone number</label>
+          <input id="sms-phone" type="tel" value="{{ sms_state.phone or '' }}" placeholder="+1 555 555 1212" />
+        </div>
+        <div>
+          <button id="sms-verify-btn" type="button">Verify &amp; Opt-in</button>
+        </div>
+      </div>
+      <div class="sms-history">
+        <strong>History</strong>
+        <ul id="sms-history-list">
+          {% if sms_state.history %}
+            {% for item in sms_state.history %}
+              <li>
+                <span><strong>{{ item.phone_e164 }}</strong></span>
+                <span class="{{ 'status-revoked' if item.revoked_at else 'status-active' }}">
+                  {% if item.revoked_at %}
+                    Revoked {{ item.revoked_at }}
+                  {% else %}
+                    Active since {{ item.consent_at }}
+                  {% endif %}
+                </span>
+                <span class="note" style="margin-top:0.25rem;">
+                  Method: {{ item.method }}{% if item.verification_id %} • Verification {{ item.verification_id }}{% endif %}
+                </span>
+              </li>
+            {% endfor %}
+          {% else %}
+            <li><span class="note">No SMS consent records yet.</span></li>
+          {% endif %}
+        </ul>
+      </div>
+    </div>
+  </div>
   <div class="card" style="margin-top:1rem;">
     <div class="card-body">
       <strong>Favorites Alerts</strong>
@@ -126,6 +246,18 @@
       <button id="send_test_alert" class="btn" style="margin-top:.75rem;">Send Test Alert</button>
     </div>
   </div>
+  <div id="sms-code-modal" hidden>
+    <div class="modal-card">
+      <h3>Enter verification code</h3>
+      <p class="note">We sent a verification code via SMS. Enter it below to confirm your opt-in.</p>
+      <input id="sms-code-input" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="8" placeholder="123456" />
+      <div class="modal-actions">
+        <button type="button" id="sms-code-submit">Confirm</button>
+        <button type="button" id="sms-code-cancel" class="btn-secondary">Cancel</button>
+      </div>
+    </div>
+  </div>
+  <script type="application/json" id="sms-state-data">{{ sms_state|tojson|safe }}</script>
 {% endblock %}
 {% block extra_body %}
 <script>
@@ -144,6 +276,89 @@
     const symbolInput = document.getElementById('fav_symbol');
     const channelSelect = document.getElementById('test_channel');
     const outcomesSelect = document.getElementById('test_outcomes');
+    const smsStateEl = document.getElementById('sms-state-data');
+    let smsState = {};
+    try {
+      smsState = JSON.parse(smsStateEl?.textContent || '{}') || {};
+    } catch (err) {
+      smsState = {};
+    }
+    const smsStatusEl = document.getElementById('sms-status-text');
+    const smsHistoryList = document.getElementById('sms-history-list');
+    const smsCheckbox = document.getElementById('sms-consent-checkbox');
+    const smsPhoneInput = document.getElementById('sms-phone');
+    const smsVerifyBtn = document.getElementById('sms-verify-btn');
+    const smsModal = document.getElementById('sms-code-modal');
+    const smsCodeInput = document.getElementById('sms-code-input');
+    const smsCodeSubmit = document.getElementById('sms-code-submit');
+    const smsCodeCancel = document.getElementById('sms-code-cancel');
+    const consentCopyEl = document.getElementById('sms-consent-copy');
+    const consentCopy = consentCopyEl?.dataset?.consent || '';
+    let pendingPhone = null;
+
+    function renderSmsHistory() {
+      if (!smsHistoryList) return;
+      const history = Array.isArray(smsState?.history) ? smsState.history : [];
+      if (!history.length) {
+        smsHistoryList.innerHTML = '<li><span class="note">No SMS consent records yet.</span></li>';
+        return;
+      }
+      const items = history.map((item) => {
+        const phone = item?.phone_e164 || '';
+        const revoked = item?.revoked_at;
+        const consentAt = item?.consent_at || '';
+        const method = item?.method || '';
+        const verificationId = item?.verification_id ? ` • Verification ${item.verification_id}` : '';
+        const statusClass = revoked ? 'status-revoked' : 'status-active';
+        const statusText = revoked ? `Revoked ${revoked}` : `Active since ${consentAt}`;
+        return `
+          <li>
+            <span><strong>${phone}</strong></span>
+            <span class="${statusClass}">${statusText}</span>
+            <span class="note" style="margin-top:0.25rem;">Method: ${method}${verificationId}</span>
+          </li>
+        `;
+      });
+      smsHistoryList.innerHTML = items.join('');
+    }
+
+    function renderSmsState() {
+      if (smsStatusEl) {
+        if (smsState?.active && smsState?.phone) {
+          smsStatusEl.classList.add('status-success');
+          smsStatusEl.classList.remove('status-error');
+          smsStatusEl.innerHTML = `SMS alerts are enabled for <strong>${smsState.phone}</strong>.`;
+        } else {
+          smsStatusEl.classList.remove('status-success');
+          smsStatusEl.classList.add('status-error');
+          smsStatusEl.textContent = 'SMS alerts are currently disabled. Verify your number to opt in.';
+        }
+      }
+      if (smsCheckbox) {
+        smsCheckbox.checked = Boolean(smsState?.active);
+      }
+      renderSmsHistory();
+    }
+
+    function openSmsModal() {
+      if (!smsModal) return;
+      smsModal.removeAttribute('hidden');
+      setTimeout(() => smsCodeInput?.focus(), 10);
+    }
+
+    function closeSmsModal() {
+      if (smsModal) {
+        smsModal.setAttribute('hidden', '');
+      }
+      if (smsCodeInput) {
+        smsCodeInput.value = '';
+      }
+    }
+
+    renderSmsState();
+    if (smsState?.phone && smsPhoneInput) {
+      smsPhoneInput.value = smsState.phone;
+    }
 
     sendBtn?.addEventListener('click', async () => {
       const symbol = (symbolInput?.value || '').trim().toUpperCase();
@@ -172,6 +387,113 @@
         showToast(err?.message || 'Failed to send test alert', false);
       } finally {
         sendBtn.disabled = false;
+      }
+    });
+
+    smsVerifyBtn?.addEventListener('click', async () => {
+      if (!smsCheckbox?.checked) {
+        showToast('You must agree to the SMS consent before opting in.', false);
+        return;
+      }
+      const phone = (smsPhoneInput?.value || '').trim();
+      if (!phone) {
+        showToast('Enter a phone number to verify.', false);
+        return;
+      }
+      smsVerifyBtn.disabled = true;
+      try {
+        const res = await fetch('/api/sms/verify/start', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ phone, consent_text: consentCopy, method: 'settings' }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data?.ok) {
+          throw new Error(data?.error || 'Failed to start verification');
+        }
+        pendingPhone = data.phone || phone;
+        if (smsPhoneInput) {
+          smsPhoneInput.value = pendingPhone;
+        }
+        openSmsModal();
+        showToast('Verification code sent. Check your phone.');
+      } catch (err) {
+        showToast(err?.message || 'Failed to start verification', false);
+      } finally {
+        smsVerifyBtn.disabled = false;
+      }
+    });
+
+    smsCodeSubmit?.addEventListener('click', async () => {
+      const code = (smsCodeInput?.value || '').trim();
+      if (!code) {
+        showToast('Enter the verification code.', false);
+        return;
+      }
+      const phoneValue = pendingPhone || (smsPhoneInput?.value || '').trim();
+      smsCodeSubmit.disabled = true;
+      try {
+        const res = await fetch('/api/sms/verify/check', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            phone: phoneValue,
+            code,
+            consent_text: consentCopy,
+            method: 'settings',
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data?.ok) {
+          throw new Error(data?.error || 'Verification failed');
+        }
+        const record = data?.consent || {};
+        const existingHistory = Array.isArray(smsState?.history)
+          ? smsState.history.filter((item) => item?.id !== record?.id)
+          : [];
+        smsState = {
+          ...smsState,
+          active: true,
+          phone: record?.phone_e164 || phoneValue,
+          consent_at: record?.consent_at,
+          method: record?.method,
+          user_id: record?.user_id || smsState?.user_id,
+          history: [record, ...existingHistory],
+        };
+        pendingPhone = null;
+        renderSmsState();
+        closeSmsModal();
+        showToast('SMS alerts enabled.');
+      } catch (err) {
+        showToast(err?.message || 'Verification failed', false);
+      } finally {
+        smsCodeSubmit.disabled = false;
+      }
+    });
+
+    smsCodeCancel?.addEventListener('click', () => {
+      pendingPhone = null;
+      closeSmsModal();
+    });
+
+    smsModal?.addEventListener('click', (event) => {
+      if (event.target === smsModal) {
+        pendingPhone = null;
+        closeSmsModal();
+      }
+    });
+
+    smsCodeInput?.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        smsCodeSubmit?.click();
+      }
+    });
+
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape' && !smsModal?.hasAttribute('hidden')) {
+        pendingPhone = null;
+        closeSmsModal();
       }
     });
   })();

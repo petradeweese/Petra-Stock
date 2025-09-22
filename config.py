@@ -67,6 +67,7 @@ class Settings:
     twilio_account_sid: str = os.getenv("TWILIO_ACCOUNT_SID", "")
     twilio_auth_token: str = os.getenv("TWILIO_AUTH_TOKEN", "")
     twilio_from_number: str = os.getenv("TWILIO_FROM_NUMBER", "")
+    twilio_verify_service_sid: str = os.getenv("TWILIO_VERIFY_SERVICE_SID", "")
     alert_sms_to: Tuple[str, ...] = _csv("ALERT_SMS_TO")
     alert_channel: str = _choice("ALERT_CHANNEL", "Email", allowed=("Email", "MMS"))
     alert_outcomes: str = _choice("ALERT_OUTCOMES", "hit", allowed=("hit", "all"))
