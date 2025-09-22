@@ -51,6 +51,18 @@ class Settings:
     fetch_retry_base_ms: int = int(os.getenv("FETCH_RETRY_BASE_MS", "300"))
     fetch_retry_cap_ms: int = int(os.getenv("FETCH_RETRY_CAP_MS", "5000"))
 
+    # Market data provider configuration
+    data_provider: str = _choice(
+        "DATA_PROVIDER",
+        os.getenv("PF_DATA_PROVIDER", "schwab"),
+        allowed=("schwab", "yahoo", "db"),
+    )
+    schwab_client_id: str = os.getenv("SCHWAB_CLIENT_ID", "")
+    schwab_client_secret: str = os.getenv("SCHWAB_CLIENT_SECRET", "")
+    schwab_redirect_uri: str = os.getenv("SCHWAB_REDIRECT_URI", "")
+    schwab_account_id: str = os.getenv("SCHWAB_ACCOUNT_ID", "")
+    schwab_refresh_token: str = os.getenv("SCHWAB_REFRESH_TOKEN", "")
+
     # Scanner feature flags; all additive and safe to tweak at runtime.
     scan_max_concurrency: int = int(os.getenv("SCAN_MAX_CONCURRENCY", "8"))
     scan_rps: float = float(os.getenv("SCAN_RPS", "0"))
@@ -84,6 +96,8 @@ settings.alert_channel = settings.alert_channel or "Email"
 settings.alert_outcomes = (settings.alert_outcomes or "hit").lower()
 setattr(settings, "ALERT_CHANNEL", settings.alert_channel)
 setattr(settings, "ALERT_OUTCOMES", settings.alert_outcomes)
+settings.data_provider = settings.data_provider or "schwab"
+setattr(settings, "DATA_PROVIDER", settings.data_provider)
 mode_value = (getattr(settings, "forward_recency_mode", "off") or "off").lower()
 if mode_value not in {"off", "exp"}:
     mode_value = "off"
@@ -97,3 +111,19 @@ if half_life_value <= 0:
     half_life_value = 30.0
 settings.forward_recency_halflife_days = half_life_value
 setattr(settings, "FORWARD_RECENCY_HALFLIFE_DAYS", half_life_value)
+
+if settings.data_provider.lower() == "schwab":
+    required = {
+        "SCHWAB_CLIENT_ID": settings.schwab_client_id,
+        "SCHWAB_CLIENT_SECRET": settings.schwab_client_secret,
+        "SCHWAB_REDIRECT_URI": settings.schwab_redirect_uri,
+        "SCHWAB_ACCOUNT_ID": settings.schwab_account_id,
+        "SCHWAB_REFRESH_TOKEN": settings.schwab_refresh_token,
+    }
+    missing = sorted(name for name, value in required.items() if not value)
+    if missing:
+        joined = ", ".join(missing)
+        raise RuntimeError(
+            "Missing required Schwab configuration: "
+            f"{joined}. Set the environment variables or change DATA_PROVIDER."
+        )

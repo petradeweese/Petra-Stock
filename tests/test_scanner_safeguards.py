@@ -13,7 +13,7 @@ os.environ["SCAN_EXECUTOR_MODE"] = "thread"
 import db
 import routes
 import scheduler
-from services import market_data, polygon_client, price_store, http_client
+from services import market_data, data_provider, price_store, http_client
 
 
 def test_no_gap_short_circuit(monkeypatch):
@@ -41,18 +41,24 @@ def test_no_gap_short_circuit(monkeypatch):
 def test_gap_fill_inside_event_loop(monkeypatch):
     start = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
     end = start + dt.timedelta(minutes=15)
-    monkeypatch.setattr(polygon_client, "_api_key", lambda: "key")
-
-    async def fake_fetch_single(symbol, s, e, m, t):
-        return pd.DataFrame(
-            {"Open": [1], "High": [1], "Low": [1], "Close": [1], "Volume": [1]},
+    async def fake_fetch_single(symbol, s, e, *, interval, timeout_ctx=None):
+        df = pd.DataFrame(
+            {
+                "Open": [1],
+                "High": [1],
+                "Low": [1],
+                "Close": [1],
+                "Adj Close": [1],
+                "Volume": [1],
+            },
             index=[start],
         )
+        return df, "schwab"
 
-    monkeypatch.setattr(polygon_client, "_fetch_single", fake_fetch_single)
+    monkeypatch.setattr(data_provider, "_fetch_single", fake_fetch_single)
 
     async def main():
-        data = await polygon_client.fetch_polygon_prices_async(["AAA"], "15m", start, end)
+        data = await data_provider.fetch_bars_async(["AAA"], "15m", start, end)
         assert "AAA" in data and not data["AAA"].empty
 
     asyncio.run(main())
@@ -61,15 +67,16 @@ def test_gap_fill_inside_event_loop(monkeypatch):
 def test_empty_provider_response(monkeypatch):
     start = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
     end = start + dt.timedelta(minutes=15)
-    monkeypatch.setattr(polygon_client, "_api_key", lambda: "key")
+    async def fake_fetch_single(symbol, s, e, *, interval, timeout_ctx=None):
+        df = pd.DataFrame(
+            columns=["Open", "High", "Low", "Close", "Adj Close", "Volume"]
+        )
+        return df, "none"
 
-    async def fake_fetch_single(symbol, s, e, m, t):
-        return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
-
-    monkeypatch.setattr(polygon_client, "_fetch_single", fake_fetch_single)
+    monkeypatch.setattr(data_provider, "_fetch_single", fake_fetch_single)
 
     async def main():
-        data = await polygon_client.fetch_polygon_prices_async(["AAA"], "15m", start, end)
+        data = await data_provider.fetch_bars_async(["AAA"], "15m", start, end)
         assert data["AAA"].empty
 
     asyncio.run(main())

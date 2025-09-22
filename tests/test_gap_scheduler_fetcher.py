@@ -1,11 +1,14 @@
 import asyncio
 import datetime as dt
 import pandas as pd
+import asyncio
+
+import pandas as pd
 import pytest
 
 import db
 import scheduler
-from services import polygon_client
+from services import data_provider
 from services.price_store import detect_gaps, get_prices_from_db
 
 
@@ -21,8 +24,8 @@ async def run_job(monkeypatch, tmp_path, df_return, capture=None):
             capture["start"] = s
             capture["end"] = e
         return {symbols[0]: df_return}
-    monkeypatch.setattr(polygon_client, "fetch_polygon_prices_async", fake_fetch)
-    monkeypatch.setattr(scheduler, "fetch_polygon_prices_async", fake_fetch)
+    monkeypatch.setattr(data_provider, "fetch_bars_async", fake_fetch)
+    monkeypatch.setattr(scheduler, "fetch_bars_async", fake_fetch)
     scheduler.queue_gap_fill("AAA", start, end, "15m")
     key, job = scheduler.work_queue.queue.get_nowait()
     try:

@@ -120,8 +120,12 @@ def get_prices_from_db(
             )
             df["ts"] = pd.to_datetime(df["ts"], utc=True)
             df = df.set_index("ts")
+            df["Adj Close"] = df["Close"]
+            df = df[["Open", "High", "Low", "Close", "Adj Close", "Volume"]]
         else:
-            df = pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
+            df = pd.DataFrame(
+                columns=["Open", "High", "Low", "Close", "Adj Close", "Volume"]
+            )
         _CACHE[key] = (time.monotonic() + CACHE_TTL, df)
         results[sym] = df
     if close_conn and conn is not None:

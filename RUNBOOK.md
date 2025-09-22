@@ -1,14 +1,15 @@
 # Market Data Backfill and ETL Runbook
 
 ## Backfill
-- `python scripts/backfill_polygon.py SYMBOLS.txt`
+- `python scripts/backfill_data.py SYMBOLS.txt`
 - Progress is checkpointed to `backfill_checkpoint.json` so reruns resume.
 - Use `--dry-run` to estimate time/requests without inserting.
 - To re-ingest a symbol/day, remove rows from `bars` and rerun with `--symbol` or `--start`/`--end`.
 
-The backfill and nightly jobs honor the Polygon rate limit specified via
-`POLY_RPS` and `POLY_BURST` (default 0.08 rps and burst 1 – 5 requests/minute).
-Adjust these env vars if your plan changes.
+The backfill and nightly jobs use the Schwab data provider. Ensure
+`SCHWAB_CLIENT_ID`, `SCHWAB_CLIENT_SECRET`, `SCHWAB_REDIRECT_URI`,
+`SCHWAB_ACCOUNT_ID` and `SCHWAB_REFRESH_TOKEN` are configured and rotate them
+as needed.
 
 ## Nightly ETL
 - `python scripts/nightly_etl.py`
@@ -16,13 +17,14 @@ Adjust these env vars if your plan changes.
 
 ## Gap Fill
 - Use `services.price_store.detect_gaps` to identify missing bars.
-- Fetch via `polygon_client.fetch_polygon_prices` and `upsert_bars` to heal.
+- Fetch via `services.data_provider.fetch_bars` and `upsert_bars` to heal.
 
 ## Rotate API Key
-- Update `POLYGON_API_KEY` in environment or `.env` and restart processes.
+- Rotate Schwab OAuth credentials (client ID/secret and refresh token) and
+  update the corresponding environment variables before restarting processes.
 
 ## Rollback Provider
-- Set `provider` to `yahoo` or `db` in config to disable Polygon.
+- Set `provider` to `yahoo` or `db` in config to disable Schwab usage.
 
 ## Favorites alerts
 - Alerts only fire when the scan row contains an entry/detection event; stop or

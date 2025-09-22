@@ -1,4 +1,4 @@
-"""Nightly ETL job to keep the local DB in sync with Polygon.
+"""Nightly ETL job to keep the local DB in sync with Schwab data.
 
 The job sleeps until 8:15pm US/Eastern each day, then fetches the last three
 days of 15-minute bars for the configured symbols and upserts them into the
@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from services import polygon_client
+from services.data_provider import fetch_bars
 from services.price_store import upsert_bars
 
 logging.basicConfig(level=logging.INFO)
@@ -29,7 +29,7 @@ def run_once(symbols: list[str]) -> None:
     start = end - dt.timedelta(days=3)
     for sym in symbols:
         t0 = time.monotonic()
-        df = polygon_client.fetch_polygon_prices([sym], "15m", start, end)[sym]
+        df = fetch_bars([sym], "15m", start, end)[sym]
         rows = upsert_bars(sym, df, "15m")
         logger.info(
             "nightly symbol=%s rows=%d duration=%.2fs",

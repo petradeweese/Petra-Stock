@@ -2,21 +2,21 @@ import datetime as dt
 
 import pandas as pd
 
-from services import polygon_client
+from services import data_provider
 
 
 def test_dst_contiguity(monkeypatch):
-    async def fake_fetch(symbol, start, end, multiplier, timespan):
+    async def fake_fetch(symbol, start, end, *, interval, timeout_ctx=None):
         idx = pd.date_range(start, end, freq="15min", tz="UTC", inclusive="left")
-        return pd.DataFrame({"Open": range(len(idx))}, index=idx)
+        df = pd.DataFrame({"Open": range(len(idx))}, index=idx)
+        return df, "schwab"
 
-    monkeypatch.setattr(polygon_client, "_fetch_single", fake_fetch)
-    monkeypatch.setenv("POLYGON_API_KEY", "x")
+    monkeypatch.setattr(data_provider, "_fetch_single", fake_fetch)
 
     start = dt.datetime(2024, 3, 8, tzinfo=dt.timezone.utc)
     end = dt.datetime(2024, 3, 12, tzinfo=dt.timezone.utc)
 
-    data = polygon_client.fetch_polygon_prices(["AAA"], "15m", start, end)
+    data = data_provider.fetch_bars(["AAA"], "15m", start, end)
     idx = data["AAA"].index
     diffs = idx.to_series().diff().dropna().unique()
     assert len(diffs) == 1

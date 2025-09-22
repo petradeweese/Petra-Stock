@@ -8,7 +8,7 @@ import pytest
 import config
 import scheduler
 from services.http_client import RateLimitTimeoutSoon
-from services import polygon_client
+from services import data_provider
 
 
 def _reset_work_queue() -> None:
@@ -20,13 +20,13 @@ def _reset_work_queue() -> None:
 
 
 def test_single_bucket_request_window(monkeypatch):
-    monkeypatch.setattr(polygon_client.settings, "scan_minimal_near_now", True)
+    monkeypatch.setattr(data_provider.settings, "scan_minimal_near_now", True)
     last_bar = datetime(2024, 1, 2, 14, 30, tzinfo=timezone.utc)
     now = datetime(2024, 1, 2, 14, 40, tzinfo=timezone.utc)
     default_start = last_bar
     default_end = last_bar + timedelta(days=1)
 
-    start, end, mode = polygon_client.compute_request_window(
+    start, end, mode = data_provider.compute_request_window(
         "AAA",
         "15m",
         default_start,
@@ -41,13 +41,13 @@ def test_single_bucket_request_window(monkeypatch):
 
 
 def test_single_bucket_not_used_for_ranges_before_last_bar(monkeypatch):
-    monkeypatch.setattr(polygon_client.settings, "scan_minimal_near_now", True)
+    monkeypatch.setattr(data_provider.settings, "scan_minimal_near_now", True)
     last_bar = datetime(2024, 1, 2, 14, 30, tzinfo=timezone.utc)
     now = datetime(2024, 1, 2, 14, 40, tzinfo=timezone.utc)
     default_start = last_bar - timedelta(minutes=30)
     default_end = last_bar
 
-    start, end, mode = polygon_client.compute_request_window(
+    start, end, mode = data_provider.compute_request_window(
         "AAA",
         "15m",
         default_start,
@@ -81,9 +81,9 @@ def test_fail_fast_requeues_gap_job(monkeypatch):
     )
 
     async def fail_fetch(symbols, interval, s, e, timeout_ctx=None):
-        raise RateLimitTimeoutSoon("api.polygon.io", 12.0, 10.0)
+        raise RateLimitTimeoutSoon("api.schwab.com", 12.0, 10.0)
 
-    monkeypatch.setattr(scheduler, "fetch_polygon_prices_async", fail_fetch)
+    monkeypatch.setattr(scheduler, "fetch_bars_async", fail_fetch)
     monkeypatch.setattr(scheduler.random, "uniform", lambda a, b: 0.0)
 
     async def fast_sleep(_: float) -> None:
@@ -146,7 +146,7 @@ def test_retry_smaller_slice(monkeypatch):
         calls.append((s, e))
         return {symbols[0]: pd.DataFrame()}
 
-    monkeypatch.setattr(scheduler, "fetch_polygon_prices_async", empty_fetch)
+    monkeypatch.setattr(scheduler, "fetch_bars_async", empty_fetch)
 
     scheduler.queue_gap_fill(symbol, start, end, "15m")
     _key, job = scheduler.work_queue.queue.get_nowait()
@@ -170,10 +170,8 @@ def test_retry_smaller_slice(monkeypatch):
 
 def test_default_env_settings(monkeypatch):
     env_keys = [
-        "SCAN_RPS",
-        "POLY_RPS",
-        "SCAN_MAX_CONCURRENCY",
-        "POLY_BURST",
+        "DATA_PROVIDER",
+        "PF_DATA_PROVIDER",
         "HTTP_MAX_CONCURRENCY",
         "JOB_TIMEOUT",
     ]
@@ -181,33 +179,19 @@ def test_default_env_settings(monkeypatch):
         monkeypatch.delenv(key, raising=False)
 
     importlib.reload(config)
-    importlib.reload(polygon_client)
+    importlib.reload(data_provider)
 
     assert config.settings.http_max_concurrency == 1
     assert config.settings.job_timeout == 60
-    assert polygon_client.POLY_RPS == 1.0
-    assert polygon_client.POLY_BURST == 2
+    assert config.settings.data_provider == "schwab"
 
-    monkeypatch.setenv("POLY_RPS", "0.5")
-    monkeypatch.setenv("POLY_BURST", "7")
+    monkeypatch.setenv("DATA_PROVIDER", "yahoo")
     monkeypatch.setenv("HTTP_MAX_CONCURRENCY", "5")
     monkeypatch.setenv("JOB_TIMEOUT", "90")
 
     importlib.reload(config)
-    importlib.reload(polygon_client)
+    importlib.reload(data_provider)
 
     assert config.settings.http_max_concurrency == 5
     assert config.settings.job_timeout == 90
-    assert polygon_client.POLY_RPS == 0.5
-    assert polygon_client.POLY_BURST == 7
-
-    for key in ["POLY_RPS", "POLY_BURST", "HTTP_MAX_CONCURRENCY", "JOB_TIMEOUT"]:
-        monkeypatch.delenv(key, raising=False)
-
-    importlib.reload(config)
-    importlib.reload(polygon_client)
-
-    assert config.settings.http_max_concurrency == 1
-    assert config.settings.job_timeout == 60
-    assert polygon_client.POLY_RPS == 1.0
-    assert polygon_client.POLY_BURST == 2
+    assert config.settings.data_provider == "yahoo"

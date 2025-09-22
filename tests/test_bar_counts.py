@@ -1,44 +1,55 @@
 import datetime as dt
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 import db
-from services import polygon_client
+from services import data_provider
 from services.price_store import detect_gaps, upsert_bars
 
 
-def _make_page(start_ts: pd.Timestamp, count: int) -> dict:
-    times = pd.date_range(start_ts, periods=count, freq="15min")
-    results = [
+def _make_frame(start_ts: pd.Timestamp, count: int) -> pd.DataFrame:
+    times = pd.date_range(start_ts, periods=count, freq="15min", tz="UTC")
+    return pd.DataFrame(
         {
-            "t": int(ts.timestamp() * 1000),
-            "o": 1,
-            "h": 1,
-            "l": 1,
-            "c": 1,
-            "v": 1,
-        }
-        for ts in times
-    ]
-    return {"results": results}
+            "Open": 1,
+            "High": 1,
+            "Low": 1,
+            "Close": 1,
+            "Volume": 1,
+        },
+        index=times,
+    )
 
 
 def test_full_day_bar_count(monkeypatch, tmp_path):
-    monkeypatch.setenv("POLYGON_API_KEY", "test")
     start_ts = pd.Timestamp("2024-01-02 14:30", tz="UTC")
-    page = _make_page(start_ts, 26)
+    frame = _make_frame(start_ts, 26)
 
-    async def fake_get_json(url, headers=None):
-        return page
+    async def fake_history(symbol, start, end, interval, timeout_ctx=None):
+        return frame
 
-    monkeypatch.setattr(polygon_client.http_client, "get_json", fake_get_json)
+    monkeypatch.setattr(
+        data_provider,
+        "schwab_client",
+        SimpleNamespace(
+            get_price_history=fake_history,
+            get_quote=lambda *a, **k: {},
+            last_status=lambda: 200,
+        ),
+    )
+    monkeypatch.setattr(
+        data_provider,
+        "settings",
+        SimpleNamespace(fetch_retry_max=1, fetch_retry_base_ms=1, fetch_retry_cap_ms=1),
+    )
     start = dt.datetime(2024, 1, 2, tzinfo=dt.timezone.utc)
     end = dt.datetime(2024, 1, 3, tzinfo=dt.timezone.utc)
-    data = polygon_client.fetch_polygon_prices(["AAA"], "15m", start, end)
+    data = data_provider.fetch_bars(["AAA"], "15m", start, end)
     df = data["AAA"]
     assert len(df) == 26
 
@@ -51,17 +62,29 @@ def test_full_day_bar_count(monkeypatch, tmp_path):
 
 
 def test_half_day_bar_count(monkeypatch, tmp_path):
-    monkeypatch.setenv("POLYGON_API_KEY", "test")
     start_ts = pd.Timestamp("2024-11-29 14:30", tz="UTC")
-    page = _make_page(start_ts, 13)
+    frame = _make_frame(start_ts, 13)
 
-    async def fake_get_json(url, headers=None):
-        return page
+    async def fake_history(symbol, start, end, interval, timeout_ctx=None):
+        return frame
 
-    monkeypatch.setattr(polygon_client.http_client, "get_json", fake_get_json)
+    monkeypatch.setattr(
+        data_provider,
+        "schwab_client",
+        SimpleNamespace(
+            get_price_history=fake_history,
+            get_quote=lambda *a, **k: {},
+            last_status=lambda: 200,
+        ),
+    )
+    monkeypatch.setattr(
+        data_provider,
+        "settings",
+        SimpleNamespace(fetch_retry_max=1, fetch_retry_base_ms=1, fetch_retry_cap_ms=1),
+    )
     start = dt.datetime(2024, 11, 29, tzinfo=dt.timezone.utc)
     end = dt.datetime(2024, 11, 30, tzinfo=dt.timezone.utc)
-    data = polygon_client.fetch_polygon_prices(["AAA"], "15m", start, end)
+    data = data_provider.fetch_bars(["AAA"], "15m", start, end)
     df = data["AAA"]
     assert len(df) == 13
 

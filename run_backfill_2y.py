@@ -3,9 +3,9 @@ from pathlib import Path
 # Load helpers straight from the script file
 import importlib.util, sys
 
-spec = importlib.util.spec_from_file_location("backfill_polygon", "scripts/backfill_polygon.py")
+spec = importlib.util.spec_from_file_location("backfill_data", "scripts/backfill_data.py")
 mod = importlib.util.module_from_spec(spec)
-sys.modules["backfill_polygon"] = mod
+sys.modules["backfill_data"] = mod
 spec.loader.exec_module(mod)  # gives us mod.backfill and mod.load_symbols
 
 symbols = mod.load_symbols(Path("symbols.txt"))

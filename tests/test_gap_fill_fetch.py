@@ -6,7 +6,7 @@ import pandas as pd
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 import db
-from services import polygon_client
+from services import data_provider
 from services.price_store import clear_cache, detect_gaps, upsert_bars
 
 
@@ -37,8 +37,8 @@ def test_gap_fill_fetch(monkeypatch, tmp_path):
             )
         }
 
-    monkeypatch.setattr(polygon_client, "fetch_polygon_prices", fake_fetch)
-    fetched = polygon_client.fetch_polygon_prices(
+    monkeypatch.setattr(data_provider, "fetch_bars", fake_fetch)
+    fetched = data_provider.fetch_bars(
         ["AAA"],
         "15m",
         start.to_pydatetime(),
