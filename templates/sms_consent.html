@@ -1,0 +1,23 @@
+<!doctype html><html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Petra Stock — SMS Consent</title>
+</head><body>
+<h1>SMS Alerts Opt-In</h1>
+<p>Enable text alerts for trading patterns. Msg & data rates may apply. Max messages vary by settings.
+Reply STOP to cancel, HELP for help.</p>
+
+<form method="post" action="/api/sms/verify/start" style="max-width:480px">
+  <label>Phone number (E.164, e.g., +15551234567)
+    <input required name="phone" type="tel" style="width:100%">
+  </label><br><br>
+  <label><input required type="checkbox" name="consent">
+    I agree to receive SMS alerts from Petra Stock and to the
+    <a href="/terms" target="_blank">Terms</a> and
+    <a href="/privacy" target="_blank">Privacy Policy</a>.
+  </label><br><br>
+  <button type="submit">Send Verification Code</button>
+</form>
+
+<hr>
+<p>Support: <a href="mailto:petrasstockalerts@gmail.com">petrasstockalerts@gmail.com</a></p>
+</body></html>
