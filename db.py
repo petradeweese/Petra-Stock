@@ -297,6 +297,15 @@ SCHEMA = [
     """,
     "CREATE INDEX IF NOT EXISTS idx_sms_delivery_user ON sms_delivery_log(user_id, sent_at);",
     "CREATE INDEX IF NOT EXISTS idx_sms_delivery_phone ON sms_delivery_log(phone_e164, sent_at DESC);",
+    """
+    CREATE TABLE IF NOT EXISTS oauth_tokens (
+        provider TEXT PRIMARY KEY,
+        created_at TEXT NOT NULL,
+        refresh_token TEXT NOT NULL,
+        account_id TEXT
+    );
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_oauth_tokens_created_at ON oauth_tokens(created_at);",
 ]
 
 

@@ -10,6 +10,7 @@ import pandas as pd
 
 from config import settings
 from services import http_client
+from services.oauth_tokens import latest_refresh_token
 
 logger = logging.getLogger(__name__)
 
@@ -64,19 +65,20 @@ class SchwabClient:
     # ------------------------------------------------------------------
     # Token handling
     async def _refresh_access_token(self) -> _Token:
+        refresh_token = self._current_refresh_token()
         if not all(
             [
                 self._client_id,
                 self._client_secret,
                 self._redirect_uri,
-                self._refresh_token,
+                refresh_token,
             ]
         ):
             raise SchwabAuthError("Missing Schwab OAuth configuration")
 
         payload = {
             "grant_type": "refresh_token",
-            "refresh_token": self._refresh_token,
+            "refresh_token": refresh_token,
             "client_id": self._client_id,
             "client_secret": self._client_secret,
             "redirect_uri": self._redirect_uri,
@@ -113,6 +115,17 @@ class SchwabClient:
         )
         return _Token(access_token=token, expires_at=expires_at)
 
+    def _current_refresh_token(self) -> str:
+        if self._refresh_token:
+            return self._refresh_token
+        if settings.schwab_refresh_token:
+            self._refresh_token = settings.schwab_refresh_token
+            return self._refresh_token
+        token = latest_refresh_token("schwab")
+        if token:
+            self._refresh_token = token
+        return self._refresh_token
+
     async def _ensure_token(self) -> str:
         async with self._token_lock:
             if self._token and self._token.expires_at > dt.datetime.now(dt.timezone.utc):
@@ -125,6 +138,10 @@ class SchwabClient:
 
     def last_status(self) -> Optional[int]:
         return self._last_status
+
+    def set_refresh_token(self, refresh_token: str) -> None:
+        self._refresh_token = refresh_token or ""
+        self.clear_cached_token()
 
     # ------------------------------------------------------------------
     # Helpers
@@ -365,3 +382,10 @@ def clear_cached_token() -> None:
 
 def last_status() -> Optional[int]:
     return _client.last_status()
+
+
+def update_refresh_token(refresh_token: str) -> None:
+    value = refresh_token or ""
+    settings.schwab_refresh_token = value
+    setattr(settings, "SCHWAB_REFRESH_TOKEN", value)
+    _client.set_refresh_token(value)
