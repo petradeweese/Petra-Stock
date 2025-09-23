@@ -1,7 +1,9 @@
 # ruff: noqa: E501
 import asyncio
 import atexit
+import base64
 import csv
+import hashlib
 import html
 import io
 import json
@@ -9,17 +11,19 @@ import logging
 import math
 import os
 import re
+import secrets
 import sqlite3
 import statistics
 import time
+import urllib.parse
 from concurrent.futures import as_completed
 from datetime import datetime, timedelta, timezone
-from threading import Thread
+from threading import Lock, Thread
 from typing import Any, Callable, Dict, List, Optional
 from uuid import uuid4
 
 import pandas as pd
-from fastapi import APIRouter, Body, Depends, Form, Query, Request, Response
+from fastapi import APIRouter, Body, Depends, Form, HTTPException, Query, Request, Response
 from fastapi.responses import (
     HTMLResponse,
     JSONResponse,
@@ -40,7 +44,7 @@ from db import (
 from indices import SP100, TOP150, TOP250
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 from scanner import compute_scan_for_ticker
-from services import executor, favorites_alerts, price_store, sms_consent, twilio_client
+from services import executor, favorites_alerts, http_client, price_store, sms_consent, twilio_client
 from services.favorites import canonical_direction, ensure_favorite_directions
 from services.notify import send_email_smtp
 from services.scanner_params import coerce_scan_params
@@ -51,6 +55,7 @@ from services.market_data import (
     get_prices,
     window_from_lookback,
 )
+from services.oauth_tokens import store_refresh_token
 from services.forward_runs import (
     forward_rule_hash,
     get_forward_history_for_cursor,
@@ -58,6 +63,7 @@ from services.forward_runs import (
     log_forward_exit,
 )
 from services.forward_summary import get_cached_forward_summary
+from services.schwab_client import TOKEN_URL, update_refresh_token
 from utils import TZ, now_et
 
 from .archive import _format_rule_summary as _format_rule_summary
@@ -71,12 +77,148 @@ register_template_helpers(templates)
 logger = logging.getLogger(__name__)
 SCAN_BATCH_WRITES = os.getenv("SCAN_BATCH_WRITES", "1") not in {"0", "false", "no"}
 
+SCHWAB_AUTH_URL = os.getenv(
+    "SCHWAB_AUTH_URL", "https://api.schwab.com/oauth2/v1/authorize"
+)
+_STATE_TTL_SECONDS = 600
+_SCHWAB_STATES: Dict[str, tuple[str, float]] = {}
+_SCHWAB_STATE_LOCK = Lock()
+
 _EMPTY_HEATMAP: Dict[str, Any] = {"index": [], "columns": [], "values": [], "meta": {}}
 _LATEST_HEATMAP: Dict[str, Any] = dict(_EMPTY_HEATMAP)
 
 _SMS_CONSENT_TEXT = (
     "I agree to receive automated Petra Stock SMS alerts. Msg & data rates may apply."
 )
+
+
+@router.get("/schwab/login")
+def schwab_login() -> Response:
+    client_id = settings.schwab_client_id
+    redirect_uri = settings.schwab_redirect_uri
+    if not client_id or not redirect_uri:
+        raise HTTPException(status_code=500, detail="Schwab integration not configured")
+
+    state = secrets.token_urlsafe(16)
+    verifier = _generate_code_verifier()
+    _remember_state(state, verifier)
+    challenge = _code_challenge(verifier)
+
+    params = {
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "state": state,
+        "code_challenge": challenge,
+        "code_challenge_method": "S256",
+    }
+    authorize_url = f"{SCHWAB_AUTH_URL}?{urllib.parse.urlencode(params, quote_via=urllib.parse.quote)}"
+    logger.info("schwab_oauth_redirect")
+    return RedirectResponse(authorize_url, status_code=307)
+
+
+@router.get("/callback", response_class=HTMLResponse)
+async def schwab_callback(
+    state: str | None = Query(default=None),
+    code: str | None = Query(default=None),
+    error: str | None = Query(default=None),
+    db=Depends(get_db),
+):
+    if error:
+        logger.warning("schwab_oauth_error error=%s", error)
+        raise HTTPException(status_code=400, detail="Authorization failed")
+    if not state or not code:
+        raise HTTPException(status_code=400, detail="Missing state or code")
+
+    verifier = _consume_state(state)
+    if not verifier:
+        raise HTTPException(status_code=400, detail="Invalid state")
+
+    payload = {
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": settings.schwab_redirect_uri,
+        "client_id": settings.schwab_client_id,
+        "client_secret": settings.schwab_client_secret,
+        "code_verifier": verifier,
+    }
+    headers = {"Content-Type": "application/x-www-form-urlencoded"}
+
+    try:
+        resp = await http_client.request("POST", TOKEN_URL, data=payload, headers=headers)
+    except Exception:
+        logger.exception("schwab_token_exchange_exception")
+        raise HTTPException(status_code=400, detail="Token exchange failed")
+
+    if resp.status_code >= 400:
+        logger.warning("schwab_token_exchange_error status=%s", resp.status_code)
+        raise HTTPException(status_code=400, detail="Token exchange failed")
+
+    try:
+        data = resp.json() if resp.content else {}
+    except ValueError:
+        data = {}
+
+    refresh_token = data.get("refresh_token")
+    if not refresh_token:
+        logger.warning("schwab_token_exchange_missing_refresh")
+        raise HTTPException(status_code=400, detail="Token exchange failed")
+
+    store_refresh_token(
+        "schwab",
+        str(refresh_token),
+        account_id=(settings.schwab_account_id or None),
+        db_cursor=db,
+    )
+    update_refresh_token(str(refresh_token))
+    logger.info("schwab_oauth_success")
+
+    html = """<!DOCTYPE html>\n<html lang=\"en\">\n  <head>\n    <meta charset=\"utf-8\" />\n    <title>Schwab Linked</title>\n  </head>\n  <body>\n    <p>Schwab linked. You may close this window.</p>\n  </body>\n</html>\n"""
+    return HTMLResponse(content=html, status_code=200)
+
+
+def _cleanup_schwab_states(now: float | None = None) -> None:
+    current = now or time.time()
+    expired = [
+        key
+        for key, (_, ts) in list(_SCHWAB_STATES.items())
+        if current - ts > _STATE_TTL_SECONDS
+    ]
+    for key in expired:
+        _SCHWAB_STATES.pop(key, None)
+
+
+def _generate_code_verifier() -> str:
+    while True:
+        verifier = secrets.token_urlsafe(64).replace("=", "")
+        if len(verifier) < 43:
+            verifier = f"{verifier}{secrets.token_urlsafe(43)}"
+        if len(verifier) >= 43:
+            return verifier[:128]
+
+
+def _code_challenge(verifier: str) -> str:
+    digest = hashlib.sha256(verifier.encode("utf-8")).digest()
+    return base64.urlsafe_b64encode(digest).decode("utf-8").rstrip("=")
+
+
+def _remember_state(state: str, verifier: str) -> None:
+    now = time.time()
+    with _SCHWAB_STATE_LOCK:
+        _cleanup_schwab_states(now)
+        _SCHWAB_STATES[state] = (verifier, now)
+
+
+def _consume_state(state: str) -> str:
+    now = time.time()
+    with _SCHWAB_STATE_LOCK:
+        entry = _SCHWAB_STATES.pop(state, None)
+    if not entry:
+        return ""
+    verifier, created_at = entry
+    if now - created_at > _STATE_TTL_SECONDS:
+        return ""
+    return verifier
 
 
 def _request_user_id(request: Request | None) -> str:

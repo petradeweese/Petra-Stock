@@ -118,7 +118,6 @@ if settings.data_provider.lower() == "schwab":
         "SCHWAB_CLIENT_SECRET": settings.schwab_client_secret,
         "SCHWAB_REDIRECT_URI": settings.schwab_redirect_uri,
         "SCHWAB_ACCOUNT_ID": settings.schwab_account_id,
-        "SCHWAB_REFRESH_TOKEN": settings.schwab_refresh_token,
     }
     missing = sorted(name for name, value in required.items() if not value)
     if missing:
@@ -127,3 +126,8 @@ if settings.data_provider.lower() == "schwab":
             "Missing required Schwab configuration: "
             f"{joined}. Set the environment variables or change DATA_PROVIDER."
         )
+
+    if not settings.schwab_refresh_token:
+        # Allow the application to continue without a refresh token so the
+        # interactive OAuth flow can populate it later.
+        setattr(settings, "SCHWAB_REFRESH_TOKEN", "")
