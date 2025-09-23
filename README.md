@@ -65,14 +65,17 @@ York Stock Exchange is open.
 
 Copy `.env.example` to `.env` and adjust:
 
-- `POLYGON_API_KEY` – API key for Polygon.io
+- `SCHWAB_CLIENT_ID` – Schwab application client ID
+- `SCHWAB_CLIENT_SECRET` – Schwab application client secret
+- `SCHWAB_REDIRECT_URI` – registered redirect URI for the Schwab app
+- `SCHWAB_ACCOUNT_ID` – (optional) account ID to scope requests
+- `SCHWAB_REFRESH_TOKEN` – long-lived refresh token used to mint access tokens
 - `DATABASE_URL` – database connection string
-- `POLY_RPS` / `POLY_BURST` – Polygon rate limit settings
+- `SCHWAB_INCLUDE_PREPOST` – include pre/post market bars when true
 - `DB_CACHE_TTL` – in-process DB cache TTL
-- `POLYGON_INCLUDE_PREPOST` – include pre/post market bars when true
 - `CLAMP_MARKET_CLOSED` – clamp backfills to last market close (default true)
 - `BACKFILL_CHUNK_DAYS` – days per backfill slice (default 1)
-- `FETCH_RETRY_MAX` – max retry attempts for Polygon fetches (default 4)
+- `FETCH_RETRY_MAX` – max retry attempts for Schwab fetches (default 4)
 - `FETCH_RETRY_BASE_MS` – base backoff in milliseconds (default 300)
 - `FETCH_RETRY_CAP_MS` – maximum backoff in milliseconds (default 5000)
 - `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` / `TWILIO_FROM_NUMBER` – Twilio
@@ -80,12 +83,16 @@ Copy `.env.example` to `.env` and adjust:
 - `ALERT_SMS_TO` – comma-separated list of phone numbers that should receive
   MMS alerts
 
+The Schwab-backed provider automatically falls back to yfinance if Schwab
+returns an error, times out, or yields no data. Logs include the provider used
+for each fetch to simplify debugging.
+
 ## Backfill and ETL
 
 Populate the database using the backfill script which resumes from checkpoints:
 
 ```bash
-python scripts/backfill_polygon.py symbols.txt
+python scripts/backfill_data.py symbols.txt
 ```
 
 Nightly ETL can keep data fresh:
@@ -94,18 +101,26 @@ Nightly ETL can keep data fresh:
 python scripts/nightly_etl.py symbols.txt
 ```
 
+Run a quick end-to-end smoke test (with optional fallback simulation):
+
+```bash
+python scripts/smoke_data.py [--force-fallback]
+```
+
 ## Gap Fill
 
 Run the nightly ETL to heal recent gaps or fetch missing bars manually using
-`detect_gaps` and `fetch_polygon_prices`.
+`detect_gaps` and `services.data_provider.fetch_bars`.
 
 ## Rotate API Key
 
-Update `POLYGON_API_KEY` in your environment or `.env` file and restart the process.
+Update the Schwab OAuth credentials (`SCHWAB_CLIENT_ID`, `SCHWAB_CLIENT_SECRET`,
+`SCHWAB_REDIRECT_URI`, `SCHWAB_ACCOUNT_ID`, and `SCHWAB_REFRESH_TOKEN`) in your
+environment or `.env` file and restart the process.
 
 ## Changelog
 
-- Add market-closed clamp, chunked backfill and bounded Polygon retries.
+- Add market-closed clamp, chunked backfill and bounded provider retries.
 
 ## Deployment Notes
 

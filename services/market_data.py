@@ -1,15 +1,15 @@
 import contextvars
 import datetime as dt
-import os
 from contextlib import contextmanager
 from typing import Dict, List, Optional
 
 import pandas as pd
 
 from prometheus_client import Histogram
+from config import settings
 from services.data_fetcher import fetch_prices as yahoo_fetch
 
-from .polygon_client import fetch_polygon_prices
+from .data_provider import fetch_bars
 from . import price_store
 from .price_store import detect_gaps, get_prices_from_db
 from utils import TZ, OPEN_TIME, CLOSE_TIME, market_is_open
@@ -26,7 +26,7 @@ coverage_metric = Histogram(
     "data_coverage_ratio", "Ratio of available bars to expected"
 )
 
-DEFAULT_PROVIDER = os.getenv("DATA_PROVIDER", os.getenv("PF_DATA_PROVIDER", "db"))
+DEFAULT_PROVIDER = settings.data_provider or "db"
 
 _NOW_OVERRIDE: contextvars.ContextVar[Optional[dt.datetime]] = contextvars.ContextVar(
     "market_data_now_override", default=None
@@ -147,8 +147,8 @@ def get_prices(
         if provider == "yahoo":
             lookback_years = (end - start).days / 365.0
             return yahoo_fetch(symbols, interval, lookback_years)
-        if provider == "polygon":
-            return fetch_polygon_prices(symbols, interval, start, end)
+        if provider == "schwab":
+            return fetch_bars(symbols, interval, start, end)
     conn = None
     try:
         conn = price_store._open_conn() if hasattr(price_store, "_open_conn") else None

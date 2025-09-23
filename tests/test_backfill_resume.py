@@ -6,12 +6,11 @@ import pandas as pd
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
-import scripts.backfill_polygon as backfill
-from services import http_client, polygon_client
+import scripts.backfill_data as backfill
+from services import http_client
 
 
 def test_backfill_resume(monkeypatch, tmp_path):
-    monkeypatch.setenv("POLYGON_API_KEY", "test")
     # symbols list
     symbols = ["AAA", "BBB", "CCC"]
     # checkpoint after AAA
@@ -19,11 +18,11 @@ def test_backfill_resume(monkeypatch, tmp_path):
     chk.write_text(json.dumps({"index": 1}))
     monkeypatch.setattr(backfill, "CHECKPOINT", chk)
 
-    # stub polygon fetch
+    # stub provider fetch
     async def fake_fetch(symbols, interval, start, end, **kwargs):
         return {symbols[0]: pd.DataFrame()}
 
-    monkeypatch.setattr(polygon_client, "fetch_polygon_prices_async", fake_fetch)
+    monkeypatch.setattr(backfill, "fetch_bars_async", fake_fetch)
 
     called = []
 

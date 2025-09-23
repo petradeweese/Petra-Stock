@@ -19,6 +19,7 @@ def test_gap_fill_enqueued(monkeypatch):
     start = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
     end = start + dt.timedelta(days=1)
     clear_cache()
+    monkeypatch.setattr(market_data, "DEFAULT_PROVIDER", "db")
     market_data.get_prices(["AAPL"], "15m", start, end)
     assert "gap:AAPL" in called.get("key", "")
 

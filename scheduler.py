@@ -15,7 +15,7 @@ from prometheus_client import Counter  # type: ignore
 from routes import _update_forward_tests  # type: ignore
 from scanner import preload_prices  # type: ignore
 from services.http_client import RateLimitTimeoutSoon
-from services.polygon_client import compute_request_window, fetch_polygon_prices_async
+from services.data_provider import compute_request_window, fetch_bars_async
 from services.price_store import covers, get_coverage, missing_ranges, upsert_bars
 from services import favorites_alerts
 from utils import clamp_market_closed, market_is_open as util_market_is_open
@@ -183,7 +183,7 @@ def queue_gap_fill(symbol: str, start, end, interval: str) -> None:
 
                     call_start = time.monotonic()
                     try:
-                        df_map = await fetch_polygon_prices_async(
+                        df_map = await fetch_bars_async(
                             [symbol],
                             interval,
                             window_start,

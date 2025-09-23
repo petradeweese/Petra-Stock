@@ -7,12 +7,11 @@ import pandas as pd
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
-import scripts.backfill_polygon as backfill
-from services import http_client, polygon_client
+import scripts.backfill_data as backfill
+from services import http_client
 
 
 def test_backfill_two_symbols(monkeypatch, caplog):
-    monkeypatch.setenv("POLYGON_API_KEY", "test")
 
     df = pd.DataFrame(
         {
@@ -27,11 +26,11 @@ def test_backfill_two_symbols(monkeypatch, caplog):
 
     async def fake_fetch(symbols, interval, start, end, **kwargs):
         sym = symbols[0]
-        logger = logging.getLogger("services.polygon_client")
-        logger.info("polygon_fetch symbol=%s pages=1 rows=1 duration=0.00", sym)
+        logger = logging.getLogger("services.data_provider")
+        logger.info("schwab_fetch symbol=%s interval=%s rows=1 duration=0.00", sym, interval)
         return {sym: df}
 
-    monkeypatch.setattr(polygon_client, "fetch_polygon_prices_async", fake_fetch)
+    monkeypatch.setattr(backfill, "fetch_bars_async", fake_fetch)
 
     saved = {}
 

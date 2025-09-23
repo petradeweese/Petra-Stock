@@ -1,12 +1,13 @@
-"""One-time backfill of 15m bars from Polygon and store into the DB.
+"""One-time backfill of 15m bars from Schwab and store into the DB.
 
 Usage:
-    python scripts/backfill_polygon.py symbols.txt [--dry-run]
-    python scripts/backfill_polygon.py --test [--dry-run]
+    python scripts/backfill_data.py symbols.txt [--dry-run]
+    python scripts/backfill_data.py --test [--dry-run]
 
 ``symbols.txt`` should contain one symbol per line.  The script fetches a full
-year of 15-minute bars for each symbol and upserts them into the database.  A
-per-symbol progress log is emitted including row counts and duration.
+year of 15-minute bars for each symbol using the Schwab data provider (with a
+yfinance fallback) and upserts them into the database.  A per-symbol progress
+log is emitted including row counts and duration.
 
 ``--test`` performs a quick sanity check by fetching one day of 15-minute bars
 for SPY and logging how many rows were returned and saved.
@@ -21,7 +22,8 @@ import sys
 import time
 from pathlib import Path
 
-from services import http_client, polygon_client
+from services import http_client
+from services.data_provider import fetch_bars_async
 from services.price_store import upsert_bars
 
 logging.basicConfig(level=logging.INFO)
@@ -63,9 +65,7 @@ async def _backfill(
     start_idx = load_checkpoint() if use_checkpoint else 0
     for i, sym in enumerate(symbols[start_idx:], start_idx):
         t0 = time.monotonic()
-        data_map = await polygon_client.fetch_polygon_prices_async(
-            [sym], "15m", start, end
-        )
+        data_map = await fetch_bars_async([sym], "15m", start, end)
         data = data_map[sym]
         bars = len(data)
         rows = 0
@@ -103,7 +103,9 @@ def backfill(
 
 
 def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description="Backfill 15m bars from Polygon")
+    parser = argparse.ArgumentParser(
+        description="Backfill 15m bars from Schwab (with yfinance fallback)"
+    )
     parser.add_argument(
         "symbols", nargs="?", help="file containing symbols, one per line"
     )

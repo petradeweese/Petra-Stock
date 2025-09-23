@@ -7,13 +7,11 @@ import pandas as pd
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
-import scripts.backfill_polygon as backfill
-from services import http_client, polygon_client
+import scripts.backfill_data as backfill
+from services import http_client
 
 
 def test_quick_test_mode(monkeypatch, caplog):
-    monkeypatch.setenv("POLYGON_API_KEY", "test")
-
     df = pd.DataFrame(
         {
             "Open": [1, 2],
@@ -31,7 +29,7 @@ def test_quick_test_mode(monkeypatch, caplog):
         assert end - start <= dt.timedelta(days=1, minutes=1)
         return {"SPY": df}
 
-    monkeypatch.setattr(polygon_client, "fetch_polygon_prices_async", fake_fetch)
+    monkeypatch.setattr(backfill, "fetch_bars_async", fake_fetch)
 
     saved = {}
 
@@ -43,7 +41,7 @@ def test_quick_test_mode(monkeypatch, caplog):
     monkeypatch.setattr(backfill, "upsert_bars", fake_upsert)
 
     caplog.set_level(logging.INFO)
-    monkeypatch.setattr(sys, "argv", ["backfill_polygon.py", "--test"])
+    monkeypatch.setattr(sys, "argv", ["backfill_data.py", "--test"])
     client = http_client.get_client()
     backfill.main()
     assert client.is_closed

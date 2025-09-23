@@ -1,2 +1,0 @@
-usage: backfill_polygon.py [-h] [--dry-run] [--test] [symbols]
-backfill_polygon.py: error: unrecognized arguments: backfill.log
