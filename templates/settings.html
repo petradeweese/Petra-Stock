@@ -183,7 +183,13 @@
       </p>
       <label class="checkbox" style="gap:0.5rem; align-items:flex-start;">
         <input type="checkbox" id="sms-consent-checkbox" />
-        <span id="sms-consent-copy" data-consent="{{ sms_consent_text }}">{{ sms_consent_text }}</span>
+        <span id="sms-consent-copy" data-consent="{{ sms_consent_text }}">
+          I agree to receive automated Petra Stock SMS alerts. Msg &amp; data rates may apply.
+          By checking this box, I agree to the
+          <a href="/terms" target="_blank" rel="noopener">Terms</a>
+          and <a href="/privacy" target="_blank" rel="noopener">Privacy Policy</a>.
+          <span class="note" style="display:block; margin-top:0.5rem;">Reply STOP to opt out, HELP for help.</span>
+        </span>
       </label>
       <div class="sms-grid">
         <div>
@@ -194,6 +200,7 @@
           <button id="sms-verify-btn" type="button">Verify &amp; Opt-in</button>
         </div>
       </div>
+      <p id="sms-verify-error" class="note status-error" hidden></p>
       <div class="sms-history">
         <strong>History</strong>
         <ul id="sms-history-list">
@@ -294,6 +301,9 @@
     const smsCodeCancel = document.getElementById('sms-code-cancel');
     const consentCopyEl = document.getElementById('sms-consent-copy');
     const consentCopy = consentCopyEl?.dataset?.consent || '';
+    const smsErrorEl = document.getElementById('sms-verify-error');
+    const phoneRegex = /^\+\d{10,15}$/;
+    let smsStartPending = false;
     let pendingPhone = null;
 
     function renderSmsHistory() {
@@ -360,6 +370,35 @@
       smsPhoneInput.value = smsState.phone;
     }
 
+    const setSmsError = (message) => {
+      if (!smsErrorEl) return;
+      if (message) {
+        smsErrorEl.textContent = message;
+        smsErrorEl.removeAttribute('hidden');
+      } else {
+        smsErrorEl.textContent = '';
+        smsErrorEl.setAttribute('hidden', '');
+      }
+    };
+
+    const updateSmsButtonState = () => {
+      if (!smsVerifyBtn) return;
+      const phoneValue = (smsPhoneInput?.value || '').trim();
+      const consentChecked = Boolean(smsCheckbox?.checked);
+      const phoneValid = phoneRegex.test(phoneValue);
+      smsVerifyBtn.disabled = smsStartPending || !consentChecked || !phoneValid;
+    };
+
+    smsCheckbox?.addEventListener('change', () => {
+      setSmsError('');
+      updateSmsButtonState();
+    });
+
+    smsPhoneInput?.addEventListener('input', () => {
+      setSmsError('');
+      updateSmsButtonState();
+    });
+
     sendBtn?.addEventListener('click', async () => {
       const symbol = (symbolInput?.value || '').trim().toUpperCase();
       if (!symbol) {
@@ -391,38 +430,50 @@
     });
 
     smsVerifyBtn?.addEventListener('click', async () => {
-      if (!smsCheckbox?.checked) {
-        showToast('You must agree to the SMS consent before opting in.', false);
-        return;
-      }
       const phone = (smsPhoneInput?.value || '').trim();
-      if (!phone) {
-        showToast('Enter a phone number to verify.', false);
+      setSmsError('');
+      if (!smsCheckbox?.checked || !phoneRegex.test(phone)) {
+        updateSmsButtonState();
         return;
       }
-      smsVerifyBtn.disabled = true;
+      smsStartPending = true;
+      updateSmsButtonState();
       try {
         const res = await fetch('/api/sms/verify/start', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ phone, consent_text: consentCopy, method: 'settings' }),
+          body: JSON.stringify({
+            phone,
+            consent: true,
+            consent_text: consentCopy,
+            method: 'settings',
+          }),
         });
-        const data = await res.json();
+        const data = await res.json().catch(() => ({}));
         if (!res.ok || !data?.ok) {
-          throw new Error(data?.error || 'Failed to start verification');
+          const message = data?.error || 'Failed to start verification';
+          if (res.status >= 400 && res.status < 500) {
+            setSmsError(message);
+            return;
+          }
+          throw new Error(message);
         }
-        pendingPhone = data.phone || phone;
+        pendingPhone = phone;
         if (smsPhoneInput) {
           smsPhoneInput.value = pendingPhone;
         }
         openSmsModal();
-        showToast('Verification code sent. Check your phone.');
+        showToast('Code sent. Check your texts.');
       } catch (err) {
-        showToast(err?.message || 'Failed to start verification', false);
+        const message = err?.message || 'Failed to start verification';
+        showToast(message, false);
       } finally {
-        smsVerifyBtn.disabled = false;
+        smsStartPending = false;
+        updateSmsButtonState();
       }
     });
+
+    updateSmsButtonState();
 
     smsCodeSubmit?.addEventListener('click', async () => {
       const code = (smsCodeInput?.value || '').trim();

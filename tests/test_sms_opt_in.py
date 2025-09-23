@@ -28,13 +28,17 @@ def test_sms_verify_flow_records_consent(tmp_path, monkeypatch):
 
     res = client.post(
         "/api/sms/verify/start",
-        json={"phone": "(800) 555-1212", "consent_text": "I agree."},
+        json={
+            "phone": "(800) 555-1212",
+            "consent": True,
+            "consent_text": "I agree.",
+        },
         headers={"user-agent": "pytest"},
     )
     assert res.status_code == 200
     data = res.json()
     assert data["ok"]
-    assert data["phone"] == "+18005551212"
+    assert data["sent"] is True
 
     res = client.post(
         "/api/sms/verify/check",
@@ -76,7 +80,7 @@ def test_sms_reverify_creates_history(tmp_path, monkeypatch):
 
     client.post(
         "/api/sms/verify/start",
-        json={"phone": "+1 (800) 555-1212", "consent_text": "Consent"},
+        json={"phone": "+1 (800) 555-1212", "consent": True, "consent_text": "Consent"},
     )
     client.post(
         "/api/sms/verify/check",
@@ -85,7 +89,7 @@ def test_sms_reverify_creates_history(tmp_path, monkeypatch):
 
     client.post(
         "/api/sms/verify/start",
-        json={"phone": "800-555-1333", "consent_text": "Consent"},
+        json={"phone": "800-555-1333", "consent": True, "consent_text": "Consent"},
     )
     client.post(
         "/api/sms/verify/check",
