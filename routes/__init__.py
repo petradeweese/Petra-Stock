@@ -88,7 +88,8 @@ _EMPTY_HEATMAP: Dict[str, Any] = {"index": [], "columns": [], "values": [], "met
 _LATEST_HEATMAP: Dict[str, Any] = dict(_EMPTY_HEATMAP)
 
 _SMS_CONSENT_TEXT = (
-    "I agree to receive automated Petra Stock SMS alerts. Msg & data rates may apply."
+    "I agree to receive automated Petra Stock SMS alerts. Msg & data rates may apply. "
+    "By checking this box, I agree to the Terms and Privacy Policy."
 )
 
 
@@ -3468,27 +3469,71 @@ def _twiml_response(message: str) -> Response:
     return Response(content=payload, media_type="application/xml")
 
 
+_PHONE_REGEX = re.compile(r"^\+\d{10,15}$")
+
+
+async def _load_sms_start_payload(request: Request) -> dict[str, Any]:
+    content_type = (request.headers.get("content-type") or "").lower()
+    if "application/json" in content_type:
+        try:
+            data = await request.json()
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            return {}
+        return {}
+    if "application/x-www-form-urlencoded" in content_type or "multipart/form-data" in content_type:
+        form = await request.form()
+        return {k: v for k, v in form.items()}
+    # Fallback attempts for missing/unknown content type headers
+    try:
+        data = await request.json()
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    body = await request.body()
+    if not body:
+        return {}
+    parsed = urllib.parse.parse_qs(body.decode(), keep_blank_values=True)
+    return {k: values[-1] if values else "" for k, values in parsed.items()}
+
+
+def _parse_consent(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return False
+
+
 @router.post("/api/sms/verify/start")
-async def sms_verify_start(request: Request, payload: dict = Body(...)):
+async def sms_verify_start(request: Request):
     user_id = _request_user_id(request)
-    phone_raw = str(payload.get("phone") or "")
-    consent_text = str(payload.get("consent_text") or _SMS_CONSENT_TEXT).strip()
-    method = str(payload.get("method") or "settings").strip() or "settings"
+    payload = await _load_sms_start_payload(request)
+    phone_raw = str(payload.get("phone") or "").strip()
+    consent_value = _parse_consent(payload.get("consent"))
+    if not consent_value:
+        return JSONResponse({"ok": False, "error": "Consent is required"}, status_code=400)
     normalized = sms_consent.normalize_phone(phone_raw)
-    if not normalized:
+    if not normalized or not _PHONE_REGEX.fullmatch(normalized):
         return JSONResponse({"ok": False, "error": "Invalid phone number"}, status_code=400)
+    consent_text = str(payload.get("consent_text") or _SMS_CONSENT_TEXT).strip()
     if not consent_text:
         return JSONResponse({"ok": False, "error": "Consent text required"}, status_code=400)
+    method = str(payload.get("method") or "settings").strip() or "settings"
     verification_id = twilio_client.start_verification(normalized)
     if not verification_id:
         return JSONResponse(
-            {"ok": False, "error": "Verification is unavailable"}, status_code=503
+            {"ok": False, "error": "Verification is unavailable"}, status_code=400
         )
     logger.info(
         "sms_verify_start",
         extra={"user_id": user_id, "phone": normalized, "method": method},
     )
-    return {"ok": True, "phone": normalized, "verification_id": verification_id}
+    return {"ok": True, "sent": True}
 
 
 @router.post("/api/sms/verify/check")
