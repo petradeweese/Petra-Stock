@@ -193,6 +193,7 @@ SCHEMA = [
         tt_bars INTEGER,
         dd REAL,
         rule_hash TEXT,
+        simulated INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY(favorite_id, entry_ts)
     );
     """,

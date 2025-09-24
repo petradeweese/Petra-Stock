@@ -81,7 +81,7 @@ class Settings:
     twilio_from_number: str = os.getenv("TWILIO_FROM_NUMBER", "")
     twilio_verify_service_sid: str = os.getenv("TWILIO_VERIFY_SERVICE_SID", "")
     alert_sms_to: Tuple[str, ...] = _csv("ALERT_SMS_TO")
-    alert_channel: str = _choice("ALERT_CHANNEL", "Email", allowed=("Email", "MMS"))
+    alert_channel: str = _choice("ALERT_CHANNEL", "Email", allowed=("Email", "MMS", "SMS"))
     alert_outcomes: str = _choice("ALERT_OUTCOMES", "hit", allowed=("hit", "all"))
     forward_recency_mode: str = _choice(
         "FORWARD_RECENCY_MODE", "off", allowed=("off", "exp")

@@ -230,27 +230,32 @@
   <div class="card" style="margin-top:1rem;">
     <div class="card-body">
       <strong>Favorites Alerts</strong>
-      <div class="grid" style="margin-top:.5rem;">
+      <form id="test-alert-form" class="grid" style="margin-top:.5rem;" method="post">
         <div>
           <label>Symbol</label>
-          <input id="fav_symbol" value="AAPL" />
+          <input id="fav_symbol" name="symbol" value="AAPL" />
         </div>
         <div>
           <label>Channel</label>
-          <select id="test_channel">
-            <option value="Email" {% if alert_channel == 'Email' %}selected{% endif %}>Email</option>
-            <option value="MMS" {% if alert_channel == 'MMS' %}selected{% endif %}>MMS</option>
+          {% set selected_channel = (alert_channel or 'email')|lower %}
+          <select id="test_channel" name="channel">
+            <option value="email" {% if selected_channel == 'email' %}selected{% endif %}>Email</option>
+            <option value="mms" {% if selected_channel == 'mms' %}selected{% endif %}>MMS</option>
+            <option value="sms" {% if selected_channel == 'sms' %}selected{% endif %}>SMS</option>
           </select>
         </div>
         <div>
           <label>Outcomes</label>
-          <select id="test_outcomes">
-            <option value="hit" {% if alert_outcomes == 'hit' %}selected{% endif %}>Hit only</option>
-            <option value="all" {% if alert_outcomes == 'all' %}selected{% endif %}>Hit + Stop + Timeout</option>
+          {% set selected_outcomes = (alert_outcomes or 'hit')|lower %}
+          <select id="test_outcomes" name="outcomes">
+            <option value="hit" {% if selected_outcomes == 'hit' %}selected{% endif %}>Hit only</option>
+            <option value="all" {% if selected_outcomes == 'all' %}selected{% endif %}>Hit + Stop + Timeout</option>
           </select>
         </div>
-      </div>
-      <button id="send_test_alert" class="btn" style="margin-top:.75rem;">Send Test Alert</button>
+        <div style="grid-column: 1 / -1;">
+          <button id="send_test_alert" class="btn" type="submit" style="margin-top:.75rem;">Send Test Alert</button>
+        </div>
+      </form>
     </div>
   </div>
   <div id="sms-code-modal" hidden>
@@ -280,6 +285,7 @@
     }
 
     const sendBtn = document.getElementById('send_test_alert');
+    const testForm = document.getElementById('test-alert-form');
     const symbolInput = document.getElementById('fav_symbol');
     const channelSelect = document.getElementById('test_channel');
     const outcomesSelect = document.getElementById('test_outcomes');
@@ -399,7 +405,8 @@
       updateSmsButtonState();
     });
 
-    sendBtn?.addEventListener('click', async () => {
+    testForm?.addEventListener('submit', async (event) => {
+      event.preventDefault();
       const symbol = (symbolInput?.value || '').trim().toUpperCase();
       if (!symbol) {
         showToast('Enter a symbol to send a test alert.', false);
@@ -407,15 +414,11 @@
       }
       sendBtn.disabled = true;
       try {
-        const payload = {
-          symbol,
-          channel: channelSelect?.value || 'Email',
-          outcomes: outcomesSelect?.value || 'hit',
-        };
+        const formData = new FormData(testForm);
+        formData.set('symbol', symbol);
         const res = await fetch('/settings/test-alert', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
+          body: formData,
         });
         const data = await res.json();
         if (!res.ok || !data?.ok) {

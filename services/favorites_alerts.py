@@ -10,8 +10,13 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
+import sqlite3
+import threading
+import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from config import settings
@@ -23,8 +28,13 @@ from .telemetry import log as log_telemetry
 
 logger = logging.getLogger(__name__)
 
-_SENT_ALERTS: set[Tuple[str, str]] = set()
-
+_SENT_ALERTS: set[str] = set()
+_SENT_LOCK = threading.Lock()
+_REDIS_CLIENT: Any | None = None
+_REDIS_READY: Optional[bool] = None
+_SQLITE_CONN: sqlite3.Connection | None = None
+_SQLITE_PATH = Path(__file__).resolve().parent.parent / "alerts.sqlite"
+_REDIS_TTL_SECONDS = 2 * 60 * 60
 
 def _outcomes_mode() -> str:
     raw = getattr(settings, "alert_outcomes", getattr(settings, "ALERT_OUTCOMES", "hit"))
@@ -32,22 +42,212 @@ def _outcomes_mode() -> str:
     return value or "hit"
 
 
-def was_sent(favorite_id: Any, bar_time: Any) -> bool:
+def _startup_delivery_safety() -> None:
+    try:
+        configured_channel = _normalize_channel(getattr(settings, "alert_channel", "Email"))
+        if configured_channel == "email":
+            email_targets = getattr(settings, "alert_email_to", ()) or ()
+            if not email_targets:
+                logger.warning("Favorites alerts skipped: no recipients for Email.")
+        elif configured_channel in {"mms", "sms"}:
+            sms_targets = getattr(settings, "alert_sms_to", ()) or ()
+            if not sms_targets:
+                logger.warning("Favorites alerts skipped: no recipients for MMS.")
+            if configured_channel == "mms" and not twilio_client.is_enabled():
+                logger.warning("Favorites alerts fallback to Email: Twilio not configured.")
+                setattr(settings, "alert_channel", "Email")
+                setattr(settings, "ALERT_CHANNEL", "Email")
+    except Exception:  # pragma: no cover - safety guard
+        logger.debug("favorites alert startup delivery check failed", exc_info=True)
+
+
+_startup_delivery_safety()
+
+
+def _get_redis_client():
+    global _REDIS_CLIENT, _REDIS_READY
+    if _REDIS_READY is not None:
+        return _REDIS_CLIENT if _REDIS_READY else None
+    url = os.getenv("REDIS_URL", "").strip()
+    if not url:
+        _REDIS_READY = False
+        _REDIS_CLIENT = None
+        return None
+    try:  # pragma: no cover - optional dependency
+        import redis  # type: ignore
+
+        client = redis.Redis.from_url(url)
+        _REDIS_CLIENT = client
+        _REDIS_READY = True
+        return client
+    except Exception:  # pragma: no cover - redis optional
+        logger.exception("favorites alert redis initialization failed")
+        _REDIS_CLIENT = None
+        _REDIS_READY = False
+        return None
+
+
+def _ensure_sqlite() -> sqlite3.Connection:
+    global _SQLITE_CONN
+    if _SQLITE_CONN is not None:
+        return _SQLITE_CONN
+    conn = sqlite3.connect(_SQLITE_PATH, timeout=5, check_same_thread=False)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sent_alerts (
+            dedupe_key TEXT PRIMARY KEY,
+            ts INTEGER,
+            simulated INTEGER NOT NULL DEFAULT 0
+        )
+        """
+    )
+    conn.commit()
+    _SQLITE_CONN = conn
+    return conn
+
+
+def _dedupe_storage_get(key: str) -> bool:
+    if not key:
+        return False
+    client = _get_redis_client()
+    if client is not None:
+        try:
+            return bool(client.exists(key))
+        except Exception:  # pragma: no cover - network interaction
+            logger.debug("favorites alert redis exists failed key=%s", key)
+    try:
+        conn = _ensure_sqlite()
+        cur = conn.cursor()
+        cur.execute("SELECT 1 FROM sent_alerts WHERE dedupe_key=? LIMIT 1", (key,))
+        row = cur.fetchone()
+        return bool(row)
+    except sqlite3.Error:
+        logger.exception("favorites alert sqlite dedupe check failed")
+        return False
+
+
+def _dedupe_storage_set(key: str, *, simulated: bool = False) -> None:
+    if not key:
+        return
+    client = _get_redis_client()
+    if client is not None:
+        try:
+            payload = json.dumps({"ts": int(time.time()), "simulated": bool(simulated)})
+            client.setex(key, _REDIS_TTL_SECONDS, payload)
+        except Exception:  # pragma: no cover - network interaction
+            logger.debug("favorites alert redis set failed key=%s", key)
+    try:
+        conn = _ensure_sqlite()
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO sent_alerts(dedupe_key, ts, simulated)
+            VALUES(?, ?, ?)
+            """,
+            (key, int(time.time()), 1 if simulated else 0),
+        )
+        conn.commit()
+    except sqlite3.Error:
+        logger.exception("favorites alert sqlite dedupe set failed")
+
+
+def _coerce_bar_datetime(value: Any) -> Optional[datetime]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, (int, float)) and not math.isnan(float(value)):
+        dt = datetime.fromtimestamp(float(value), tz=timezone.utc)
+    else:
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            if text.endswith("Z"):
+                text = text[:-1] + "+00:00"
+            dt = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).replace(second=0, microsecond=0)
+
+
+def _dedupe_key(fav_id: Any, interval: Any, bar_dt_utc: Any) -> Optional[str]:
+    if fav_id in (None, "", b""):
+        return None
+    dt = _coerce_bar_datetime(bar_dt_utc)
+    if dt is None:
+        return None
+    interval_str = str(interval or "").strip().lower() or "unknown"
+    fav_str = str(fav_id)
+    return f"{fav_str}|{interval_str}|{dt.strftime('%Y-%m-%dT%H:%M')}"
+
+
+def was_sent(
+    favorite_id: Any,
+    bar_time: Any,
+    *,
+    interval: Any = None,
+    dedupe_key: Optional[str] = None,
+) -> bool:
     """Return ``True`` if the alert for ``favorite_id``/``bar_time`` was sent."""
 
-    if favorite_id in (None, "", b"") or bar_time in (None, "", b""):
-        return False
-    key = (str(favorite_id), str(bar_time))
-    return key in _SENT_ALERTS
+    return was_sent_key(favorite_id, bar_time, interval=interval, dedupe_key=dedupe_key)
 
 
-def mark_sent(favorite_id: Any, bar_time: Any) -> None:
+def mark_sent(
+    favorite_id: Any,
+    bar_time: Any,
+    *,
+    interval: Any = None,
+    dedupe_key: Optional[str] = None,
+    simulated: bool = False,
+) -> None:
     """Record that an alert was delivered for the given favorite/bar."""
 
-    if favorite_id in (None, "", b"") or bar_time in (None, "", b""):
+    mark_sent_key(
+        favorite_id,
+        bar_time,
+        interval=interval,
+        dedupe_key=dedupe_key,
+        simulated=simulated,
+    )
+
+
+def was_sent_key(
+    favorite_id: Any,
+    bar_time: Any,
+    *,
+    interval: Any = None,
+    dedupe_key: Optional[str] = None,
+) -> bool:
+    key = dedupe_key or _dedupe_key(favorite_id, interval, bar_time)
+    if not key:
+        return False
+    with _SENT_LOCK:
+        if key in _SENT_ALERTS:
+            return True
+    if _dedupe_storage_get(key):
+        with _SENT_LOCK:
+            _SENT_ALERTS.add(key)
+        return True
+    return False
+
+
+def mark_sent_key(
+    favorite_id: Any,
+    bar_time: Any,
+    *,
+    interval: Any = None,
+    dedupe_key: Optional[str] = None,
+    simulated: bool = False,
+) -> None:
+    key = dedupe_key or _dedupe_key(favorite_id, interval, bar_time)
+    if not key:
         return
-    key = (str(favorite_id), str(bar_time))
-    _SENT_ALERTS.add(key)
+    with _SENT_LOCK:
+        _SENT_ALERTS.add(key)
+    _dedupe_storage_set(key, simulated=simulated)
 
 
 @dataclass
@@ -127,7 +327,7 @@ def _normalize_channel(channel: Optional[str]) -> Optional[str]:
     value = str(channel).strip().lower()
     if not value:
         return None
-    if value in {"email", "mms"}:
+    if value in {"email", "mms", "sms"}:
         return value
     return value
 
@@ -152,6 +352,26 @@ def _value(obj: Any, key: str) -> Any:
     if isinstance(obj, Mapping):
         return obj.get(key)
     return getattr(obj, key, None)
+
+
+def _format_threshold_ratio(value: Any) -> str:
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return "?"
+    if math.isnan(num):
+        return "?"
+    scaled = num
+    if abs(scaled) >= 10:
+        scaled = scaled / 100.0
+    return f"{scaled:.2f}"
+
+
+def _log_skip(reason: str, detail: Optional[str] = None) -> None:
+    if detail:
+        logger.info("%s %s", reason, detail)
+    else:
+        logger.info(reason)
 
 
 def _coerce_float(value: Any, default: float = 0.0) -> float:
@@ -189,6 +409,7 @@ def should_alert_on_row(row: Any, fav: Any) -> bool:
         return False
     include_all = _outcomes_mode() == "all"
     if not include_all and _should_skip_non_entry(row):
+        _log_skip("skip_non_entry")
         return False
 
     event_values: List[str] = []
@@ -211,6 +432,7 @@ def should_alert_on_row(row: Any, fav: Any) -> bool:
     support = _coerce_int(_value(row, "support"))
     min_support = _coerce_int(_value(fav, "min_support"))
     if min_support and support and support < min_support:
+        _log_skip("skip_min_support", f"({int(support)}<{int(min_support)})")
         return False
 
     hit_pct = _coerce_float(_value(row, "hit_pct"))
@@ -225,6 +447,10 @@ def should_alert_on_row(row: Any, fav: Any) -> bool:
     if hit_threshold <= 0:
         hit_threshold = 50.0
     if hit_pct < hit_threshold:
+        _log_skip(
+            "skip_min_hit",
+            f"({_format_threshold_ratio(hit_pct)}<{_format_threshold_ratio(hit_threshold)})",
+        )
         return False
 
     avg_roi = _coerce_float(_value(row, "avg_roi_pct"))
@@ -235,6 +461,10 @@ def should_alert_on_row(row: Any, fav: Any) -> bool:
 
     min_roi = _coerce_float(_value(fav, "min_avg_roi_pct"), 0.0)
     if avg_roi <= max(0.0, min_roi):
+        _log_skip(
+            "skip_min_avg_roi",
+            f"({_format_threshold_ratio(avg_roi)}<{_format_threshold_ratio(max(0.0, min_roi))})",
+        )
         return False
 
     return True
@@ -288,12 +518,14 @@ def _deliver_alert(
     recipients: Optional[Sequence[str]] = None,
     favorite_id: Optional[str] = None,
     bar_time: Optional[str] = None,
+    interval: Any = None,
+    dedupe_key: Optional[str] = None,
     smtp_config: Optional[Mapping[str, Any]] = None,
     delivery_context: Optional[Mapping[str, Any]] = None,
-) -> Tuple[bool, Optional[Tuple[str, str]], Optional[str]]:
+) -> Tuple[bool, Optional[str], Optional[str], str]:
     normalized = _normalize_channel(channel)
     if normalized is None:
-        return False, None, None
+        return False, None, None, "delivery_error"
 
     context_base: Dict[str, Any] = {}
     if delivery_context:
@@ -301,64 +533,64 @@ def _deliver_alert(
     if favorite_id is not None and "fav_id" not in context_base:
         context_base["fav_id"] = str(favorite_id)
 
-    dedupe_key: Optional[Tuple[str, str]] = None
-    if favorite_id and bar_time:
-        fav_id_str = str(favorite_id)
-        bar_time_str = str(bar_time)
-        dedupe_key = (fav_id_str, bar_time_str)
-        if was_sent(fav_id_str, bar_time_str):
-            logger.info(
-                "favorites alert dedupe skip favorite_id=%s bar_time=%s",
-                fav_id_str,
-                bar_time_str,
-            )
-            return False, None, normalized
+    dedupe_value = dedupe_key or _dedupe_key(favorite_id, interval, bar_time)
+    if dedupe_value and was_sent_key(
+        favorite_id,
+        bar_time,
+        interval=interval,
+        dedupe_key=dedupe_value,
+    ):
+        _log_skip("skip_dedupe", dedupe_value)
+        return False, dedupe_value, normalized, "throttled"
 
-    success = False
     if normalized == "email":
         send_to = [r for r in (recipients or []) if r]
         if not send_to:
             logger.info("favorites alert email skipped: no recipients configured")
-        else:
-            cfg = dict(smtp_config or {})
-            host = cfg.get("host")
-            port = cfg.get("port")
-            user = cfg.get("user", "")
-            password = cfg.get("password", "")
-            mail_from = cfg.get("mail_from") or user
-            if not host or not port or not mail_from:
-                logger.warning("favorites alert email skipped: incomplete smtp config")
-            else:
-                try:
-                    result = send_email_smtp(
-                        str(host),
-                        int(port),
-                        str(user or ""),
-                        str(password or ""),
-                        str(mail_from),
-                        [str(r) for r in send_to],
-                        subject,
-                        body,
-                        context={**context_base, "channel": "email"},
-                    )
-                except Exception:
-                    logger.exception("favorites alert email send raised")
-                    result = {"ok": False}
-                if result.get("ok"):
-                    success = True
-                    logger.info(
-                        "favorites alert email sent recipients=%d", len(send_to)
-                    )
-                else:
-                    logger.warning(
-                        "favorites alert email failed: %s", result.get("error")
-                    )
-    elif normalized == "mms":
-        destinations = []
+            return False, dedupe_value, normalized, "missing_recipient"
+        cfg = dict(smtp_config or {})
+        host = cfg.get("host")
+        port = cfg.get("port")
+        user = cfg.get("user", "")
+        password = cfg.get("password", "")
+        mail_from = cfg.get("mail_from") or user
+        if not host or not port or not mail_from:
+            logger.warning("favorites alert email skipped: incomplete smtp config")
+            return False, dedupe_value, normalized, "delivery_error"
+        try:
+            result = send_email_smtp(
+                str(host),
+                int(port),
+                str(user or ""),
+                str(password or ""),
+                str(mail_from),
+                [str(r) for r in send_to],
+                subject,
+                body,
+                context={**context_base, "channel": "email"},
+            )
+        except Exception:
+            logger.exception("favorites alert email send raised")
+            return False, dedupe_value, normalized, "delivery_error"
+        if result.get("ok"):
+            logger.info("favorites alert email sent recipients=%d", len(send_to))
+            return True, dedupe_value, normalized, "sent"
+        logger.warning("favorites alert email failed: %s", result.get("error"))
+        return False, dedupe_value, normalized, "delivery_error"
+
+    if normalized in {"mms", "sms"}:
+        if not twilio_client.is_enabled():
+            raise RuntimeError("Twilio not configured")
+
+        destinations: list[dict[str, str | None]] = []
         if recipients is not None:
             for entry in recipients:
                 if isinstance(entry, Mapping):
-                    phone = entry.get("phone_e164") or entry.get("phone") or entry.get("to")
+                    phone = (
+                        entry.get("phone_e164")
+                        or entry.get("phone")
+                        or entry.get("to")
+                    )
                     if phone:
                         destinations.append(
                             {
@@ -373,38 +605,47 @@ def _deliver_alert(
 
         if not destinations:
             logger.info("favorites alert mms skipped: no consented numbers configured")
-        else:
-            seen: set[str] = set()
-            message_body = sms_consent.append_footer(body)
-            for dest in destinations:
-                number_raw = dest.get("phone_e164") or dest.get("phone") or dest.get("to")
-                number_str = sms_consent.normalize_phone(str(number_raw or ""))
-                if not number_str or number_str in seen:
-                    continue
-                seen.add(number_str)
-                allowed, consent_row = sms_consent.allow_sending(number_str)
-                if not allowed:
-                    logger.info(
-                        "favorites alert mms skipped number=%s reason=no-consent-or-rate",
-                        number_str,
-                    )
-                    continue
-                user_for_log = (consent_row or {}).get("user_id") or dest.get("user_id")
-                context = {
-                    **context_base,
-                    "channel": "mms",
-                    "to": number_str,
-                    "user_id": user_for_log,
-                }
-                if twilio_client.send_mms(number_str, message_body, context=context):
-                    sms_consent.record_delivery(number_str, user_for_log, message_body)
-                    success = True
-                else:
-                    logger.warning("favorites alert mms failed number=%s", number_str)
-    else:
-        logger.info("favorites alert skipped: unknown channel=%s", normalized)
+            return False, dedupe_value, normalized, "missing_recipient"
 
-    return success, dedupe_key if success else None, normalized
+        seen: set[str] = set()
+        message_body = sms_consent.append_footer(body)
+        delivered = False
+        for dest in destinations:
+            number_raw = dest.get("phone_e164") or dest.get("phone") or dest.get("to")
+            number_str = sms_consent.normalize_phone(str(number_raw or ""))
+            if not number_str or number_str in seen:
+                continue
+            seen.add(number_str)
+            allowed, consent_row = sms_consent.allow_sending(number_str)
+            if not allowed:
+                logger.info(
+                    "favorites alert mms skipped number=%s reason=no-consent-or-rate",
+                    number_str,
+                )
+                continue
+            user_for_log = (consent_row or {}).get("user_id") or dest.get("user_id")
+            context = {
+                **context_base,
+                "channel": normalized,
+                "to": number_str,
+                "user_id": user_for_log,
+            }
+            try:
+                send_ok = twilio_client.send_mms(number_str, message_body, context=context)
+            except Exception as exc:  # pragma: no cover - network interaction
+                raise RuntimeError(f"Twilio send error: {exc}") from exc
+            if send_ok:
+                sms_consent.record_delivery(number_str, user_for_log, message_body)
+                delivered = True
+            else:
+                logger.warning("favorites alert %s failed number=%s", normalized, number_str)
+
+        if delivered:
+            return True, dedupe_value, normalized, "sent"
+        raise RuntimeError("Twilio send failed for all recipients")
+
+    logger.info("favorites alert skipped: unknown channel=%s", normalized)
+    return False, dedupe_value, normalized, "delivery_error"
 @dataclass
 class SelectionResult:
     contract: Optional[options_provider.OptionContract]
@@ -671,6 +912,18 @@ def _format_targets_line(targets: Dict | None) -> str:
     return f"Targets: {target} | Stop: {stop} | Hit% {hit} | ROI {roi} | DD {dd}"
 
 
+def _format_percent_value(value: Any) -> str:
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return "—"
+    if math.isnan(num):
+        return "—"
+    if abs(num) <= 1:
+        num *= 100.0
+    return f"{num:.2f}%"
+
+
 def _format_picked(contract: options_provider.OptionContract | None) -> str:
     if not contract:
         return "No contract selected"
@@ -729,20 +982,25 @@ def _format_mms_alert(
     pattern: str | None,
 ) -> str:
     header = f"{symbol.upper()} {direction.upper()}"
-    picked = _format_picked(contract)
-    header_line = f"{header} | Picked: {picked}"
-    sections: List[List[str]] = [[header_line]]
-    if pattern:
+    header_parts = [header]
+    if contract:
+        header_parts.append(f"Picked: {_format_picked(contract)}")
+    header_line = " | ".join(part for part in header_parts if part)
+    sections: List[List[str]] = [[header_line]] if header_line else []
+    if sections and pattern:
         sections[0].append(f"Setup: {pattern}")
+    elif pattern:
+        sections.append([f"Setup: {pattern}"])
 
-    greeks_lines = ["Greeks & IV:"]
+    greeks_lines: List[str] = []
     for chk in checks:
         line = _format_greek_line(chk, compact=compact)
         if line:
             greeks_lines.append(line)
-    if len(greeks_lines) == 1:
-        greeks_lines.append("• No checks evaluated")
-    sections.append(greeks_lines)
+    if greeks_lines:
+        sections.append(["Greeks & IV:", *greeks_lines])
+    else:
+        sections.append(["Greeks/IV not available (fallback data)."])
 
     failing = [chk for chk in checks if not chk.passed]
     feedback_lines: List[str] = []
@@ -758,6 +1016,43 @@ def _format_mms_alert(
 
     sections.append([_format_targets_line(targets)])
     return "\n\n".join("\n".join(block) for block in sections if block)
+
+
+def _format_sms_alert(
+    symbol: str,
+    direction: str,
+    targets: Dict | None,
+    *,
+    pattern: str | None = None,
+) -> str:
+    targets = targets or {}
+    parts: List[str] = [f"{symbol.upper()} {direction.upper()}"]
+    metrics: List[str] = []
+
+    hit_text = _format_percent_value(targets.get("hit"))
+    if hit_text != "—":
+        metrics.append(f"Hit {hit_text}")
+    roi_text = _format_percent_value(targets.get("roi"))
+    if roi_text != "—":
+        metrics.append(f"ROI {roi_text}")
+    dd_text = _format_percent_value(targets.get("dd"))
+    if dd_text != "—":
+        metrics.append(f"DD {dd_text}")
+
+    target_text = _format_percent_value(targets.get("target"))
+    stop_text = _format_percent_value(targets.get("stop"))
+    if target_text != "—" or stop_text != "—":
+        span = "/".join(
+            value for value in (target_text, stop_text) if value != "—"
+        )
+        if span:
+            metrics.append(f"Targets {span}")
+
+    if metrics:
+        parts.append(" · ".join(metrics))
+    if pattern:
+        parts.append(f"{pattern}")
+    return " ".join(part for part in parts if part).strip()
 
 
 def format_favorites_alert(
@@ -783,6 +1078,13 @@ def format_favorites_alert(
             include_symbols=include_symbols,
             pattern=pattern,
         )
+    if channel == "sms":
+        return _format_sms_alert(
+            symbol,
+            direction,
+            targets,
+            pattern=pattern,
+        )
     return _format_mms_alert(
         symbol,
         direction,
@@ -802,7 +1104,8 @@ def enrich_and_send(
     recipients: Optional[Sequence[str]] = None,
     smtp_config: Optional[Mapping[str, Any]] = None,
     is_test: bool = False,
-) -> bool:  # pragma: no cover - orchestrator
+    simulated: bool = False,
+) -> Dict[str, Any]:  # pragma: no cover - orchestrator
     """Enrich a favorites hit, format the alert and optionally deliver it."""
 
     try:
@@ -918,7 +1221,6 @@ def enrich_and_send(
         if hit.pattern:
             subject += f" {hit.pattern}"
 
-        delivered = False
         normalized_channel = _normalize_channel(channel_choice)
         include_all_outcomes = _outcomes_mode() == "all"
         skip_non_entry = _should_skip_non_entry(row)
@@ -939,63 +1241,369 @@ def enrich_and_send(
         }
         if favorite_id:
             delivery_context["fav_id"] = favorite_id
+        delivery_context["simulated"] = bool(simulated)
 
-        if channel_choice and (include_all_outcomes or not skip_non_entry):
-            email_recipients = list(recipients or [])
-            if not email_recipients:
-                if isinstance(row, Mapping):
-                    email_recipients = _parse_list(row.get("recipients"))
-                if not email_recipients and isinstance(fav, Mapping):
-                    email_recipients = _parse_list(fav.get("recipients"))
-            smtp_cfg = dict(smtp_config or {})
-            if not smtp_cfg:
-                smtp_cfg = _merge_smtp_config(fav, row)
-            recipients_arg = email_recipients if normalized_channel == "email" else None
-            delivered, dedupe_key, normalized_sent = _deliver_alert(
-                channel_choice,
+        outcome_for_log: str | None = None
+        if isinstance(row, Mapping):
+            for key in ("outcome", "status", "event", "signal"):
+                raw_val = row.get(key)
+                if isinstance(raw_val, str) and raw_val.strip():
+                    outcome_for_log = raw_val.strip().lower()
+                    break
+        if not outcome_for_log and not include_all_outcomes:
+            outcome_for_log = "hit"
+
+        fallback_reason: str | None = None
+
+        def _emit(payload: Dict[str, Any], *, fallback: str | None = None) -> Dict[str, Any]:
+            extra = {
+                "symbol": symbol_for_log,
+                "direction": direction_for_log,
+                "outcome": outcome_for_log,
+                "channel": payload.get("channel"),
+                "dedupe_key": payload.get("dedupe_key"),
+                "reason": payload.get("reason"),
+                "ok": bool(payload.get("ok")),
+                "fallback": fallback,
+                "simulated": bool(simulated),
+            }
+            logger.info("favorites_alert_delivery", extra=extra)
+            return payload
+
+        email_recipients = list(recipients or [])
+        if not email_recipients:
+            if isinstance(row, Mapping):
+                email_recipients = _parse_list(row.get("recipients"))
+            if not email_recipients and isinstance(fav, Mapping):
+                email_recipients = _parse_list(fav.get("recipients"))
+
+        smtp_cfg = dict(smtp_config or {})
+        if not smtp_cfg:
+            smtp_cfg = _merge_smtp_config(fav, row)
+
+        interval_value = None
+        if isinstance(row, Mapping):
+            interval_value = row.get("interval")
+        if interval_value in (None, "") and isinstance(fav, Mapping):
+            interval_value = fav.get("interval")
+        if interval_value in (None, ""):
+            interval_value = profile.get("interval") or getattr(hit, "interval", None) or "15m"
+
+        dedupe_value = _dedupe_key(favorite_id, interval_value, bar_time)
+        if dedupe_value and was_sent_key(
+            favorite_id,
+            bar_time,
+            interval=interval_value,
+            dedupe_key=dedupe_value,
+        ):
+            _log_skip("skip_dedupe", dedupe_value)
+            final_channel = normalized_channel or _normalize_channel(channel_choice) or "mms"
+            delivered = False
+            reason = "throttled"
+            payload = {
+                "ok": delivered,
+                "channel": final_channel or "mms",
+                "dedupe_key": dedupe_value,
+                "reason": reason,
+            }
+            log_telemetry(
+                {
+                    "type": "favorites_alert_test" if is_test else "favorites_alert",
+                    "task_id": "<task_id_or_test>",
+                    "ticker": hit.ticker,
+                    "direction": hit.direction,
+                    "channel": payload["channel"],
+                    "delivered": delivered,
+                }
+            )
+            return _emit(payload)
+
+        delivered = False
+        dedupe_result: Optional[str] = dedupe_value
+        chosen_channel = normalized_channel or "mms"
+        final_channel = chosen_channel
+        reason = "delivery_error"
+        bodies = {
+            "email": format_favorites_alert(
+                hit.ticker,
+                hit.direction,
+                sel.contract,
+                checks,
+                targets,
+                compact=compact_pref,
+                channel="email",
+                pattern=hit.pattern,
+                include_symbols=include_symbols,
+            ),
+            "mms": body,
+            "sms": format_favorites_alert(
+                hit.ticker,
+                hit.direction,
+                sel.contract,
+                checks,
+                targets,
+                compact=compact_pref,
+                channel="sms",
+                pattern=hit.pattern,
+                include_symbols=include_symbols,
+            ),
+        }
+
+        def _finish() -> Dict[str, Any]:
+            payload = {
+                "ok": bool(delivered),
+                "channel": final_channel or "mms",
+                "dedupe_key": dedupe_result,
+                "reason": reason,
+            }
+            log_telemetry(
+                {
+                    "type": "favorites_alert_test" if is_test else "favorites_alert",
+                    "task_id": "<task_id_or_test>",
+                    "ticker": hit.ticker,
+                    "direction": hit.direction,
+                    "channel": payload["channel"],
+                    "delivered": delivered,
+                }
+            )
+            return _emit(payload, fallback=fallback_reason)
+
+        if not (include_all_outcomes or not skip_non_entry):
+            reason = "skipped"
+            logger.info("favorites alert skipped non-entry event favorite_id=%s", favorite_id)
+            delivered = False
+            return _finish()
+
+        recipients_arg = email_recipients if chosen_channel == "email" else None
+        try:
+            send_body = bodies.get(chosen_channel, body)
+            delivered, dedupe_result, sent_channel, send_reason = _deliver_alert(
+                chosen_channel,
                 subject,
-                body,
+                send_body,
                 recipients=recipients_arg,
                 favorite_id=favorite_id,
                 bar_time=bar_time,
+                interval=interval_value,
+                dedupe_key=dedupe_value,
                 smtp_config=smtp_cfg,
                 delivery_context=delivery_context,
             )
+            if sent_channel:
+                final_channel = sent_channel
+            reason = send_reason
+        except RuntimeError as exc:
+            delivered = False
+            reason = "delivery_error"
+            error_message = str(exc)
+            fallback_reason = error_message or "twilio_unavailable"
+            logger.warning(
+                "favorites alert %s send failed: %s",
+                chosen_channel,
+                error_message,
+            )
+            fallback_body = f"{bodies.get('sms', body)}\n\n[Sent via Email — MMS unavailable]"
+            fallback_context = {**delivery_context, "fallback_from": chosen_channel}
+            delivered, dedupe_result, sent_channel, send_reason = _deliver_alert(
+                "email",
+                subject,
+                fallback_body,
+                recipients=email_recipients,
+                favorite_id=favorite_id,
+                bar_time=bar_time,
+                interval=interval_value,
+                dedupe_key=dedupe_value,
+                smtp_config=smtp_cfg,
+                delivery_context=fallback_context,
+            )
             if delivered:
-                logger.info(
-                    "favorite_alert_sent",
-                    extra={
-                        "symbol": symbol_for_log,
-                        "direction": direction_for_log,
-                        "fav_id": favorite_id,
-                        "bar_time": str(bar_time) if bar_time is not None else None,
-                        "channel": getattr(settings, "alert_channel", "Email"),
-                        "outcomes": getattr(settings, "ALERT_OUTCOMES", getattr(settings, "alert_outcomes", "hit")),
-                        "hit_lb95": _value(row, "hit_lb95"),
-                        "support": _value(row, "support"),
-                        "avg_roi": _value(row, "avg_roi_pct") or _value(row, "avg_roi"),
-                    },
-                )
-                if dedupe_key:
-                    mark_sent(*dedupe_key)
-            normalized_channel = normalized_sent
-        elif channel_choice and not include_all_outcomes and skip_non_entry:
-            logger.info("favorites alert skipped non-entry event favorite_id=%s", favorite_id)
+                final_channel = sent_channel or "email"
+                reason = send_reason
+                bodies["mms"] = fallback_body
+                chosen_channel = "email"
+            else:
+                reason = send_reason or "delivery_error"
 
-        log_telemetry(
-            {
-                "type": "favorites_alert_test" if is_test else "favorites_alert",
-                "task_id": "<task_id_or_test>",
-                "ticker": hit.ticker,
-                "direction": hit.direction,
-                "channel": channel_choice,
-                "delivered": delivered,
-            }
-        )
-        return delivered
+        if delivered:
+            logger.info(
+                "favorite_alert_sent",
+                extra={
+                    "symbol": symbol_for_log,
+                    "direction": direction_for_log,
+                    "fav_id": favorite_id,
+                    "bar_time": str(bar_time) if bar_time is not None else None,
+                    "channel": final_channel,
+                    "outcomes": getattr(
+                        settings,
+                        "ALERT_OUTCOMES",
+                        getattr(settings, "alert_outcomes", "hit"),
+                    ),
+                    "hit_lb95": _value(row, "hit_lb95"),
+                    "support": _value(row, "support"),
+                    "avg_roi": _value(row, "avg_roi_pct") or _value(row, "avg_roi"),
+                },
+            )
+            if dedupe_result:
+                mark_sent_key(
+                    favorite_id,
+                    bar_time,
+                    interval=interval_value,
+                    dedupe_key=dedupe_result,
+                    simulated=simulated,
+                )
+            reason = "sent"
+        return _finish()
     except Exception:
         logger.exception("favorites alert enrichment failed")
-        return False
+        failure_payload = {
+            "ok": False,
+            "channel": _normalize_channel(channel) or "mms" if channel else "mms",
+            "dedupe_key": None,
+            "reason": "delivery_error",
+        }
+        logger.info("favorites_alert_delivery %s", json.dumps(failure_payload, sort_keys=True))
+        return failure_payload
+
+
+def deliver_preview_alert(
+    subject: str,
+    bodies: Mapping[str, str],
+    *,
+    channel: str,
+    favorite_id: Any = None,
+    bar_time: Any = None,
+    interval: Any = "15m",
+    dedupe_key: Optional[str] = None,
+    recipients: Optional[Sequence[str]] = None,
+    smtp_config: Optional[Mapping[str, Any]] = None,
+    simulated: bool = False,
+    outcome: str | None = None,
+    symbol: str | None = None,
+    direction: str | None = None,
+) -> Dict[str, Any]:
+    normalized_channel = _normalize_channel(channel) or "email"
+    dedupe_value = dedupe_key or _dedupe_key(favorite_id, interval, bar_time)
+    if dedupe_value and was_sent_key(
+        favorite_id,
+        bar_time,
+        interval=interval,
+        dedupe_key=dedupe_value,
+    ):
+        _log_skip("skip_dedupe", dedupe_value)
+        payload = {
+            "ok": False,
+            "channel": normalized_channel,
+            "dedupe_key": dedupe_value,
+            "reason": "throttled",
+        }
+        logger.info(
+            "favorites_alert_delivery",
+            extra={
+                "symbol": symbol,
+                "direction": direction,
+                "outcome": outcome,
+                "channel": payload["channel"],
+                "dedupe_key": dedupe_value,
+                "reason": payload["reason"],
+                "ok": False,
+                "fallback": None,
+                "simulated": bool(simulated),
+            },
+        )
+        return payload
+
+    bodies_map = dict(bodies or {})
+    body_value = bodies_map.get(normalized_channel) or bodies_map.get("mms") or bodies_map.get("email")
+    if body_value is None:
+        body_value = subject
+
+    smtp_cfg = dict(smtp_config or {}) or None
+
+    delivery_context = {
+        "symbol": symbol,
+        "direction": direction,
+        "bar_time": str(bar_time) if bar_time is not None else None,
+        "simulated": bool(simulated),
+        "outcome": outcome,
+    }
+
+    recipients_arg = recipients if normalized_channel == "email" else None
+    fallback_reason: str | None = None
+    try:
+        delivered, dedupe_result, sent_channel, reason = _deliver_alert(
+            normalized_channel,
+            subject,
+            body_value,
+            recipients=recipients_arg,
+            favorite_id=favorite_id,
+            bar_time=bar_time,
+            interval=interval,
+            dedupe_key=dedupe_value,
+            smtp_config=smtp_cfg,
+            delivery_context=delivery_context,
+        )
+        final_channel = sent_channel or normalized_channel
+    except RuntimeError as exc:
+        fallback_reason = str(exc) or "twilio_unavailable"
+        base_email_body = bodies_map.get("email") or body_value
+        email_body = f"{base_email_body}\n\n[Sent via Email — MMS unavailable]"
+        email_recipients = list(recipients or getattr(settings, "alert_email_to", ()))
+        delivered, dedupe_result, sent_channel, reason = _deliver_alert(
+            "email",
+            subject,
+            email_body,
+            recipients=email_recipients,
+            favorite_id=favorite_id,
+            bar_time=bar_time,
+            interval=interval,
+            dedupe_key=dedupe_value,
+            smtp_config=smtp_cfg,
+            delivery_context={**delivery_context, "fallback_from": normalized_channel},
+        )
+        final_channel = sent_channel or "email"
+        body_value = email_body
+
+    payload = {
+        "ok": bool(delivered),
+        "channel": final_channel,
+        "dedupe_key": dedupe_result or dedupe_value,
+        "reason": reason,
+    }
+
+    if delivered and payload["dedupe_key"]:
+        mark_sent_key(
+            favorite_id,
+            bar_time,
+            interval=interval,
+            dedupe_key=payload["dedupe_key"],
+            simulated=simulated,
+        )
+
+    logger.info(
+        "favorites_alert_delivery",
+        extra={
+            "symbol": symbol,
+            "direction": direction,
+            "outcome": outcome,
+            "channel": payload["channel"],
+            "dedupe_key": payload["dedupe_key"],
+            "reason": payload["reason"],
+            "ok": bool(payload["ok"]),
+            "fallback": fallback_reason,
+            "simulated": bool(simulated),
+        },
+    )
+    log_telemetry(
+        {
+            "type": "favorites_alert_sim" if simulated else "favorites_alert",
+            "task_id": "simulation" if simulated else "preview",
+            "ticker": symbol,
+            "direction": direction,
+            "channel": payload["channel"],
+            "delivered": bool(payload["ok"]),
+        }
+    )
+    return payload
 
 
 def enrich_and_send_test(
@@ -1016,6 +1624,7 @@ def enrich_and_send_test(
         if normalized_outcomes == "all"
         else "Hit only"
     )
+    outcomes_subject = "Hit + Stop + Timeout" if normalized_outcomes == "all" else "Hit-only"
     today = datetime.utcnow().date()
     contract = options_provider.OptionContract(
         occ=f"{symbol}TEST",
@@ -1074,28 +1683,38 @@ def enrich_and_send_test(
         include_symbols=True,
     )
     if outcomes_label:
-        body = f"{body}\n\nOutcomes Mode: {outcomes_label}".strip()
-    subject = f"Favorites Alert Test: {symbol} {direction_norm}"
+        if normalized_channel == "sms":
+            body = f"{body} • Outcomes {outcomes_label}".strip()
+        else:
+            body = f"{body}\n\nOutcomes Mode: {outcomes_label}".strip()
+    subject = f"[TEST {outcomes_subject}] {symbol} — {direction_norm} Hit (Manual Test)"
+    channel_field = (
+        normalized_channel if normalized_channel in {"email", "sms"} else "mms"
+    )
     return True, {
         "subject": subject,
         "body": body,
-        "channel": "email" if normalized_channel == "email" else "mms",
+        "channel": channel_field,
         "outcomes": normalized_outcomes,
     }
 
 
 def build_preview(
     symbol: str,
+    direction: str = "UP",
     *,
     channel: str = "Email",
     outcomes: str = "hit",
     compact: bool = False,
+    outcome_mode: str | None = None,
+    simulated: bool = False,
 ) -> tuple[str, str]:
     normalized_channel = (channel or "Email").strip().lower() or "email"
     normalized_outcomes = (outcomes or "hit").strip().lower() or "hit"
+    direction_norm = (direction or "UP").strip().upper() or "UP"
     ok, payload = enrich_and_send_test(
         symbol,
-        "UP",
+        direction_norm,
         channel=normalized_channel,
         compact=compact,
         outcomes=normalized_outcomes,
@@ -1104,4 +1723,11 @@ def build_preview(
         return "", ""
     subject = str(payload.get("subject", ""))
     body = str(payload.get("body", ""))
+    mode_value = (outcome_mode or normalized_outcomes or "hit").strip().lower()
+    tag = "Hit-only" if mode_value != "all" else "All"
+    prefix = f"[TEST {tag}]"
+    if prefix not in subject:
+        subject = f"{prefix} {subject}" if subject else prefix
+    if simulated and "(Simulated)" not in subject:
+        subject = subject.replace("Favorites Alert:", "Favorites Alert (Simulated):")
     return subject, body

@@ -9,6 +9,7 @@ import io
 import json
 import logging
 import math
+import time
 import os
 import re
 import secrets
@@ -19,7 +20,7 @@ import urllib.parse
 from concurrent.futures import as_completed
 from datetime import datetime, timedelta, timezone
 from threading import Lock, Thread
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional
 from uuid import uuid4
 
 import pandas as pd
@@ -43,12 +44,17 @@ from db import (
 )
 from indices import SP100, TOP150, TOP250
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
-from scanner import compute_scan_for_ticker
+from scanner import compute_scan_for_ticker, export_simulation_artifacts
 from services import executor, favorites_alerts, http_client, price_store, sms_consent, twilio_client
 from services.favorites import canonical_direction, ensure_favorite_directions
 from services.notify import send_email_smtp
 from services.scanner_params import coerce_scan_params
 from services.telemetry import log as log_telemetry
+from services.config import DEBUG_SIMULATION
+from services.favorites_alerts import deliver_preview_alert
+from services.simulator import SimEvent, build_sim_hit, build_sim_stop
+from services.scheduler import _align_to_bar, _dedupe_key, was_sent_key
+from services.forward_runs import log_forward_entry, log_forward_exit
 from services.market_data import (
     expected_bar_count,
     fetch_prices,
@@ -86,6 +92,7 @@ _SCHWAB_STATE_LOCK = Lock()
 
 _EMPTY_HEATMAP: Dict[str, Any] = {"index": [], "columns": [], "values": [], "meta": {}}
 _LATEST_HEATMAP: Dict[str, Any] = dict(_EMPTY_HEATMAP)
+_HEATMAP_CACHE: Dict[str, Any] = {"data": None, "expires": 0.0}
 
 _SMS_CONSENT_TEXT = (
     "I agree to receive automated Petra Stock SMS alerts. Msg & data rates may apply. "
@@ -927,9 +934,13 @@ def _update_heatmap(rows: list[dict[str, Any]] | None) -> None:
     global _LATEST_HEATMAP
     try:
         _LATEST_HEATMAP = _build_heatmap(rows)
+        _HEATMAP_CACHE["data"] = None
+        _HEATMAP_CACHE["expires"] = 0.0
     except Exception:
         logger.exception("Failed to build heatmap data")
         _LATEST_HEATMAP = dict(_EMPTY_HEATMAP)
+        _HEATMAP_CACHE["data"] = None
+        _HEATMAP_CACHE["expires"] = 0.0
 
 
 def _parse_support_snapshot(raw: Any) -> tuple[int | None, dict[str, Any] | None]:
@@ -1837,13 +1848,23 @@ def scanner_page(request: Request):
 
 @router.get("/heatmap.json")
 def heatmap_json():
+    now = time.time()
+    if (
+        isinstance(_HEATMAP_CACHE.get("data"), dict)
+        and now < float(_HEATMAP_CACHE.get("expires", 0.0))
+    ):
+        return _HEATMAP_CACHE["data"]
+
     data = _LATEST_HEATMAP or _EMPTY_HEATMAP
-    return {
+    payload = {
         "index": list(data.get("index", [])),
         "columns": list(data.get("columns", [])),
         "values": [list(row) for row in data.get("values", [])],
         "meta": dict(data.get("meta", {})),
     }
+    _HEATMAP_CACHE["data"] = payload
+    _HEATMAP_CACHE["expires"] = now + 300.0
+    return payload
 
 
 @router.get("/heatmap", response_class=HTMLResponse)
@@ -2874,24 +2895,57 @@ async def favorites_add(request: Request, db=Depends(get_db)):
 
 @router.post("/favorites/test_alert")
 @router.post("/settings/test-alert")
-def favorites_test_alert(payload: dict = Body(...), db=Depends(get_db)):
-    symbol = (payload.get("symbol") or payload.get("ticker") or "AAPL").upper()
+async def favorites_test_alert(
+    request: Request,
+    payload: dict | None = Body(default=None),
+    db=Depends(get_db),
+):
+    form_data: dict[str, Any] = {}
+    try:
+        form = await request.form()
+        form_data = {k: v for k, v in form.multi_items()}
+    except Exception:
+        form_data = {}
+
+    payload = payload or {}
+    symbol_raw = (
+        form_data.get("symbol")
+        or payload.get("symbol")
+        or payload.get("ticker")
+        or "AAPL"
+    )
+    symbol = str(symbol_raw or "AAPL").upper()
+
     configured_channel = getattr(
         settings, "alert_channel", getattr(settings, "ALERT_CHANNEL", "Email")
     )
-    payload_channel = payload.get("channel")
-    channel_label = (payload_channel or configured_channel or "Email").strip() or "Email"
-    channel = channel_label.lower()
-    if channel not in {"email", "mms"}:
-        channel = "mms"
-        channel_label = "MMS"
-    else:
-        channel_label = "Email" if channel == "email" else "MMS"
+    raw_channel = (
+        form_data.get("channel")
+        or payload.get("channel")
+        or configured_channel
+        or "email"
+    )
+    channel = str(raw_channel or "email").strip().lower() or "email"
+    if channel not in {"email", "mms", "sms"}:
+        channel = "email"
+    channel_label_map = {"email": "Email", "mms": "MMS", "sms": "SMS"}
+    channel_label = channel_label_map.get(channel, "Email")
+
     outcomes_config = getattr(
         settings, "alert_outcomes", getattr(settings, "ALERT_OUTCOMES", "hit")
     )
-    payload_outcomes = payload.get("outcomes")
-    outcomes = (payload_outcomes or outcomes_config or "hit").strip().lower() or "hit"
+    raw_outcomes = (
+        form_data.get("outcomes")
+        or payload.get("outcomes")
+        or outcomes_config
+        or "hit"
+    )
+    outcomes = str(raw_outcomes or "hit").strip().lower() or "hit"
+
+    logger.info(
+        "favorites_test_alert_request channel=%s outcomes=%s", channel, outcomes
+    )
+
     ok, message = favorites_alerts.enrich_and_send_test(
         symbol,
         "UP",
@@ -2926,104 +2980,77 @@ def favorites_test_alert(payload: dict = Body(...), db=Depends(get_db)):
 
     delivery_context = {"symbol": symbol, "fav_id": "test", "outcomes": outcomes}
 
-    if channel == "email":
+    def send_email_via_smtp(body_text: str, *, fallback: bool = False):
         st = get_settings(db)
         cfg, missing, _ = _smtp_config_status(st)
         if not cfg["recipients"]:
             missing = list(dict.fromkeys(missing + ["recipients"]))
         if missing:
-            error = f"SMTP not configured: {_format_missing_fields(sorted(set(missing)))}"
-            log_telemetry(
-                {
-                    "type": "favorites_test_alert_send",
-                    "channel": "email",
-                    "provider": "smtp",
-                    "ok": False,
-                    "error": error,
-                    "outcomes": outcomes,
-                }
-            )
-            response.update({"ok": False, "error": error})
-            base_telem["ok"] = False
-            log_telemetry(base_telem)
-            return JSONResponse(response, status_code=400)
+            error_msg = f"SMTP not configured: {_format_missing_fields(sorted(set(missing)))}"
+            return False, error_msg, None, 400
 
-        send_result = send_email_smtp(
-            cfg["host"],
-            cfg["port"],
-            cfg["user"],
-            cfg["password"],
-            cfg["mail_from"] or cfg["user"],
-            cfg["recipients"],
-            subject or f"Favorites Alert Test: {symbol}",
-            body,
-            context={**delivery_context, "channel": "email"},
-        )
-        if not send_result.get("ok"):
-            error = send_result.get("error", "SMTP send failed")
-            log_telemetry(
-                {
-                    "type": "favorites_test_alert_send",
-                    "channel": "email",
-                    "provider": "smtp",
-                    "ok": False,
-                    "error": error,
-                    "outcomes": outcomes,
-                }
+        host = cfg.get("host")
+        port = cfg.get("port")
+        user = cfg.get("user", "")
+        password = cfg.get("password", "")
+        mail_from = cfg.get("mail_from") or user
+        if not host or not port or not mail_from:
+            return False, "SMTP not configured: host/port/mail_from missing", None, 400
+
+        context = {**delivery_context, "channel": "email"}
+        if fallback:
+            context["fallback_from"] = channel
+
+        try:
+            send_result = send_email_smtp(
+                str(host),
+                int(port),
+                str(user or ""),
+                str(password or ""),
+                str(mail_from),
+                cfg["recipients"],
+                subject or f"Favorites Alert Test: {symbol}",
+                body_text,
+                context=context,
             )
-            response.update({"ok": False, "error": error})
-            base_telem["ok"] = False
-            log_telemetry(base_telem)
-            return JSONResponse(response, status_code=502)
+        except Exception:
+            logger.exception("favorites test alert email send raised")
+            return False, "SMTP send failed", None, 502
+
+        if not send_result.get("ok"):
+            error_msg = send_result.get("error", "SMTP send failed")
+            return False, error_msg, None, 502
 
         message_id = send_result.get("message_id", "")
-        response.update({"ok": True, "message_id": message_id})
+        return True, None, message_id, 200
+
+    if channel == "email":
+        success, error_msg, message_id, status_code = send_email_via_smtp(body)
         log_telemetry(
             {
                 "type": "favorites_test_alert_send",
                 "channel": "email",
                 "provider": "smtp",
-                "ok": True,
-                "message_id": message_id,
+                "ok": success,
+                "error": error_msg if not success else None,
+                "message_id": message_id if success else None,
                 "outcomes": outcomes,
             }
         )
-        base_telem["ok"] = True
+        base_telem["ok"] = success
         log_telemetry(base_telem)
+        if not success:
+            response.update({"ok": False, "error": error_msg or "SMTP send failed"})
+            return JSONResponse(response, status_code=status_code)
+        response.update({"ok": True, "message_id": message_id})
         return response
 
-    if not twilio_client.is_enabled():
-        error = "Twilio not configured"
-        log_telemetry(
-            {
-                "type": "favorites_test_alert_send",
-                "channel": "mms",
-                "provider": "twilio",
-                "ok": False,
-                "error": error,
-                "outcomes": outcomes,
-            }
-        )
-        base_telem["ok"] = False
-        log_telemetry(base_telem)
-        response.update({"ok": False, "error": error})
-        return JSONResponse(response, status_code=400)
-
-    destinations = sms_consent.active_destinations()
-    if not destinations:
-        error = "No SMS recipients opted-in"
-        log_telemetry(
-            {
-                "type": "favorites_test_alert_send",
-                "channel": "mms",
-                "provider": "twilio",
-                "ok": False,
-                "error": error,
-                "outcomes": outcomes,
-            }
-        )
-    else:
-        success = False
+    twilio_enabled = twilio_client.is_enabled()
+    destinations = sms_consent.active_destinations() if twilio_enabled else []
+    success = False
+    fallback_needed = not twilio_enabled
+    fallback_reason = "Twilio not configured" if not twilio_enabled else ""
+    if twilio_enabled and destinations:
         message_body = sms_consent.append_footer(body)
         for dest in destinations:
             number = sms_consent.normalize_phone(str(dest.get("phone_e164") or ""))
@@ -3034,11 +3061,16 @@ def favorites_test_alert(payload: dict = Body(...), db=Depends(get_db)):
                 continue
             context = {
                 **delivery_context,
-                "channel": "mms",
+                "channel": channel,
                 "to": number,
                 "user_id": (consent_row or {}).get("user_id"),
             }
-            if twilio_client.send_mms(number, message_body, context=context):
+            try:
+                send_ok = twilio_client.send_mms(number, message_body, context=context)
+            except Exception:
+                logger.exception("favorites test alert mms send raised")
+                send_ok = False
+            if send_ok:
                 sms_consent.record_delivery(
                     number,
                     (consent_row or {}).get("user_id"),
@@ -3046,26 +3078,61 @@ def favorites_test_alert(payload: dict = Body(...), db=Depends(get_db)):
                     message_type="test",
                 )
                 success = True
+        if not success:
+            fallback_needed = True
+            fallback_reason = f"No {channel.upper()} deliveries succeeded"
+    elif twilio_enabled and not destinations:
+        fallback_needed = False
+        fallback_reason = "No SMS recipients opted-in"
+
+    log_telemetry(
+        {
+            "type": "favorites_test_alert_send",
+            "channel": channel,
+            "provider": "twilio",
+            "ok": success,
+            "error": None if success else fallback_reason,
+            "outcomes": outcomes,
+        }
+    )
+
+    if success:
+        base_telem["ok"] = True
+        log_telemetry(base_telem)
+        return response
+
+    if fallback_needed:
+        fallback_label = "MMS" if channel != "sms" else "SMS"
+        fallback_body = f"{body}\n\n[Sent via Email — {fallback_label} unavailable]"
+        response["body"] = fallback_body
+        response["channel"] = "Email"
+        channel_label = "Email"
+        email_success, email_error, message_id, status_code = send_email_via_smtp(
+            fallback_body, fallback=True
+        )
         log_telemetry(
             {
                 "type": "favorites_test_alert_send",
-                "channel": "mms",
-                "provider": "twilio",
-                "ok": success,
+                "channel": "email",
+                "provider": "smtp",
+                "ok": email_success,
+                "error": email_error if not email_success else None,
+                "message_id": message_id if email_success else None,
                 "outcomes": outcomes,
             }
         )
-        base_telem["ok"] = success
+        base_telem.update({"ok": email_success, "channel": "email"})
         log_telemetry(base_telem)
-        if success:
+        if email_success:
+            response.update({"ok": True, "message_id": message_id})
             return response
-        error = "No MMS deliveries succeeded"
-        response.update({"ok": False, "error": error})
-        return JSONResponse(response, status_code=502)
+        response.update({"ok": False, "error": email_error or fallback_reason})
+        return JSONResponse(response, status_code=status_code)
 
     base_telem["ok"] = False
     log_telemetry(base_telem)
-    response.update({"ok": False, "error": error})
+    error_message = fallback_reason or "Unable to send MMS"
+    response.update({"ok": False, "error": error_message})
     return JSONResponse(response, status_code=400)
 
 
@@ -3635,4 +3702,133 @@ async def twilio_inbound_sms(request: Request, db=Depends(get_db)):
     return _twiml_response(
         "Unrecognized response. Reply HELP for info or START to opt back in."
     )
+
+@router.post("/debug/simulate")
+async def simulate_favorite(payload: dict = Body(...), db=Depends(get_db)):
+    if not DEBUG_SIMULATION:
+        raise HTTPException(status_code=403, detail="Simulation disabled")
+    payload = payload or {}
+    symbol = (payload.get("symbol") or "").strip().upper()
+    if not symbol:
+        raise HTTPException(status_code=400, detail="symbol is required")
+    direction = canonical_direction(payload.get("direction")) or "UP"
+    outcome = (payload.get("outcome") or "hit").strip().lower() or "hit"
+    channel = (payload.get("channel") or "email").strip().lower() or "email"
+    outcomes_mode = (payload.get("outcomes_mode") or "hit").strip().lower() or "hit"
+    interval = (payload.get("interval") or "15m").strip() or "15m"
+    bar_ts_raw = payload.get("bar_ts")
+    if bar_ts_raw:
+        text = str(bar_ts_raw)
+        if text.endswith("Z"):
+            text = f"{text[:-1]}+00:00"
+        bar_dt = datetime.fromisoformat(text)
+    else:
+        bar_dt = datetime.now(timezone.utc)
+    if bar_dt.tzinfo is None:
+        bar_dt = bar_dt.replace(tzinfo=timezone.utc)
+    bar_dt = bar_dt.astimezone(timezone.utc)
+    aligned = _align_to_bar(bar_dt, interval)
+    favorite_key = payload.get("favorite_id") or f"sim:{symbol}:{direction}"
+    dedupe_key = _dedupe_key(favorite_key, interval, aligned, outcome)
+    was_already = was_sent_key(
+        favorite_key,
+        aligned.isoformat(),
+        interval=interval,
+        dedupe_key=dedupe_key,
+    )
+
+    if outcome == "hit":
+        sim_event = build_sim_hit(symbol, direction, aligned)
+    elif outcome == "stop":
+        sim_event = build_sim_stop(symbol, direction, aligned)
+    else:
+        sim_event = SimEvent(symbol=symbol, direction=direction, outcome=outcome, bar_ts=aligned)
+
+    subject, _ = favorites_alerts.build_preview(
+        symbol,
+        direction,
+        channel=channel,
+        outcomes=outcomes_mode,
+        outcome_mode=outcomes_mode,
+        simulated=True,
+    )
+    bodies: dict[str, str] = {}
+    for variant in ("email", "mms", "sms"):
+        ok, preview_payload = favorites_alerts.enrich_and_send_test(
+            symbol,
+            direction,
+            channel=variant,
+            outcomes=outcomes_mode,
+        )
+        if ok and isinstance(preview_payload, dict):
+            bodies[variant] = str(preview_payload.get("body", ""))
+            if variant == channel and not subject:
+                subject = str(preview_payload.get("subject", subject))
+    if channel not in bodies:
+        bodies[channel] = bodies.get("email") or bodies.get("mms") or bodies.get("sms") or ""
+
+    smtp_config = None
+    if isinstance(payload.get("smtp"), Mapping):
+        smtp_config = {k: payload["smtp"].get(k) for k in ("host", "port", "user", "password", "mail_from")}
+
+    email_recipients = None
+    if isinstance(payload.get("recipients"), list):
+        email_recipients = [str(value) for value in payload["recipients"] if value]
+
+    response: dict[str, Any] = {
+        "symbol": symbol,
+        "direction": direction,
+        "outcome": outcome,
+        "dedupe_key": dedupe_key,
+        "was_sent": bool(was_already),
+        "event": {
+            "symbol": sim_event.symbol,
+            "direction": sim_event.direction,
+            "outcome": sim_event.outcome,
+            "bar_ts": sim_event.bar_ts.isoformat(),
+        },
+    }
+    if not was_already:
+        delivery = deliver_preview_alert(
+            subject,
+            bodies,
+            channel=channel,
+            favorite_id=favorite_key,
+            bar_time=aligned.isoformat(),
+            interval=interval,
+            dedupe_key=dedupe_key,
+            simulated=True,
+            outcome=outcome,
+            symbol=symbol,
+            direction=direction,
+            smtp_config=smtp_config,
+            recipients=email_recipients,
+        )
+        response["delivery"] = delivery
+        exit_dt = aligned + timedelta(minutes=15)
+        roi_value = 1.8 if outcome == "hit" else (-1.0 if outcome == "stop" else 0.0)
+        tt_bars = 3 if outcome == "hit" else 2
+        dd_value = 0.5 if outcome != "hit" else 0.2
+        log_forward_entry(
+            db,
+            favorite_key,
+            aligned.isoformat(),
+            None,
+            None,
+            simulated=True,
+        )
+        log_forward_exit(
+            db,
+            favorite_key,
+            aligned.isoformat(),
+            exit_dt.isoformat(),
+            None,
+            outcome,
+            roi_value,
+            tt_bars,
+            dd_value,
+            simulated=True,
+        )
+        export_simulation_artifacts([symbol])
+    return response
 

@@ -28,6 +28,8 @@ def log_forward_entry(
     entry_ts: str | None,
     entry_px: float | None,
     rule_hash: str | None,
+    *,
+    simulated: bool = False,
 ) -> None:
     fav_key = _normalize_favorite_id(favorite_id)
     if not fav_key or not entry_ts:
@@ -38,12 +40,14 @@ def log_forward_entry(
         entry_price = None
     db.execute(
         """
-        INSERT INTO forward_runs (favorite_id, entry_ts, entry_px, rule_hash)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO forward_runs (favorite_id, entry_ts, entry_px, rule_hash, simulated)
+        VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(favorite_id, entry_ts)
-        DO UPDATE SET entry_px=excluded.entry_px, rule_hash=excluded.rule_hash
+        DO UPDATE SET entry_px=excluded.entry_px,
+                      rule_hash=excluded.rule_hash,
+                      simulated=excluded.simulated
         """,
-        (fav_key, entry_ts, entry_price, rule_hash),
+        (fav_key, entry_ts, entry_price, rule_hash, 1 if simulated else 0),
     )
     invalidate_forward_summary(fav_key)
 
@@ -58,6 +62,8 @@ def log_forward_exit(
     roi: float | None,
     tt_bars: int | None,
     dd: float | None,
+    *,
+    simulated: bool = False,
 ) -> None:
     fav_key = _normalize_favorite_id(favorite_id)
     if not fav_key or not entry_ts:
@@ -84,7 +90,7 @@ def log_forward_exit(
     db.execute(
         """
         UPDATE forward_runs
-           SET exit_ts=?, exit_px=?, outcome=?, roi=?, tt_bars=?, dd=?
+           SET exit_ts=?, exit_px=?, outcome=?, roi=?, tt_bars=?, dd=?, simulated=?
          WHERE favorite_id=? AND entry_ts=?
         """,
         (
@@ -94,6 +100,7 @@ def log_forward_exit(
             roi_value,
             bars_value,
             dd_value,
+            1 if simulated else 0,
             fav_key,
             entry_ts,
         ),
@@ -122,7 +129,7 @@ def _fetch_history(
     db.execute(
         """
         SELECT favorite_id, entry_ts, entry_px, exit_ts, exit_px, outcome,
-               roi, tt_bars, dd, rule_hash
+               roi, tt_bars, dd, rule_hash, simulated
           FROM forward_runs
          WHERE favorite_id=?
          ORDER BY entry_ts DESC
