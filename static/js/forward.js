@@ -135,9 +135,9 @@
       return '';
     }
     if(timeFormatter){
-      return `@${timeFormatter.format(date)}`;
+      return timeFormatter.format(date);
     }
-    return `@${date.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'})}`;
+    return date.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
   }
 
   function formatSignedPercent(value){
@@ -173,6 +173,31 @@
       return `${Math.round(num)}b`;
     }
     return `${num.toFixed(1)}b`;
+  }
+
+  function formatRecentEntry(entry){
+    if(!entry || typeof entry !== 'object'){
+      return '';
+    }
+    const rawDate = entry.date;
+    let dateLabel = '';
+    if(rawDate){
+      const dt = new Date(rawDate);
+      if(!Number.isNaN(dt.getTime())){
+        dateLabel = dt.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+      } else if(typeof rawDate === 'string'){
+        dateLabel = rawDate.trim();
+      }
+    }
+    const outcome = typeof entry.outcome === 'string' ? entry.outcome.trim().toUpperCase() : '';
+    const roiText = formatSignedPercent(entry.roi);
+    const barsText = formatBars(entry.tt);
+    const pieces = [];
+    if(dateLabel){ pieces.push(dateLabel); }
+    if(outcome){ pieces.push(outcome); }
+    if(roiText){ pieces.push(roiText); }
+    if(barsText){ pieces.push(`@${barsText}`); }
+    return pieces.join(' ');
   }
 
   function formatCount(value){
@@ -849,10 +874,11 @@
     if(hasRecency){
       recencyBadge = document.createElement('span');
       recencyBadge.className = 'summary-recency-badge';
-      recencyBadge.textContent = 'RECENCY ON';
       const halfLifeValue = coerceNumber(summary.half_life_days);
       const halfLifeLabel = formatCount(summary.half_life_days);
       const halfLifeText = halfLifeLabel ? `${halfLifeLabel} day${halfLifeValue !== null && Math.abs(halfLifeValue - 1) < 1e-6 ? '' : 's'}` : '';
+      const badgeSuffix = halfLifeValue !== null ? `${Math.round(halfLifeValue)}d` : '';
+      recencyBadge.textContent = badgeSuffix ? `RECENCY ON (HL=${badgeSuffix})` : 'RECENCY ON';
       recencyBadge.title = halfLifeText ? `Exp weighting, half-life ${halfLifeText}` : 'Exp weighting active';
       recencyBadge.setAttribute('data-testid', 'recency-badge');
       chips.appendChild(recencyBadge);
@@ -966,12 +992,37 @@
       summaryTooltip.push(speedTooltipParts.join(' · '));
     }
     cell.content.title = summaryTooltip.filter(Boolean).join(' | ');
+    const recentRaw = Array.isArray(summary?.recent) ? summary.recent : Array.isArray(summary?.recent3) ? summary.recent3 : [];
+    const recentEntries = Array.isArray(recentRaw) ? recentRaw.filter(Boolean) : [];
+    if(recentEntries.length){
+      const recentWrap = document.createElement('div');
+      recentWrap.className = 'summary-recent';
+      recentWrap.setAttribute('data-testid', 'recent-preview');
+      recentEntries.slice(0, 2).forEach((entry) => {
+        const text = formatRecentEntry(entry);
+        if(!text){
+          return;
+        }
+        const chip = document.createElement('span');
+        chip.className = 'summary-recent-item';
+        chip.textContent = text;
+        recentWrap.appendChild(chip);
+      });
+      if(recentEntries.length > 2){
+        const more = document.createElement('span');
+        more.className = 'summary-recent-more';
+        more.textContent = `+${recentEntries.length - 2} more`;
+        recentWrap.appendChild(more);
+      }
+      cell.content.appendChild(recentWrap);
+    }
+
     return cell;
   }
 
   function buildTimelineDisplay(fav){
     const container = document.createElement('span');
-    container.className = 'timeline-text';
+    container.className = 'timeline-text timeline-chip';
     const forward = fav.forward;
     const events = Array.isArray(forward?.events) ? forward.events : [];
     if(events.length === 0){
@@ -981,60 +1032,49 @@
 
     const entry = events[0] || {};
     const entryTime = formatEventTime(entry.ts);
-    const parts = [];
+    const entryType = (typeof entry.t === 'string' ? entry.t : 'detect').toLowerCase() || 'detect';
+    const labelParts = [];
     if(entryTime){
-      container.append(entryTime);
-      parts.push(entryTime);
+      labelParts.push(`${entryTime} ${entryType}`);
     } else {
-      container.append('—');
-      parts.push('—');
+      labelParts.push('—');
     }
 
     if(events.length === 1){
-      container.append(' …');
-      parts.push('…');
-      return {node: container, label: parts.join(' ').trim()};
+      labelParts.push('→ …');
+      const labelSingle = labelParts.join(' ').replace(/\s+/g, ' ').trim();
+      container.textContent = labelSingle;
+      container.title = labelSingle;
+      return {node: container, label: labelSingle};
     }
 
     const exit = events[1] || {};
-    container.append(' → ');
-    parts.push('→');
-
-    const rawType = typeof exit.t === 'string' ? exit.t.toLowerCase() : '';
-    const badgeType = rawType === 'hit' || rawType === 'stop' || rawType === 'timeout'
-      ? rawType
-      : 'neutral';
-    const badge = document.createElement('span');
-    badge.className = `timeline-badge timeline-badge-${badgeType}`;
-    const badgeText = (rawType || '').toUpperCase() || 'EXIT';
-    badge.textContent = badgeText;
-    container.appendChild(badge);
-    parts.push(badgeText);
-
     const exitTime = formatEventTime(exit.ts);
-    if(exitTime){
-      container.append(' ');
-      container.append(exitTime);
-      parts.push(exitTime);
-    }
+    const exitType = (typeof exit.t === 'string' ? exit.t : 'exit').toLowerCase() || 'exit';
+    const exitSegment = exitTime ? `${exitTime} ${exitType}` : exitType;
+    labelParts.push('→', exitSegment);
 
     const extras = [];
     const roiText = formatSignedPercent(exit.roi);
     if(roiText){
       extras.push(roiText);
     }
-    const barText = formatBars(exit.tt_bars);
-    if(barText){
-      extras.push(barText);
+    const barsValue = coerceNumber(exit.tt_bars);
+    if(barsValue !== null){
+      const rounded = Math.round(barsValue);
+      const barsLabel = Number.isFinite(rounded) ? `${rounded} bar${rounded === 1 ? '' : 's'}` : '';
+      if(barsLabel){
+        extras.push(`in ${barsLabel}`);
+      }
     }
     if(extras.length){
-      const extra = ` (${extras.join(' | ')})`;
-      container.append(extra);
-      parts.push(extra.trim());
+      labelParts.push(`(${extras.join(' ')})`);
     }
 
-    const label = parts.join(' ').replace(/\s+/g, ' ').trim();
-    return {node: container, label: label || badgeText};
+    const label = labelParts.join(' ').replace(/\s+/g, ' ').trim();
+    container.textContent = label;
+    container.title = label;
+    return {node: container, label: label};
   }
 
   function createClampCell(extraClass='', toggleLabel='Expand cell'){

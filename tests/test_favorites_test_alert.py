@@ -99,13 +99,11 @@ def test_favorites_test_alert_mms(tmp_path, monkeypatch):
     assert send_calls[0][0] == "+18005550100"
     assert send_calls[0][2]["channel"] == "mms"
     assert send_calls[0][1].endswith("STOP=opt-out, HELP=help")
-    assert events[-2] == {
-        "type": "favorites_test_alert_send",
-        "channel": "mms",
-        "provider": "twilio",
-        "ok": True,
-        "outcomes": "all",
-    }
+    assert events[-2]["type"] == "favorites_test_alert_send"
+    assert events[-2]["channel"] == "mms"
+    assert events[-2]["provider"] == "twilio"
+    assert events[-2]["ok"] is True
+    assert events[-2]["outcomes"] == "all"
     assert events[-1] == {
         "type": "favorites_test_alert",
         "symbol": "AAPL",
@@ -113,6 +111,30 @@ def test_favorites_test_alert_mms(tmp_path, monkeypatch):
         "outcomes": "all",
         "ok": True,
     }
+
+
+def test_favorites_test_alert_sms_compact(tmp_path, monkeypatch):
+    configure_settings(monkeypatch, channel="SMS", outcomes="hit", sms_to=("18005550200",))
+    stub_sms_consent(monkeypatch, ("18005550200",))
+
+    send_calls: list[tuple[str, str, dict | None]] = []
+
+    def fake_twilio(number, body, *, context=None):
+        send_calls.append((number, body, context))
+        return True
+
+    monkeypatch.setattr(routes.twilio_client, "send_mms", fake_twilio)
+    monkeypatch.setattr(routes.twilio_client, "is_enabled", lambda: True)
+
+    client, events = setup_app(tmp_path, monkeypatch)
+    res = client.post("/settings/test-alert", json={"symbol": "MSFT", "channel": "sms"})
+    assert res.status_code == 200
+    data = res.json()
+    assert data["channel"] == "SMS"
+    assert "\n" not in data["body"]
+    assert "Targets" in data["body"]
+    assert send_calls and send_calls[0][2]["channel"] == "sms"
+    assert events[-1]["channel"] == "sms"
 
 
 def test_settings_test_alert_overrides(tmp_path, monkeypatch):
@@ -161,6 +183,89 @@ def test_settings_test_alert_overrides(tmp_path, monkeypatch):
     assert sent and sent[0][0] == "+18005550100"
     assert sent[0][1].endswith("STOP=opt-out, HELP=help")
     assert events[-1]["outcomes"] == "all"
+
+
+def test_test_alert_mms_fallbacks_to_email(tmp_path, monkeypatch):
+    configure_settings(monkeypatch, channel="MMS", outcomes="hit", sms_to=("18005550100",))
+
+    def fake_enrich(symbol, direction, channel="mms", compact=False, outcomes="hit"):
+        return True, {"subject": "Fallback", "body": "Body line"}
+
+    monkeypatch.setattr(routes.favorites_alerts, "enrich_and_send_test", fake_enrich)
+    monkeypatch.setattr(routes.twilio_client, "is_enabled", lambda: False)
+
+    sent_call = {}
+
+    def fake_send(host, port, user, password, mail_from, to, subject, body, *, context=None):
+        sent_call.update(
+            {
+                "host": host,
+                "port": port,
+                "user": user,
+                "password": password,
+                "mail_from": mail_from,
+                "to": to,
+                "subject": subject,
+                "body": body,
+                "context": context,
+            }
+        )
+        return {"ok": True, "message_id": "<fallback>"}
+
+    monkeypatch.setattr(routes, "send_email_smtp", fake_send)
+
+    client, events = setup_app(tmp_path, monkeypatch)
+
+    conn = sqlite3.connect(db.DB_PATH)
+    conn.execute(
+        """
+        UPDATE settings
+           SET smtp_host=?, smtp_port=?, smtp_user=?, smtp_pass=?, mail_from=?, recipients=?
+         WHERE id=1
+        """,
+        (
+            "smtp.gmail.com",
+            587,
+            "alerts@gmail.com",
+            "app-pass",
+            "Petra Alerts <alerts@gmail.com>",
+            "fallback@example.com",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    res = client.post(
+        "/settings/test-alert",
+        json={"symbol": "AAPL", "channel": "mms"},
+    )
+    assert res.status_code == 200
+    data = res.json()
+    assert data["channel"] == "Email"
+    assert data["ok"] is True
+    assert data["message_id"] == "<fallback>"
+    assert "[Sent via Email — MMS unavailable]" in data["body"]
+    assert sent_call["to"] == ["fallback@example.com"]
+    assert sent_call["context"]["fallback_from"] == "mms"
+    assert events[-3]["type"] == "favorites_test_alert_send"
+    assert events[-3]["channel"] == "mms"
+    assert events[-3]["provider"] == "twilio"
+    assert events[-3]["ok"] is False
+    assert events[-3]["error"] == "Twilio not configured"
+    assert events[-3]["outcomes"] == "hit"
+    assert events[-2]["type"] == "favorites_test_alert_send"
+    assert events[-2]["channel"] == "email"
+    assert events[-2]["provider"] == "smtp"
+    assert events[-2]["ok"] is True
+    assert events[-2]["message_id"] == "<fallback>"
+    assert events[-2]["outcomes"] == "hit"
+    assert events[-1] == {
+        "type": "favorites_test_alert",
+        "symbol": "AAPL",
+        "channel": "email",
+        "outcomes": "hit",
+        "ok": True,
+    }
 
 
 def test_test_alert_email_success_returns_message_id(tmp_path, monkeypatch):
@@ -237,14 +342,12 @@ def test_test_alert_email_success_returns_message_id(tmp_path, monkeypatch):
     }
     assert sent_call["to"] == ["test@example.com"]
     assert sent_call["context"]["channel"] == "email"
-    assert events[-2] == {
-        "type": "favorites_test_alert_send",
-        "channel": "email",
-        "provider": "smtp",
-        "ok": True,
-        "message_id": "<msg-123>",
-        "outcomes": "hit",
-    }
+    assert events[-2]["type"] == "favorites_test_alert_send"
+    assert events[-2]["channel"] == "email"
+    assert events[-2]["provider"] == "smtp"
+    assert events[-2]["ok"] is True
+    assert events[-2]["message_id"] == "<msg-123>"
+    assert events[-2]["outcomes"] == "hit"
     assert events[-1] == {
         "type": "favorites_test_alert",
         "symbol": "AAPL",
@@ -288,14 +391,12 @@ def test_test_alert_email_missing_config_400(tmp_path, monkeypatch):
     assert data["channel"] == "Email"
     assert data["outcomes"] == "hit"
     assert "SMTP not configured" in data["error"]
-    assert events[-2] == {
-        "type": "favorites_test_alert_send",
-        "channel": "email",
-        "provider": "smtp",
-        "ok": False,
-        "error": data["error"],
-        "outcomes": "hit",
-    }
+    assert events[-2]["type"] == "favorites_test_alert_send"
+    assert events[-2]["channel"] == "email"
+    assert events[-2]["provider"] == "smtp"
+    assert events[-2]["ok"] is False
+    assert events[-2]["error"] == data["error"]
+    assert events[-2]["outcomes"] == "hit"
     assert events[-1] == {
         "type": "favorites_test_alert",
         "symbol": "AAPL",
@@ -317,15 +418,14 @@ def test_preview_returns_body_subject(tmp_path, monkeypatch):
     )
     assert res.status_code == 200
     data = res.json()
-    assert data == {
-        "ok": True,
-        "symbol": "MSFT",
-        "channel": "email",
-        "compact": True,
-        "outcomes": "hit",
-        "subject": "Preview MSFT",
-        "body": "Example body",
-    }
+    assert data["ok"] is True
+    assert data["symbol"] == "MSFT"
+    assert data["channel"] == "email"
+    assert data["compact"] is True
+    assert data["outcomes"] == "hit"
+    assert data["body"] == "Example body"
+    assert data["subject"].startswith("[TEST Hit-only]")
+    assert data["subject"].endswith("Preview MSFT")
     assert events == []
 
 

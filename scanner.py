@@ -1,12 +1,15 @@
 # ruff: noqa: E501
+import json
 import logging
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import pandas as pd
 
 from db import row_to_dict
 from services import favorites, favorites_alerts, settings
+from services.config import DEBUG_SIMULATION
 from services.market_data import (
     expected_bar_count,
     fetch_prices,
@@ -17,6 +20,37 @@ from services.price_utils import DataUnavailableError
 # Adapter to the original ROI engine
 _real_scan_single: Optional[Callable[[str, Dict[str, Any]], Dict[str, Any]]] = None
 logger = logging.getLogger(__name__)
+
+
+def export_simulation_artifacts(
+    symbols: Sequence[str],
+    *,
+    base_dir: Path | None = None,
+) -> list[Path]:
+    if not DEBUG_SIMULATION:
+        return []
+    target_dir = Path(base_dir or Path.cwd())
+    rows = [
+        {"symbol": sym, "exported_at": datetime.now(timezone.utc).isoformat()}
+        for sym in symbols
+    ]
+    csv_path = target_dir / "sim_export.csv"
+    json_path = target_dir / "sim_export.json"
+    try:
+        df = pd.DataFrame(rows)
+        df.to_csv(csv_path, index=False)
+        json_path.write_text(json.dumps(rows, indent=2), encoding="utf-8")
+        logger.info(
+            "scanner_export_complete",
+            extra={
+                "files": [str(csv_path), str(json_path)],
+                "simulated": True,
+            },
+        )
+        return [csv_path, json_path]
+    except Exception:
+        logger.exception("simulation export failed")
+        return []
 
 
 def _extract_bar_time_from_row(row: Mapping[str, Any]) -> Optional[str]:
@@ -59,19 +93,37 @@ def _finalize_row(row: Dict[str, Any]) -> Dict[str, Any]:
         return row
 
     fav_id_str = str(fav_id)
-    if favorites_alerts.was_sent(fav_id_str, bar_time):
+    interval_value = row.get("interval") if isinstance(row, Mapping) else None
+    if not interval_value:
+        interval_value = getattr(fav, "interval", None)
+    dedupe_key = favorites_alerts._dedupe_key(fav_id_str, interval_value, bar_time)  # type: ignore[attr-defined]
+    if favorites_alerts.was_sent(
+        fav_id_str,
+        bar_time,
+        interval=interval_value,
+        dedupe_key=dedupe_key,
+    ):
         return row
 
     channel = getattr(settings, "alert_channel", "Email")
     try:
-        delivered = favorites_alerts.enrich_and_send(fav, row, channel=channel)
+        delivery_result = favorites_alerts.enrich_and_send(fav, row, channel=channel)
+        if isinstance(delivery_result, Mapping):
+            delivered = bool(delivery_result.get("ok"))
+        else:
+            delivered = bool(delivery_result)
     except Exception:
         logger.exception("favorites alert send failed", exc_info=True)
         delivered = False
 
     if delivered:
         try:
-            favorites_alerts.mark_sent(fav_id_str, bar_time)
+            favorites_alerts.mark_sent(
+                fav_id_str,
+                bar_time,
+                interval=interval_value,
+                dedupe_key=dedupe_key,
+            )
         except Exception:
             logger.exception("favorites alert mark failed", exc_info=True)
 

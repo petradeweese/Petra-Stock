@@ -4,19 +4,21 @@
   <link rel="stylesheet" href="{{ url_for('static', path='css/heatmap.css') }}">
 {% endblock %}
 {% block content %}
-  <div class="card heatmap-card">
-    <div class="heatmap-header">
-      <div>
-        <h1 class="heatmap-title">Heatmap</h1>
-        <div class="heatmap-note">Sector × Ticker — Hit LB% (min support ≥ 10)</div>
+  <div class="card">
+    <div class="card-body">
+      <div class="card-title">Heatmap</div>
+      <p class="muted">Sector × Ticker — Hit LB% (min support ≥ 10)</p>
+      <div id="heatmap-message" class="muted" hidden>Loading heatmap…</div>
+      <div id="heatmap-empty" class="forward-empty-card" hidden>
+        <strong>No cells yet — run a scan or lower min support.</strong>
+        <p class="muted">Once scans complete, the heatmap will populate with the strongest sectors.</p>
       </div>
-    </div>
-    <div id="heatmap-message" class="heatmap-message" hidden>Loading heatmap…</div>
-    <div class="table-scroll" id="heatmap-table-container" hidden>
-      <table class="table table-compact table-hover heatmap-table" id="heatmap-table">
-        <thead></thead>
-        <tbody></tbody>
-      </table>
+      <div class="table-scroll" id="heatmap-table-container" hidden>
+        <table class="table table-compact table-hover" id="heatmap-table">
+          <thead></thead>
+          <tbody></tbody>
+        </table>
+      </div>
     </div>
   </div>
 {% endblock %}
@@ -28,6 +30,7 @@
     const tbody = table.querySelector('tbody');
     const container = document.getElementById('heatmap-table-container');
     const message = document.getElementById('heatmap-message');
+    const emptyCard = document.getElementById('heatmap-empty');
 
     function hexToRgb(hex){
       if(typeof hex !== 'string'){ return null; }
@@ -66,11 +69,19 @@
       message.textContent = text;
       message.hidden = false;
       container.hidden = true;
+      if(emptyCard){ emptyCard.hidden = true; }
     }
 
     function showTable(){
       message.hidden = true;
+      if(emptyCard){ emptyCard.hidden = true; }
       container.hidden = false;
+    }
+
+    function showEmpty(){
+      if(emptyCard){ emptyCard.hidden = false; }
+      message.hidden = true;
+      container.hidden = true;
     }
 
     function formatPercent(value, decimals){
@@ -88,7 +99,7 @@
       const meta = (data && typeof data.meta === 'object' && data.meta) ? data.meta : {};
 
       if(columns.length === 0 || index.length === 0){
-        showMessage('No heatmap data available.');
+        showEmpty();
         return;
       }
 
