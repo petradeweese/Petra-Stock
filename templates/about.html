@@ -1,0 +1,25 @@
+{% extends 'base.html' %}
+{% block title %}About Petra Stock{% endblock %}
+{% block body_class %}marketing marketing-secondary{% endblock %}
+{% block head_extra %}
+  <link rel="stylesheet" href="{{ url_for('static', path='css/marketing.css') }}" />
+{% endblock %}
+{% block nav_links %}
+  <a class="nav-link" href="/">Home</a>
+  <a class="nav-link" href="/about" aria-current="page">About</a>
+  <a class="nav-link" href="/contact">Contact</a>
+  <a class="nav-link" href="/privacy">Privacy Policy</a>
+  <a class="nav-link" href="/terms">Terms of Service</a>
+{% endblock %}
+{% block content %}
+  <article class="marketing-page">
+    <h1>What is Petra Stock?</h1>
+    <p>Petra Stock is a live market pattern scanner designed for active equities traders who want timely visibility into setups that match their playbook. We monitor price, volume, and momentum data intraday, evaluate probability, and surface the opportunities that meet your custom criteria.</p>
+    <p>When you enable pattern alerts, Petra Stock records your consent, verifies your phone number, and delivers informational SMS updates alongside email notifications. These alerts call out patterns we detect in the market—they are not trading advice, and you remain responsible for any decisions you make.</p>
+    <p>“Pattern alerts” are short summaries of the setups you track: breakouts, reversals, consolidations, and other price structures derived from our scanner. You can adjust frequency, timing, and delivery channels directly in the Petra Stock app.</p>
+    <section class="contact-block">
+      <h2>Contact</h2>
+      <p>Email <a href="mailto:support@petrastock.com">support@petrastock.com</a> with any questions or to request additional information.</p>
+    </section>
+  </article>
+{% endblock %}

@@ -98,7 +98,9 @@ def test_favorites_test_alert_mms(tmp_path, monkeypatch):
     }
     assert send_calls[0][0] == "+18005550100"
     assert send_calls[0][2]["channel"] == "mms"
-    assert send_calls[0][1].endswith("STOP=opt-out, HELP=help")
+    assert send_calls[0][1].endswith(
+        "STOP=opt-out, HELP=help, Msg&data rates may apply."
+    )
     assert events[-2]["type"] == "favorites_test_alert_send"
     assert events[-2]["channel"] == "mms"
     assert events[-2]["provider"] == "twilio"
@@ -181,7 +183,9 @@ def test_settings_test_alert_overrides(tmp_path, monkeypatch):
         "outcomes": "all",
     }
     assert sent and sent[0][0] == "+18005550100"
-    assert sent[0][1].endswith("STOP=opt-out, HELP=help")
+    assert sent[0][1].endswith(
+        "STOP=opt-out, HELP=help, Msg&data rates may apply."
+    )
     assert events[-1]["outcomes"] == "all"
 
 
@@ -244,7 +248,7 @@ def test_test_alert_mms_fallbacks_to_email(tmp_path, monkeypatch):
     assert data["channel"] == "Email"
     assert data["ok"] is True
     assert data["message_id"] == "<fallback>"
-    assert "[Sent via Email — MMS unavailable]" in data["body"]
+    assert "[Sent via Email — SMS unavailable]" in data["body"]
     assert sent_call["to"] == ["fallback@example.com"]
     assert sent_call["context"]["fallback_from"] == "mms"
     assert events[-3]["type"] == "favorites_test_alert_send"

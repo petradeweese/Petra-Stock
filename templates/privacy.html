@@ -1,18 +1,34 @@
-<!doctype html><html lang="en"><head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Privacy Policy — Petra Stock</title></head><body>
-<h1>Privacy Policy</h1>
-<p><strong>Effective Date:</strong> September 23, 2025</p>
-<p>Petra Stock collects: phone number, consent records (date/time, IP, user agent, method), and basic messaging metadata (delivery status, opt-out events). We do not sell or share personal data.</p>
-<h2>Use of Information</h2>
-<ul>
-  <li>Send the SMS alerts you explicitly requested.</li>
-  <li>Honor STOP/START/HELP and maintain compliance/audit logs.</li>
-</ul>
-<h2>Opt-Out</h2>
-<p>Reply <strong>STOP</strong> to any message to cancel. Reply <strong>HELP</strong> for assistance.</p>
-<h2>Retention</h2>
-<p>We retain consent logs for compliance. Request deletion at <a href="mailto:petrasstockalerts@gmail.com">petrasstockalerts@gmail.com</a>.</p>
-<h2>Contact</h2>
-<p>Email: <a href="mailto:petrasstockalerts@gmail.com">petrasstockalerts@gmail.com</a></p>
-</body></html>
+{% extends 'base.html' %}
+{% block title %}Privacy Policy — Petra Stock{% endblock %}
+{% block body_class %}marketing marketing-secondary{% endblock %}
+{% block head_extra %}
+  <link rel="stylesheet" href="{{ url_for('static', path='css/marketing.css') }}" />
+{% endblock %}
+{% block nav_links %}
+  <a class="nav-link" href="/">Home</a>
+  <a class="nav-link" href="/about">About</a>
+  <a class="nav-link" href="/contact">Contact</a>
+  <a class="nav-link" href="/privacy" aria-current="page">Privacy Policy</a>
+  <a class="nav-link" href="/terms">Terms of Service</a>
+{% endblock %}
+{% block content %}
+  <article class="marketing-page">
+    <h1>Privacy Policy</h1>
+    <p><strong>Effective:</strong> {{ current_year() }}</p>
+    <p>Petra Stock collects only the information required to deliver pattern alerts and maintain SMS compliance. This includes the phone numbers you verify, consent records (timestamp, IP, user agent, method), and basic messaging metadata such as delivery status and opt-out events.</p>
+    <h2>How we use your information</h2>
+    <ul>
+      <li>Send the SMS and email alerts you explicitly requested.</li>
+      <li>Log consent details so we can honor STOP/START/HELP keywords.</li>
+      <li>Analyze aggregate usage trends to improve alert quality.</li>
+    </ul>
+    <p>Message frequency varies by market activity and your settings, typically up to 10 msgs/day. Msg &amp; data rates may apply. Alerts are informational only and not financial advice.</p>
+    <h2>Opt-out and deletion</h2>
+    <p>Reply <strong>STOP</strong> to any Petra Stock SMS to opt out immediately. Reply <strong>HELP</strong> for assistance. You may email <a href="mailto:privacy@petrastock.com">privacy@petrastock.com</a> to request deletion of consent logs where permitted by law.</p>
+    <h2>Data retention</h2>
+    <p>We retain consent records for audit purposes while you are subscribed and as required to demonstrate compliance. Delivery metadata is kept for a limited period to troubleshoot issues and satisfy carrier requests.</p>
+    <h2>Contact</h2>
+    <p>Questions about this policy? Email <a href="mailto:privacy@petrastock.com">privacy@petrastock.com</a> or <a href="mailto:support@petrastock.com">support@petrastock.com</a>.</p>
+    <p class="footnote">Petra Stock will update this page if practices change and notify subscribers as required.</p>
+  </article>
+{% endblock %}

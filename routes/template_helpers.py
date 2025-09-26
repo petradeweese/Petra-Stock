@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from datetime import datetime, timezone
 from typing import Any
 
 import pandas as pd
@@ -77,4 +78,7 @@ def register_template_helpers(templates: Jinja2Templates) -> None:
 
     templates.env.filters["fmt_percent"] = fmt_percent
     templates.env.globals["_fmt_recent3"] = fmt_recent3
+    templates.env.globals["current_year"] = (
+        lambda: datetime.now(timezone.utc).year
+    )
 

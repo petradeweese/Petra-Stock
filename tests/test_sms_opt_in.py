@@ -130,7 +130,7 @@ def test_inbound_keywords_and_codes(tmp_path, monkeypatch):
         data={"From": "+18005551212", "Body": "STOP"},
     )
     assert res.status_code == 200
-    assert "opted out" in res.text
+    assert "opted out" in html.unescape(res.text).lower()
 
     conn = sqlite3.connect(db.DB_PATH)
     revoked = conn.execute(
@@ -144,27 +144,21 @@ def test_inbound_keywords_and_codes(tmp_path, monkeypatch):
         data={"From": "+18005551212", "Body": "START"},
     )
     assert res.status_code == 200
-    assert "verification code" in res.text
-    assert start_calls == ["+18005551212"]
-
-    res = client.post(
-        "/twilio/inbound-sms",
-        data={"From": "+18005551212", "Body": "123456"},
-    )
-    assert res.status_code == 200
-    assert "opted in" in res.text
+    assert "opted in" in html.unescape(res.text).lower()
+    assert start_calls == []
 
     rows = sms_consent.history_for_user("user-x")
     assert len(rows) == 2
     assert rows[0]["method"] == "sms-keyword"
-    assert rows[0]["verification_id"] == "verify-sid"
+    assert rows[0]["verification_id"] is None
+    assert rows[0]["revoked_at"] is None
 
     res = client.post(
         "/twilio/inbound-sms",
         data={"From": "+18005551212", "Body": "HELP"},
     )
     assert res.status_code == 200
-    assert "Msg&data rates may apply" in html.unescape(res.text)
+    assert "Msg & data rates may apply" in html.unescape(res.text)
 
 
 def test_allow_sending_rate_limit(tmp_path):

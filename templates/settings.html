@@ -185,21 +185,25 @@
         <input type="checkbox" id="sms-consent-checkbox" />
         <span id="sms-consent-copy" data-consent="{{ sms_consent_text }}">
           I agree to receive automated Petra Stock SMS alerts. Msg &amp; data rates may apply.
-          By checking this box, I agree to the
+          Message frequency varies by market activity and my settings, typically up to 10 msgs/day.
+          Alerts are informational only and not financial advice. By checking this box, I agree to the
           <a href="/terms" target="_blank" rel="noopener">Terms</a>
           and <a href="/privacy" target="_blank" rel="noopener">Privacy Policy</a>.
-          <span class="note" style="display:block; margin-top:0.5rem;">Reply STOP to opt out, HELP for help.</span>
         </span>
       </label>
+      <p class="note" id="sms-unavailable-note" {% if twilio_verify_enabled %}hidden{% endif %}>
+        Verification is unavailable. SMS alerts cannot be activated until Twilio verification is enabled.
+      </p>
       <div class="sms-grid">
         <div>
           <label for="sms-phone">Phone number</label>
           <input id="sms-phone" type="tel" value="{{ sms_state.phone or '' }}" placeholder="+1 555 555 1212" />
         </div>
         <div>
-          <button id="sms-verify-btn" type="button">Verify &amp; Opt-in</button>
+          <button id="sms-verify-btn" type="button" {% if not twilio_verify_enabled %}disabled{% endif %}>Verify &amp; Opt-in</button>
         </div>
       </div>
+      <p class="note" style="margin-top:-0.25rem;">Reply <strong>STOP</strong> to opt out, <strong>HELP</strong> for help.</p>
       <p id="sms-verify-error" class="note status-error" hidden></p>
       <div class="sms-history">
         <strong>History</strong>
@@ -296,6 +300,7 @@
     } catch (err) {
       smsState = {};
     }
+    const twilioVerifyEnabled = Boolean(smsState?.twilio_verify_enabled);
     const smsStatusEl = document.getElementById('sms-status-text');
     const smsHistoryList = document.getElementById('sms-history-list');
     const smsCheckbox = document.getElementById('sms-consent-checkbox');
@@ -308,9 +313,18 @@
     const consentCopyEl = document.getElementById('sms-consent-copy');
     const consentCopy = consentCopyEl?.dataset?.consent || '';
     const smsErrorEl = document.getElementById('sms-verify-error');
+    const smsUnavailableNote = document.getElementById('sms-unavailable-note');
     const phoneRegex = /^\+\d{10,15}$/;
     let smsStartPending = false;
     let pendingPhone = null;
+
+    if (smsUnavailableNote) {
+      if (twilioVerifyEnabled) {
+        smsUnavailableNote.setAttribute('hidden', '');
+      } else {
+        smsUnavailableNote.removeAttribute('hidden');
+      }
+    }
 
     function renderSmsHistory() {
       if (!smsHistoryList) return;
@@ -392,7 +406,14 @@
       const phoneValue = (smsPhoneInput?.value || '').trim();
       const consentChecked = Boolean(smsCheckbox?.checked);
       const phoneValid = phoneRegex.test(phoneValue);
-      smsVerifyBtn.disabled = smsStartPending || !consentChecked || !phoneValid;
+      const twilioReady = Boolean(twilioVerifyEnabled);
+      smsVerifyBtn.disabled =
+        smsStartPending || !consentChecked || !phoneValid || !twilioReady;
+      if (!twilioReady) {
+        smsVerifyBtn.title = 'Verification is unavailable';
+      } else {
+        smsVerifyBtn.removeAttribute('title');
+      }
     };
 
     smsCheckbox?.addEventListener('change', () => {
@@ -435,6 +456,11 @@
     smsVerifyBtn?.addEventListener('click', async () => {
       const phone = (smsPhoneInput?.value || '').trim();
       setSmsError('');
+      if (!twilioVerifyEnabled) {
+        setSmsError('Verification is unavailable.');
+        updateSmsButtonState();
+        return;
+      }
       if (!smsCheckbox?.checked || !phoneRegex.test(phone)) {
         updateSmsButtonState();
         return;

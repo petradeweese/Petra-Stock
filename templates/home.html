@@ -1,0 +1,43 @@
+{% extends 'base.html' %}
+{% block title %}Petra Stock — Real-Time Pattern Alerts{% endblock %}
+{% block meta_description %}Petra Stock surfaces live pattern scans and automated SMS alerts so you can act on opportunities fast. Message frequency varies by market activity and your settings, typically up to 10 msgs/day.{% endblock %}
+{% block og_title %}Stay ahead with Petra Stock pattern alerts{% endblock %}
+{% block og_description %}Live scanner, custom SMS alerts, and compliance-ready messaging with Petra Stock. Alerts are informational only and not financial advice.{% endblock %}
+{% block body_class %}marketing{% endblock %}
+{% block head_extra %}
+  <link rel="stylesheet" href="{{ url_for('static', path='css/marketing.css') }}" />
+{% endblock %}
+{% block nav_links %}
+  <a class="nav-link" href="/about">About</a>
+  <a class="nav-link" href="/contact">Contact</a>
+  <a class="nav-link" href="/privacy">Privacy Policy</a>
+  <a class="nav-link" href="/terms">Terms of Service</a>
+{% endblock %}
+{% block content %}
+  <section class="hero">
+    <div class="hero-content">
+      <p class="eyebrow">Live Market Intelligence</p>
+      <h1>Real-time pattern alerts for active traders</h1>
+      <p class="value-prop">Petra Stock continuously scans equities, highlights actionable setups, and keeps you notified with compliant SMS and email alerts.</p>
+      <a class="cta-button" href="/scanner">Enter Scanner</a>
+      <p class="compliance-note">Message frequency varies by market activity and your settings, typically up to 10 msgs/day. Msg &amp; data rates may apply. Alerts are informational only and not financial advice.</p>
+    </div>
+  </section>
+  <section class="features">
+    <article class="feature">
+      <div class="feature-icon" aria-hidden="true">⚡</div>
+      <h3>Custom Alerts</h3>
+      <p>Choose the patterns and thresholds that matter to you. Petra Stock logs consent and delivers only the signals you approve.</p>
+    </article>
+    <article class="feature">
+      <div class="feature-icon" aria-hidden="true">📡</div>
+      <h3>Live Scanning</h3>
+      <p>Our real-time scanner streams market data, scores probability, and surfaces emerging setups directly inside the Petra Stock app.</p>
+    </article>
+    <article class="feature">
+      <div class="feature-icon" aria-hidden="true">📲</div>
+      <h3>Message Frequency</h3>
+      <p>Stay in control with configurable delivery windows and built-in STOP/HELP handling so subscribers can manage SMS preferences anytime.</p>
+    </article>
+  </section>
+{% endblock %}
