@@ -1,0 +1,24 @@
+{% extends 'base.html' %}
+{% block title %}Contact Petra Stock{% endblock %}
+{% block body_class %}marketing marketing-secondary{% endblock %}
+{% block head_extra %}
+  <link rel="stylesheet" href="{{ url_for('static', path='css/marketing.css') }}" />
+{% endblock %}
+{% block nav_links %}
+  <a class="nav-link" href="/">Home</a>
+  <a class="nav-link" href="/about">About</a>
+  <a class="nav-link" href="/contact" aria-current="page">Contact</a>
+  <a class="nav-link" href="/privacy">Privacy Policy</a>
+  <a class="nav-link" href="/terms">Terms of Service</a>
+{% endblock %}
+{% block content %}
+  <article class="marketing-page">
+    <h1>Contact Us</h1>
+    <p>We’re here to help with questions about Petra Stock, SMS alerts, consent records, and compliance.</p>
+    <ul class="contact-list">
+      <li><strong>Support:</strong> <a href="mailto:support@petrastock.com">support@petrastock.com</a></li>
+      <li><strong>Privacy:</strong> <a href="mailto:privacy@petrastock.com">privacy@petrastock.com</a></li>
+    </ul>
+    <p class="sla">We typically reply within 1–2 business days.</p>
+  </article>
+{% endblock %}

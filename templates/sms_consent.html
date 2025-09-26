@@ -1,25 +1,32 @@
-<!doctype html><html lang="en"><head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Petra Stock — SMS Consent</title>
-</head><body>
-<h1>SMS Alerts Opt-In</h1>
-<p>Enable text alerts for trading patterns. Msg & data rates may apply. Max messages vary by settings.
-Reply STOP to cancel, HELP for help.</p>
-
-<form method="post" action="/api/sms/verify/start" style="max-width:480px">
-  <label>Phone number (E.164, e.g., +15551234567)
-    <input required name="phone" type="tel" style="width:100%">
-  </label><br><br>
-  <label><input required type="checkbox" name="consent">
-    I agree to receive automated Petra Stock SMS alerts. Msg &amp; data rates may apply. By checking this box, I agree to the
-    <a href="/terms" target="_blank" rel="noopener">Terms</a> and
-    <a href="/privacy" target="_blank" rel="noopener">Privacy Policy</a>.
-  </label>
-  <p>Reply <strong>STOP</strong> to opt out, <strong>HELP</strong> for help.</p>
-  <br>
-  <button type="submit">Send Verification Code</button>
-</form>
-
-<hr>
-<p>Support: <a href="mailto:petrasstockalerts@gmail.com">petrasstockalerts@gmail.com</a></p>
-</body></html>
+{% extends 'base.html' %}
+{% block title %}Petra Stock — SMS Consent{% endblock %}
+{% block body_class %}marketing marketing-secondary{% endblock %}
+{% block head_extra %}
+  <link rel="stylesheet" href="{{ url_for('static', path='css/marketing.css') }}" />
+{% endblock %}
+{% block nav_links %}
+  <a class="nav-link" href="/">Home</a>
+  <a class="nav-link" href="/about">About</a>
+  <a class="nav-link" href="/contact">Contact</a>
+  <a class="nav-link" href="/privacy">Privacy Policy</a>
+  <a class="nav-link" href="/terms">Terms of Service</a>
+{% endblock %}
+{% block content %}
+  <article class="marketing-page">
+    <h1>SMS Alerts Opt-In</h1>
+    <p>Use this form to request SMS alerts from Petra Stock if you do not have access to the in-app Settings page. We’ll send a verification code to confirm your number before enabling messages.</p>
+    <p>Message frequency varies by market activity and your settings, typically up to 10 msgs/day. Msg &amp; data rates may apply. Alerts are informational only and not financial advice.</p>
+    <form class="consent-form" method="post" action="/api/sms/verify/start">
+      <label for="consent-phone">Phone number (E.164, e.g., +15551234567)</label>
+      <input id="consent-phone" required name="phone" type="tel" placeholder="+15551234567" />
+      <label class="checkbox">
+        <input required type="checkbox" name="consent" value="1" />
+        <span>
+          I agree to receive automated Petra Stock SMS alerts. Msg &amp; data rates may apply. Message frequency varies by market activity and your settings, typically up to 10 msgs/day. Alerts are informational only and not financial advice. By checking this box, I agree to the <a href="/terms" target="_blank" rel="noopener">Terms</a> and <a href="/privacy" target="_blank" rel="noopener">Privacy Policy</a>.
+        </span>
+      </label>
+      <p class="keyword-note">Reply <strong>STOP</strong> to opt out, <strong>HELP</strong> for help. Contact <a href="mailto:support@petrastock.com">support@petrastock.com</a> with questions.</p>
+      <button type="submit">Send Verification Code</button>
+    </form>
+  </article>
+{% endblock %}

@@ -26,6 +26,7 @@ from uuid import uuid4
 import pandas as pd
 from fastapi import APIRouter, Body, Depends, Form, HTTPException, Query, Request, Response
 from fastapi.responses import (
+    FileResponse,
     HTMLResponse,
     JSONResponse,
     RedirectResponse,
@@ -96,7 +97,9 @@ _HEATMAP_CACHE: Dict[str, Any] = {"data": None, "expires": 0.0}
 
 _SMS_CONSENT_TEXT = (
     "I agree to receive automated Petra Stock SMS alerts. Msg & data rates may apply. "
-    "By checking this box, I agree to the Terms and Privacy Policy."
+    "Message frequency varies by market activity and your settings, typically up to 10 msgs/day. "
+    "Alerts are informational only and not financial advice. By checking this box, I agree to the "
+    "Terms and Privacy Policy."
 )
 
 
@@ -1838,12 +1841,38 @@ def send_weekly_digest(db: sqlite3.Cursor) -> None:
 
 @router.get("/", response_class=HTMLResponse)
 def home(request: Request):
-    return templates.TemplateResponse(request, "index.html", {"active_tab": "scanner"})
+    return templates.TemplateResponse(
+        request,
+        "home.html",
+        {"canonical_path": "/"},
+    )
 
 
 @router.get("/scanner", response_class=HTMLResponse)
 def scanner_page(request: Request):
-    return templates.TemplateResponse(request, "index.html", {"active_tab": "scanner"})
+    return templates.TemplateResponse(
+        request,
+        "index.html",
+        {"active_tab": "scanner", "canonical_path": "/scanner"},
+    )
+
+
+@router.get("/about", response_class=HTMLResponse)
+def about_page(request: Request):
+    return templates.TemplateResponse(
+        request,
+        "about.html",
+        {"canonical_path": "/about"},
+    )
+
+
+@router.get("/contact", response_class=HTMLResponse)
+def contact_page(request: Request):
+    return templates.TemplateResponse(
+        request,
+        "contact.html",
+        {"canonical_path": "/contact"},
+    )
 
 
 @router.get("/heatmap.json")
@@ -3102,8 +3131,11 @@ async def favorites_test_alert(
         return response
 
     if fallback_needed:
-        fallback_label = "MMS" if channel != "sms" else "SMS"
-        fallback_body = f"{body}\n\n[Sent via Email — {fallback_label} unavailable]"
+        if not twilio_enabled:
+            fallback_body = f"{body}\n\n[Sent via Email — SMS unavailable]"
+        else:
+            fallback_label = "MMS" if channel != "sms" else "SMS"
+            fallback_body = f"{body}\n\n[Sent via Email — {fallback_label} unavailable]"
         response["body"] = fallback_body
         response["channel"] = "Email"
         channel_label = "Email"
@@ -3188,6 +3220,8 @@ def settings_page(request: Request, db=Depends(get_db)):
     smtp_warning = smtp_has_any and bool(smtp_missing)
     sms_active = sms_consent.latest_for_user(user_id, db_cursor=db)
     sms_history = sms_consent.history_for_user(user_id, limit=10, db_cursor=db)
+    twilio_enabled = twilio_client.is_enabled()
+    twilio_verify_enabled = twilio_client.is_verify_enabled()
     sms_state = {
         "active": bool(sms_active),
         "phone": (sms_active or {}).get("phone_e164"),
@@ -3195,6 +3229,8 @@ def settings_page(request: Request, db=Depends(get_db)):
         "method": (sms_active or {}).get("method"),
         "user_id": user_id,
         "history": sms_history,
+        "twilio_enabled": twilio_enabled,
+        "twilio_verify_enabled": twilio_verify_enabled,
     }
     return templates.TemplateResponse(
         request,
@@ -3206,33 +3242,62 @@ def settings_page(request: Request, db=Depends(get_db)):
             "smtp_missing": smtp_missing,
             "smtp_missing_label": _format_missing_fields(smtp_missing),
             "smtp_warning": smtp_warning,
-            "twilio_configured": False,
+            "twilio_configured": twilio_enabled,
             "alert_channel": getattr(settings, "alert_channel", "Email"),
             "alert_outcomes": st.get("alert_outcomes", "hit"),
             "sms_consent_text": _SMS_CONSENT_TEXT,
             "sms_state": sms_state,
+            "twilio_enabled": twilio_enabled,
+            "twilio_verify_enabled": twilio_verify_enabled,
+            "canonical_path": "/settings",
         },
     )
 
 
 @router.get("/info", response_class=HTMLResponse)
 def info_page(request: Request):
-    return templates.TemplateResponse(request, "info.html", {"active_tab": "info"})
+    return templates.TemplateResponse(
+        request,
+        "info.html",
+        {"active_tab": "info", "canonical_path": "/info"},
+    )
 
 
 @router.get("/sms-consent", response_class=HTMLResponse)
 def sms_consent_page(request: Request):
-    return templates.TemplateResponse(request, "sms_consent.html", {})
+    return templates.TemplateResponse(
+        request,
+        "sms_consent.html",
+        {"canonical_path": "/sms-consent"},
+    )
 
 
 @router.get("/privacy", response_class=HTMLResponse)
 def privacy_page(request: Request):
-    return templates.TemplateResponse(request, "privacy.html", {})
+    return templates.TemplateResponse(
+        request,
+        "privacy.html",
+        {"canonical_path": "/privacy"},
+    )
 
 
 @router.get("/terms", response_class=HTMLResponse)
 def terms_page(request: Request):
-    return templates.TemplateResponse(request, "terms.html", {})
+    return templates.TemplateResponse(
+        request,
+        "terms.html",
+        {"canonical_path": "/terms"},
+    )
+
+
+@router.get("/robots.txt")
+def robots_txt() -> FileResponse:
+    return FileResponse("static/robots.txt", media_type="text/plain")
+
+
+@router.get("/sitemap.xml")
+def sitemap_xml() -> FileResponse:
+    return FileResponse("static/sitemap.xml", media_type="application/xml")
 
 
 @router.post("/settings/save")
@@ -3663,21 +3728,34 @@ async def twilio_inbound_sms(request: Request, db=Depends(get_db)):
         )
 
     if lowered in {"start", "unstop"}:
-        latest = sms_consent.latest_for_phone(from_number, db_cursor=db)
-        verification_id = twilio_client.start_verification(from_number)
-        if not verification_id:
-            return _twiml_response("Verification is unavailable. Please try again later.")
+        latest = sms_consent.latest_for_phone(from_number, include_revoked=True, db_cursor=db)
+        if latest and not latest.get("revoked_at"):
+            return _twiml_response("You’re already opted in to Petra Stock SMS alerts.")
+
+        consent_text = (latest or {}).get("consent_text") or _SMS_CONSENT_TEXT
+        user_id = (latest or {}).get("user_id")
+        record = sms_consent.record_consent(
+            user_id,
+            from_number,
+            consent_text,
+            ip=_client_ip(request),
+            user_agent=request.headers.get("user-agent"),
+            method="sms-keyword",
+            db_cursor=db,
+        )
         logger.info(
             "sms_inbound_start",
-            extra={"phone": from_number, "user_id": latest.get("user_id") if latest else None},
+            extra={
+                "phone": from_number,
+                "user_id": record.get("user_id") if isinstance(record, dict) else None,
+                "method": "sms-keyword",
+            },
         )
-        return _twiml_response(
-            "Reply with the verification code we just sent to complete opt-in."
-        )
+        return _twiml_response("You’re opted in to Petra Stock SMS alerts.")
 
     if lowered == "help":
         return _twiml_response(
-            "Petra Stock alerts. Msg&data rates may apply. STOP to cancel. help@yourdomain.com"
+            "Petra Stock alerts. Msg & data rates may apply. Contact support@petrastock.com. Reply STOP to opt out."
         )
 
     if re.fullmatch(r"\d{4,8}", lowered):

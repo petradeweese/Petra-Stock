@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_USER_ID = "default"
 DEFAULT_DAILY_LIMIT = 25
-_FOOTER_TEXT = "STOP=opt-out, HELP=help"
+_FOOTER_TEXT = "STOP=opt-out, HELP=help, Msg&data rates may apply."
 
 
 @contextmanager

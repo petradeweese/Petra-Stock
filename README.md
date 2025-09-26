@@ -35,6 +35,30 @@ suite with:
 pytest
 ```
 
+## Public marketing pages and contacts
+
+The app now serves a marketing-ready public presence at the root of the domain. The following
+unauthenticated routes render static marketing templates styled by `static/css/marketing.css`:
+
+- `/` — homepage with hero CTA linking to `/scanner`
+- `/about`
+- `/contact`
+- `/privacy`
+- `/terms`
+- `/sms-consent`
+
+Include the corresponding nginx/site configuration so that both `petrastock.com` and
+`www.petrastock.com` point to this application. When deploying, make sure the following contact
+forwarders exist so users and carriers can reach us:
+
+- `support@petrastock.com`
+- `alerts@petrastock.com`
+- `privacy@petrastock.com`
+
+These addresses are referenced across the public pages, consent copy, and SMS help/STOP flows.
+Static assets such as `static/robots.txt` and `static/sitemap.xml` are also served directly by the
+app for SEO and compliance.
+
 ## Scanning
 
 During a scan, the application verifies that price data covers at least 95% of the
