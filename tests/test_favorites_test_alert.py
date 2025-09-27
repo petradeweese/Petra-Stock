@@ -2,6 +2,8 @@ import sqlite3
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+import pytest
+
 import db
 import routes
 
@@ -187,6 +189,69 @@ def test_settings_test_alert_overrides(tmp_path, monkeypatch):
         "STOP=opt-out, HELP=help, Msg&data rates may apply."
     )
     assert events[-1]["outcomes"] == "all"
+
+
+@pytest.mark.parametrize(
+    "channel,expected_label",
+    [("email", "Email"), ("mms", "MMS"), ("sms", "SMS")],
+)
+def test_settings_test_alert_form_submission(tmp_path, monkeypatch, channel, expected_label):
+    configure_settings(monkeypatch, channel=channel.upper(), outcomes="hit", sms_to=("18005550100",))
+    stub_sms_consent(monkeypatch, ("18005550100",))
+
+    sent_email = []
+    sent_sms = []
+
+    def fake_email(host, port, user, password, mail_from, to, subject, body, *, context=None):
+        sent_email.append((subject, body, tuple(to), context))
+        return {"ok": True, "provider": "smtp", "message_id": "<form>"}
+
+    def fake_twilio(number, body, *, context=None):
+        sent_sms.append((number, body, context))
+        return True
+
+    monkeypatch.setattr(routes, "send_email_smtp", fake_email)
+    monkeypatch.setattr(routes.twilio_client, "send_mms", fake_twilio)
+    monkeypatch.setattr(routes.twilio_client, "is_enabled", lambda: True)
+
+    client, events = setup_app(tmp_path, monkeypatch)
+
+    conn = sqlite3.connect(db.DB_PATH)
+    conn.execute(
+        """
+        UPDATE settings
+           SET smtp_host=?, smtp_port=?, smtp_user=?, smtp_pass=?, mail_from=?, recipients=?
+         WHERE id=1
+        """,
+        (
+            "smtp.gmail.com",
+            587,
+            "alerts@gmail.com",
+            "app-pass",
+            "Petra Alerts <alerts@gmail.com>",
+            "test@example.com",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    res = client.post(
+        "/settings/test-alert",
+        data={"symbol": "AAPL", "channel": channel, "outcomes": "all"},
+    )
+
+    assert res.status_code == 200
+    payload = res.json()
+    assert payload["ok"] is True
+    assert payload["channel"] == expected_label
+    assert payload["outcomes"] == "all"
+
+    if channel == "email":
+        assert sent_email and not sent_sms
+    else:
+        assert sent_sms
+
+    assert any(event["type"] == "favorites_test_alert" for event in events)
 
 
 def test_test_alert_mms_fallbacks_to_email(tmp_path, monkeypatch):
