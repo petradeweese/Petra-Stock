@@ -2926,17 +2926,25 @@ async def favorites_add(request: Request, db=Depends(get_db)):
 @router.post("/settings/test-alert")
 async def favorites_test_alert(
     request: Request,
-    payload: dict | None = Body(default=None),
     db=Depends(get_db),
 ):
+    content_type = request.headers.get("content-type", "")
     form_data: dict[str, Any] = {}
-    try:
-        form = await request.form()
-        form_data = {k: v for k, v in form.multi_items()}
-    except Exception:
-        form_data = {}
+    payload: dict[str, Any] = {}
 
-    payload = payload or {}
+    if "application/json" in content_type:
+        try:
+            parsed = await request.json()
+        except Exception:
+            parsed = None
+        if isinstance(parsed, Mapping):
+            payload = dict(parsed)
+    else:
+        try:
+            form = await request.form()
+            form_data = {k: v for k, v in form.multi_items()}
+        except Exception:
+            form_data = {}
     symbol_raw = (
         form_data.get("symbol")
         or payload.get("symbol")

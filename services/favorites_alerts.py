@@ -28,7 +28,7 @@ from .telemetry import log as log_telemetry
 
 logger = logging.getLogger(__name__)
 
-_SENT_ALERTS: set[str] = set()
+_SENT_ALERTS: Dict[str, float] = {}
 _SENT_LOCK = threading.Lock()
 _REDIS_CLIENT: Any | None = None
 _REDIS_READY: Optional[bool] = None
@@ -106,6 +106,23 @@ def _ensure_sqlite() -> sqlite3.Connection:
     return conn
 
 
+def _now() -> float:
+    return time.time()
+
+
+def _prune_in_memory(now_ts: Optional[float] = None) -> None:
+    if not _SENT_ALERTS:
+        return
+    current = now_ts if now_ts is not None else _now()
+    expired = [
+        key
+        for key, expires_at in list(_SENT_ALERTS.items())
+        if expires_at <= current
+    ]
+    for key in expired:
+        _SENT_ALERTS.pop(key, None)
+
+
 def _dedupe_storage_get(key: str) -> bool:
     if not key:
         return False
@@ -118,9 +135,23 @@ def _dedupe_storage_get(key: str) -> bool:
     try:
         conn = _ensure_sqlite()
         cur = conn.cursor()
-        cur.execute("SELECT 1 FROM sent_alerts WHERE dedupe_key=? LIMIT 1", (key,))
+        cur.execute(
+            "SELECT ts, simulated FROM sent_alerts WHERE dedupe_key=? LIMIT 1",
+            (key,),
+        )
         row = cur.fetchone()
-        return bool(row)
+        if not row:
+            return False
+        ts_raw = row[0]
+        try:
+            ts_value = float(ts_raw)
+        except (TypeError, ValueError):
+            ts_value = 0.0
+        if ts_value and _now() - ts_value > _REDIS_TTL_SECONDS:
+            conn.execute("DELETE FROM sent_alerts WHERE dedupe_key=?", (key,))
+            conn.commit()
+            return False
+        return True
     except sqlite3.Error:
         logger.exception("favorites alert sqlite dedupe check failed")
         return False
@@ -132,7 +163,7 @@ def _dedupe_storage_set(key: str, *, simulated: bool = False) -> None:
     client = _get_redis_client()
     if client is not None:
         try:
-            payload = json.dumps({"ts": int(time.time()), "simulated": bool(simulated)})
+            payload = json.dumps({"ts": int(_now()), "simulated": bool(simulated)})
             client.setex(key, _REDIS_TTL_SECONDS, payload)
         except Exception:  # pragma: no cover - network interaction
             logger.debug("favorites alert redis set failed key=%s", key)
@@ -143,7 +174,7 @@ def _dedupe_storage_set(key: str, *, simulated: bool = False) -> None:
             INSERT OR REPLACE INTO sent_alerts(dedupe_key, ts, simulated)
             VALUES(?, ?, ?)
             """,
-            (key, int(time.time()), 1 if simulated else 0),
+            (key, int(_now()), 1 if simulated else 0),
         )
         conn.commit()
     except sqlite3.Error:
@@ -225,11 +256,12 @@ def was_sent_key(
     if not key:
         return False
     with _SENT_LOCK:
+        _prune_in_memory()
         if key in _SENT_ALERTS:
             return True
     if _dedupe_storage_get(key):
         with _SENT_LOCK:
-            _SENT_ALERTS.add(key)
+            _SENT_ALERTS[key] = _now() + _REDIS_TTL_SECONDS
         return True
     return False
 
@@ -246,7 +278,8 @@ def mark_sent_key(
     if not key:
         return
     with _SENT_LOCK:
-        _SENT_ALERTS.add(key)
+        _prune_in_memory()
+        _SENT_ALERTS[key] = _now() + _REDIS_TTL_SECONDS
     _dedupe_storage_set(key, simulated=simulated)
 
 
@@ -368,10 +401,10 @@ def _format_threshold_ratio(value: Any) -> str:
 
 
 def _log_skip(reason: str, detail: Optional[str] = None) -> None:
-    if detail:
-        logger.info("%s %s", reason, detail)
-    else:
-        logger.info(reason)
+    logger.info(
+        "favorites_alert_skip",
+        extra={"reason": reason, "detail": detail},
+    )
 
 
 def _coerce_float(value: Any, default: float = 0.0) -> float:
@@ -525,6 +558,18 @@ def _deliver_alert(
 ) -> Tuple[bool, Optional[str], Optional[str], str]:
     normalized = _normalize_channel(channel)
     if normalized is None:
+        logger.info(
+            "favorites_alert_delivery_result",
+            extra={
+                "channel": None,
+                "dedupe_key": dedupe_key,
+                "reason": "delivery_error",
+                "ok": False,
+                "fav_id": favorite_id,
+                "bar_time": bar_time,
+                "interval": interval,
+            },
+        )
         return False, None, None, "delivery_error"
 
     context_base: Dict[str, Any] = {}
@@ -541,12 +586,36 @@ def _deliver_alert(
         dedupe_key=dedupe_value,
     ):
         _log_skip("skip_dedupe", dedupe_value)
+        logger.info(
+            "favorites_alert_delivery_result",
+            extra={
+                "channel": normalized,
+                "dedupe_key": dedupe_value,
+                "reason": "throttled",
+                "ok": False,
+                "fav_id": favorite_id,
+                "bar_time": bar_time,
+                "interval": interval,
+            },
+        )
         return False, dedupe_value, normalized, "throttled"
 
     if normalized == "email":
         send_to = [r for r in (recipients or []) if r]
         if not send_to:
             logger.info("favorites alert email skipped: no recipients configured")
+            logger.info(
+                "favorites_alert_delivery_result",
+                extra={
+                    "channel": normalized,
+                    "dedupe_key": dedupe_value,
+                    "reason": "missing_recipient",
+                    "ok": False,
+                    "fav_id": favorite_id,
+                    "bar_time": bar_time,
+                    "interval": interval,
+                },
+            )
             return False, dedupe_value, normalized, "missing_recipient"
         cfg = dict(smtp_config or {})
         host = cfg.get("host")
@@ -556,6 +625,18 @@ def _deliver_alert(
         mail_from = cfg.get("mail_from") or user
         if not host or not port or not mail_from:
             logger.warning("favorites alert email skipped: incomplete smtp config")
+            logger.info(
+                "favorites_alert_delivery_result",
+                extra={
+                    "channel": normalized,
+                    "dedupe_key": dedupe_value,
+                    "reason": "delivery_error",
+                    "ok": False,
+                    "fav_id": favorite_id,
+                    "bar_time": bar_time,
+                    "interval": interval,
+                },
+            )
             return False, dedupe_value, normalized, "delivery_error"
         try:
             result = send_email_smtp(
@@ -571,11 +652,49 @@ def _deliver_alert(
             )
         except Exception:
             logger.exception("favorites alert email send raised")
+            logger.info(
+                "favorites_alert_delivery_result",
+                extra={
+                    "channel": normalized,
+                    "dedupe_key": dedupe_value,
+                    "reason": "delivery_error",
+                    "ok": False,
+                    "fav_id": favorite_id,
+                    "bar_time": bar_time,
+                    "interval": interval,
+                },
+            )
             return False, dedupe_value, normalized, "delivery_error"
         if result.get("ok"):
-            logger.info("favorites alert email sent recipients=%d", len(send_to))
+            logger.info(
+                "favorites alert email sent recipients=%d", len(send_to)
+            )
+            logger.info(
+                "favorites_alert_delivery_result",
+                extra={
+                    "channel": normalized,
+                    "dedupe_key": dedupe_value,
+                    "reason": "sent",
+                    "ok": True,
+                    "fav_id": favorite_id,
+                    "bar_time": bar_time,
+                    "interval": interval,
+                },
+            )
             return True, dedupe_value, normalized, "sent"
         logger.warning("favorites alert email failed: %s", result.get("error"))
+        logger.info(
+            "favorites_alert_delivery_result",
+            extra={
+                "channel": normalized,
+                "dedupe_key": dedupe_value,
+                "reason": "delivery_error",
+                "ok": False,
+                "fav_id": favorite_id,
+                "bar_time": bar_time,
+                "interval": interval,
+            },
+        )
         return False, dedupe_value, normalized, "delivery_error"
 
     if normalized in {"mms", "sms"}:
@@ -605,6 +724,18 @@ def _deliver_alert(
 
         if not destinations:
             logger.info("favorites alert mms skipped: no consented numbers configured")
+            logger.info(
+                "favorites_alert_delivery_result",
+                extra={
+                    "channel": normalized,
+                    "dedupe_key": dedupe_value,
+                    "reason": "missing_recipient",
+                    "ok": False,
+                    "fav_id": favorite_id,
+                    "bar_time": bar_time,
+                    "interval": interval,
+                },
+            )
             return False, dedupe_value, normalized, "missing_recipient"
 
         seen: set[str] = set()
@@ -641,10 +772,34 @@ def _deliver_alert(
                 logger.warning("favorites alert %s failed number=%s", normalized, number_str)
 
         if delivered:
+            logger.info(
+                "favorites_alert_delivery_result",
+                extra={
+                    "channel": normalized,
+                    "dedupe_key": dedupe_value,
+                    "reason": "sent",
+                    "ok": True,
+                    "fav_id": favorite_id,
+                    "bar_time": bar_time,
+                    "interval": interval,
+                },
+            )
             return True, dedupe_value, normalized, "sent"
         raise RuntimeError("Twilio send failed for all recipients")
 
     logger.info("favorites alert skipped: unknown channel=%s", normalized)
+    logger.info(
+        "favorites_alert_delivery_result",
+        extra={
+            "channel": normalized,
+            "dedupe_key": dedupe_value,
+            "reason": "delivery_error",
+            "ok": False,
+            "fav_id": favorite_id,
+            "bar_time": bar_time,
+            "interval": interval,
+        },
+    )
     return False, dedupe_value, normalized, "delivery_error"
 @dataclass
 class SelectionResult:
