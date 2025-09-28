@@ -1,0 +1,73 @@
+{% extends 'base.html' %}
+{% block title %}Paper Trading — Petra Stock{% endblock %}
+{% block content %}
+  <div class="paper-container">
+    <div class="card paper-header-card">
+      <div class="paper-header-top">
+        <div class="paper-balance-group">
+          <p class="paper-label">Account Total</p>
+          {% set balance_value = summary.balance or 0.0 %}
+          <div id="paper-balance" data-balance="{{ balance_value }}">
+            ${{ '{:,.2f}'.format(balance_value) }}
+          </div>
+        </div>
+        {% set roi_value = summary.roi_pct or 0.0 %}
+        <span id="paper-roi-chip" class="paper-roi-chip {% if roi_value >= 0 %}chip-pos{% else %}chip-neg{% endif %}">
+          {{ '%.2f'|format(roi_value) }}%
+        </span>
+      </div>
+      <div class="paper-header-bottom">
+        <div class="paper-range-toggle" role="group" aria-label="Equity range">
+          {% set default_range = '1m' %}
+          {% for key,label in {'1d':'1D','1w':'1W','1m':'1M','1y':'1Y'}.items() %}
+            <button type="button" class="paper-range-btn {% if key == default_range %}is-active{% endif %}" data-range="{{ key }}">{{ label }}</button>
+          {% endfor %}
+        </div>
+        <div id="paper-status-line" class="paper-status-line">
+          {% if summary.status == 'active' %}
+            {% if summary.started_at %}
+              Active and running since {{ summary.started_at }}
+            {% else %}
+              Active and running
+            {% endif %}
+          {% else %}
+            Inactive
+          {% endif %}
+        </div>
+      </div>
+      <div class="paper-chart-wrapper">
+        <canvas id="paper-equity-chart" height="260" aria-label="Paper trading equity chart"></canvas>
+      </div>
+    </div>
+
+    <div class="card paper-table-card">
+      <div class="paper-table-toolbar">
+        <h2 class="paper-table-title">Activity</h2>
+        <a id="paper-export" class="btn btn-secondary btn-sm" href="/paper/trades?status=all&export=csv">Export CSV</a>
+      </div>
+      <div class="paper-table-scroll">
+        <table id="paper-trades-table" class="table paper-table" aria-describedby="paper-status-line">
+          <thead>
+            <tr>
+              <th>Ticker</th>
+              <th>Call/Put</th>
+              <th>Strike–Exp</th>
+              <th>Qty</th>
+              <th>Entry Time &amp; Date</th>
+              <th>Entry Price</th>
+              <th>Exit Time &amp; Date</th>
+              <th>Exit Price</th>
+              <th>ROI%</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody id="paper-trades-body"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+  <script type="application/json" id="paper-summary-seed">{{ summary|tojson|safe }}</script>
+{% endblock %}
+{% block extra_body %}
+  <script src="{{ url_for('static', path='js/paper.js') }}" defer></script>
+{% endblock %}

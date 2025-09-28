@@ -307,6 +307,49 @@ SCHEMA = [
     );
     """,
     "CREATE INDEX IF NOT EXISTS idx_oauth_tokens_created_at ON oauth_tokens(created_at);",
+    """
+    CREATE TABLE IF NOT EXISTS paper_settings (
+        id INTEGER PRIMARY KEY CHECK (id=1),
+        starting_balance REAL NOT NULL DEFAULT 10000,
+        max_pct REAL NOT NULL DEFAULT 10,
+        started_at TEXT,
+        status TEXT NOT NULL DEFAULT 'inactive'
+    );
+    """,
+    """
+    INSERT OR IGNORE INTO paper_settings(id, starting_balance, max_pct, started_at, status)
+    VALUES(1, 10000, 10, NULL, 'inactive');
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS paper_equity (
+        ts TEXT PRIMARY KEY,
+        balance REAL NOT NULL
+    );
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS paper_trades (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ticker TEXT NOT NULL,
+        call_put TEXT NOT NULL,
+        strike REAL,
+        expiry TEXT,
+        qty INTEGER NOT NULL,
+        interval TEXT,
+        entry_time TEXT NOT NULL,
+        executed_at TEXT NOT NULL,
+        entry_price REAL NOT NULL,
+        exit_time TEXT,
+        exit_price REAL,
+        roi_pct REAL,
+        status TEXT NOT NULL,
+        source_alert_id TEXT,
+        price_source TEXT
+    );
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_paper_trades_status ON paper_trades(status);",
+    "CREATE INDEX IF NOT EXISTS idx_paper_trades_ticker ON paper_trades(ticker);",
+    "CREATE INDEX IF NOT EXISTS idx_paper_trades_executed_at ON paper_trades(executed_at);",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_paper_trades_source_alert ON paper_trades(source_alert_id) WHERE source_alert_id IS NOT NULL;",
 ]
 
 

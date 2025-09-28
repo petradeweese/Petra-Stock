@@ -91,6 +91,43 @@
     border: 1px solid rgba(255, 255, 255, 0.2);
     color: inherit;
   }
+  .paper-settings-card {
+    margin-top: 1.5rem;
+    padding: 1.25rem;
+    border-radius: 10px;
+    border: 1px solid rgba(94, 160, 255, 0.2);
+    background: rgba(11, 16, 24, 0.75);
+  }
+  .paper-settings-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-bottom: 0.35rem;
+  }
+  .paper-status-pill {
+    border-radius: 999px;
+    padding: 0.25rem 0.75rem;
+    font-size: 0.85rem;
+    background: rgba(255, 77, 77, 0.18);
+    color: var(--neg);
+  }
+  .paper-status-pill.active {
+    background: rgba(61, 220, 132, 0.18);
+    color: var(--pos);
+  }
+  .paper-settings-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 1rem;
+    margin-top: 1rem;
+  }
+  .paper-settings-actions {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    margin-top: 1rem;
+  }
 </style>
 {% endblock %}
 {% block content %}
@@ -161,6 +198,38 @@
       {% if smtp_warning %}
       <p class="note status-error" style="margin-top:.5rem;">SMTP configuration incomplete: {{ smtp_missing_label }}</p>
       {% endif %}
+
+      <div class="paper-settings-card" id="paper-settings-card" data-status="{{ paper_summary.status }}" data-started="{{ paper_summary.started_at or '' }}">
+        <div class="paper-settings-header">
+          <h2 style="margin:0;">Paper Trading</h2>
+          <span id="paper-status-pill" class="paper-status-pill {% if paper_summary.status == 'active' %}active{% endif %}">
+            {% if paper_summary.status == 'active' %}Active{% else %}Inactive{% endif %}
+          </span>
+        </div>
+        <p class="note" style="margin:0;">Configure the simulated account balance and per-trade sizing limit.</p>
+        <div class="paper-settings-grid">
+          <label>Starting balance
+            <input name="paper_starting_balance" type="number" step="0.01" min="0" value="{{ '%.2f'|format(paper_settings.starting_balance) }}" />
+          </label>
+          <label>Max % of account per trade
+            <input name="paper_max_pct" type="number" step="0.1" min="0.1" value="{{ '%.2f'|format(paper_settings.max_pct) }}" />
+          </label>
+        </div>
+        <div class="paper-settings-actions">
+          <button type="button" class="btn btn-secondary" data-paper-action="start">Start</button>
+          <button type="button" class="btn btn-secondary" data-paper-action="stop">Stop</button>
+          <button type="button" class="btn btn-secondary" data-paper-action="restart">Restart</button>
+        </div>
+        <p id="paper-settings-status" class="note" style="margin-top:0.5rem;">
+          {% if paper_summary.status == 'active' and paper_summary.started_at %}
+            Active and running since {{ paper_summary.started_at }}
+          {% elif paper_summary.status == 'active' %}
+            Active and running.
+          {% else %}
+            Paper trading is currently inactive.
+          {% endif %}
+        </p>
+      </div>
 
   <div class="actions">
     <button type="submit">Save</button>
@@ -287,6 +356,77 @@
       toast.hidden = false;
       setTimeout(() => { toast.hidden = true; }, 2000);
     }
+
+    const paperStatusEl = document.getElementById('paper-settings-status');
+    const paperPill = document.getElementById('paper-status-pill');
+    const paperButtons = Array.from(document.querySelectorAll('[data-paper-action]'));
+    const paperDateFmt = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+
+    function renderPaperSummary(data) {
+      if (!data) return;
+      const status = (data.status || '').toLowerCase();
+      const startedRaw = data.started_at || '';
+      let startedLabel = startedRaw;
+      if (startedRaw) {
+        const parsed = new Date(startedRaw);
+        if (!Number.isNaN(parsed.valueOf())) {
+          startedLabel = paperDateFmt.format(parsed);
+        }
+      }
+      if (paperStatusEl) {
+        if (status === 'active' && startedLabel) {
+          paperStatusEl.textContent = `Active and running since ${startedLabel}`;
+        } else if (status === 'active') {
+          paperStatusEl.textContent = 'Active and running.';
+        } else {
+          paperStatusEl.textContent = 'Paper trading is currently inactive.';
+        }
+      }
+      if (paperPill) {
+        if (status === 'active') {
+          paperPill.classList.add('active');
+          paperPill.textContent = 'Active';
+        } else {
+          paperPill.classList.remove('active');
+          paperPill.textContent = 'Inactive';
+        }
+      }
+    }
+
+    function setPaperButtonsDisabled(disabled) {
+      paperButtons.forEach((btn) => {
+        btn.disabled = disabled;
+      });
+    }
+
+    function requestPaperAction(action) {
+      if (!action) return;
+      setPaperButtonsDisabled(true);
+      fetch(`/paper/${action}`, {
+        method: 'POST',
+        credentials: 'same-origin',
+      })
+        .then((resp) => {
+          if (!resp.ok) throw new Error('request_failed');
+          return resp.json();
+        })
+        .then((payload) => {
+          renderPaperSummary(payload);
+          const msg = action === 'start' ? 'Paper trading started.' : action === 'stop' ? 'Paper trading stopped.' : 'Paper trading restarted.';
+          showToast(msg, true);
+        })
+        .catch(() => {
+          showToast('Unable to update paper trading.', false);
+        })
+        .finally(() => setPaperButtonsDisabled(false));
+    }
+
+    paperButtons.forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const action = btn.dataset.paperAction;
+        requestPaperAction(action);
+      });
+    });
 
     const sendBtn = document.getElementById('send_test_alert');
     const testForm = document.getElementById('test-alert-form');
