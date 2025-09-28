@@ -46,7 +46,15 @@ from db import (
 from indices import SP100, TOP150, TOP250
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 from scanner import compute_scan_for_ticker, export_simulation_artifacts
-from services import executor, favorites_alerts, http_client, price_store, sms_consent, twilio_client
+from services import (
+    executor,
+    favorites_alerts,
+    http_client,
+    paper_trading,
+    price_store,
+    sms_consent,
+    twilio_client,
+)
 from services.favorites import canonical_direction, ensure_favorite_directions
 from services.notify import send_email_smtp
 from services.scanner_params import coerce_scan_params
@@ -90,6 +98,8 @@ SCHWAB_AUTH_URL = os.getenv(
 _STATE_TTL_SECONDS = 600
 _SCHWAB_STATES: Dict[str, tuple[str, float]] = {}
 _SCHWAB_STATE_LOCK = Lock()
+_PAPER_RATE_LIMIT: Dict[str, float] = {}
+_PAPER_RATE_LOCK = Lock()
 
 _EMPTY_HEATMAP: Dict[str, Any] = {"index": [], "columns": [], "values": [], "meta": {}}
 _LATEST_HEATMAP: Dict[str, Any] = dict(_EMPTY_HEATMAP)
@@ -2536,6 +2546,90 @@ def forward_page(request: Request, db=Depends(get_db)):
     )
 
 
+@router.get("/paper", response_class=HTMLResponse)
+def paper_page(request: Request, db=Depends(get_db)):
+    summary = paper_trading.get_summary(db)
+    settings = paper_trading.load_settings(db)
+    return templates.TemplateResponse(
+        request,
+        "paper.html",
+        {
+            "active_tab": "paper",
+            "canonical_path": "/paper",
+            "summary": summary,
+            "paper_settings": settings,
+        },
+    )
+
+
+def _enforce_paper_rate_limit(key: str, interval: float = 1.0) -> None:
+    now_ts = time.time()
+    with _PAPER_RATE_LOCK:
+        previous = _PAPER_RATE_LIMIT.get(key)
+        if previous is not None and now_ts - previous < interval:
+            raise HTTPException(status_code=429, detail="Paper trading endpoint throttled")
+        _PAPER_RATE_LIMIT[key] = now_ts
+
+
+@router.get("/paper/summary")
+def paper_summary(db=Depends(get_db)):
+    return paper_trading.get_summary(db)
+
+
+@router.get("/paper/equity")
+def paper_equity(range: str = Query("1m"), db=Depends(get_db)):
+    allowed = {"1d", "1w", "1m", "1y"}
+    range_key = (range or "").lower()
+    if range_key not in allowed:
+        raise HTTPException(status_code=400, detail="Invalid range")
+    points = paper_trading.get_equity_points(db, range_key)
+    return {
+        "range": range_key,
+        "points": [{"ts": p.ts, "balance": p.balance} for p in points],
+    }
+
+
+@router.get("/paper/trades")
+def paper_trades(
+    status: str = Query("all"),
+    export: str | None = Query(default=None),
+    db=Depends(get_db),
+):
+    status_key = (status or "").lower()
+    allowed = {"open", "closed", "all"}
+    if status_key not in allowed:
+        raise HTTPException(status_code=400, detail="Invalid status filter")
+    status_filter = None if status_key == "all" else status_key
+    if (export or "").lower() == "csv":
+        csv_text, filename = paper_trading.export_trades_csv(db, status_filter)
+        headers = {
+            "Content-Disposition": f'attachment; filename="{filename}"'
+        }
+        return Response(content=csv_text, media_type="text/csv", headers=headers)
+    return {"trades": paper_trading.list_trades(db, status_filter)}
+
+
+@router.post("/paper/start")
+def paper_start(db=Depends(get_db)):
+    _enforce_paper_rate_limit("paper_start")
+    paper_trading.start_engine(db)
+    return paper_trading.get_summary(db)
+
+
+@router.post("/paper/stop")
+def paper_stop(db=Depends(get_db)):
+    _enforce_paper_rate_limit("paper_stop")
+    paper_trading.stop_engine(db)
+    return paper_trading.get_summary(db)
+
+
+@router.post("/paper/restart")
+def paper_restart(db=Depends(get_db)):
+    _enforce_paper_rate_limit("paper_restart", interval=2.0)
+    paper_trading.restart_engine(db)
+    return paper_trading.get_summary(db)
+
+
 def _sanitize_pagination(
     limit: int | float | str,
     offset: int | float | str,
@@ -3240,6 +3334,8 @@ def settings_page(request: Request, db=Depends(get_db)):
         "twilio_enabled": twilio_enabled,
         "twilio_verify_enabled": twilio_verify_enabled,
     }
+    paper_settings_state = paper_trading.load_settings(db)
+    paper_summary = paper_trading.get_summary(db)
     return templates.TemplateResponse(
         request,
         "settings.html",
@@ -3257,6 +3353,8 @@ def settings_page(request: Request, db=Depends(get_db)):
             "sms_state": sms_state,
             "twilio_enabled": twilio_enabled,
             "twilio_verify_enabled": twilio_verify_enabled,
+            "paper_settings": paper_settings_state,
+            "paper_summary": paper_summary,
             "canonical_path": "/settings",
         },
     )
@@ -3323,6 +3421,8 @@ def settings_save(
     alert_outcomes: str = Form("hit"),
     forward_recency_mode: str = Form("off"),
     forward_recency_halflife_days: str = Form("30"),
+    paper_starting_balance: str = Form("10000"),
+    paper_max_pct: str = Form("10"),
     db=Depends(get_db),
 ):
     _ensure_scanner_column(db)
@@ -3365,6 +3465,20 @@ def settings_save(
     if half_life_value <= 0:
         half_life_value = getattr(settings, "forward_recency_halflife_days", 30.0) or 30.0
 
+    current_paper_settings = paper_trading.load_settings(db)
+    try:
+        start_balance_value = float(
+            (paper_starting_balance or "").replace(",", "").strip() or current_paper_settings.starting_balance
+        )
+    except (TypeError, ValueError):
+        start_balance_value = current_paper_settings.starting_balance
+    try:
+        max_pct_value = float((paper_max_pct or "").strip() or current_paper_settings.max_pct)
+    except (TypeError, ValueError):
+        max_pct_value = current_paper_settings.max_pct
+    if max_pct_value <= 0:
+        max_pct_value = current_paper_settings.max_pct
+
     db.execute(
         """
         UPDATE settings
@@ -3396,6 +3510,11 @@ def settings_save(
     setattr(settings, "FORWARD_RECENCY_MODE", mode_choice)
     settings.forward_recency_halflife_days = half_life_value
     setattr(settings, "FORWARD_RECENCY_HALFLIFE_DAYS", half_life_value)
+    paper_trading.update_settings(
+        db,
+        starting_balance=start_balance_value,
+        max_pct=max_pct_value,
+    )
     return RedirectResponse(url="/settings", status_code=302)
 
 
