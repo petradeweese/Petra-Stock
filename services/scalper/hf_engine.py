@@ -1,0 +1,877 @@
+"""High-frequency paper scalper engine."""
+from __future__ import annotations
+
+import csv
+import io
+import logging
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta, timezone
+from typing import Any, Dict, List, Mapping, Optional, Sequence
+
+from utils import TZ, now_et
+
+from .lf_engine import evaluate_exit
+from .shared import (
+    FeeModel,
+    apply_slippage,
+    calculate_position_size as _shared_position_size,
+    compute_trade_metrics,
+    summarize_backtest,
+)
+
+logger = logging.getLogger(__name__)
+
+_DEFAULT_TICKERS = "SPY,QQQ,NVDA,TSLA,META,AMD"
+
+
+@dataclass(slots=True)
+class HFSettings:
+    starting_balance: float
+    pct_per_trade: float
+    daily_trade_cap: int
+    tickers: str
+    profit_target_pct: float
+    max_adverse_pct: float
+    time_cap_minutes: int
+    cooldown_minutes: int
+    max_open_positions: int
+    daily_max_drawdown_pct: float
+    per_contract_fee: float
+    per_order_fee: float
+    volatility_gate: float
+
+
+@dataclass(slots=True)
+class HFStatus:
+    status: str
+    started_at: Optional[str]
+    account_equity: float
+    open_positions: int
+    realized_pl_day: float
+    unrealized_pl: float
+    win_rate_pct: float
+    halted: bool
+
+
+@dataclass(slots=True)
+class HFActivity:
+    id: int
+    trade_date: str
+    ticker: str
+    option_type: str
+    strike: float | None
+    expiry: str | None
+    qty: int
+    entry_time: str
+    entry_price: float
+    exit_time: str | None
+    exit_price: float | None
+    roi_pct: float | None
+    fees: float
+    status: str
+
+
+@dataclass(slots=True)
+class EquityPoint:
+    ts: str
+    balance: float
+
+
+def _ensure_schema(db) -> None:
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS scalper_hf_settings (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            starting_balance REAL NOT NULL,
+            pct_per_trade REAL NOT NULL,
+            daily_trade_cap INTEGER NOT NULL,
+            tickers TEXT NOT NULL,
+            profit_target_pct REAL NOT NULL,
+            max_adverse_pct REAL NOT NULL,
+            time_cap_minutes INTEGER NOT NULL,
+            cooldown_minutes INTEGER NOT NULL,
+            max_open_positions INTEGER NOT NULL,
+            daily_max_drawdown_pct REAL NOT NULL,
+            per_contract_fee REAL NOT NULL,
+            per_order_fee REAL NOT NULL,
+            volatility_gate REAL NOT NULL
+        )
+        """
+    )
+    db.execute(
+        """
+        INSERT OR IGNORE INTO scalper_hf_settings (
+            id, starting_balance, pct_per_trade, daily_trade_cap, tickers,
+            profit_target_pct, max_adverse_pct, time_cap_minutes,
+            cooldown_minutes, max_open_positions, daily_max_drawdown_pct,
+            per_contract_fee, per_order_fee, volatility_gate
+        ) VALUES (
+            1, 100000.0, 1.0, 50, ?,
+            4.0, -2.0, 5,
+            2, 2, -6.0,
+            0.65, 0.0, 3.0
+        )
+        """,
+        (_DEFAULT_TICKERS,),
+    )
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS scalper_hf_state (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            status TEXT NOT NULL,
+            started_at TEXT,
+            halted_at TEXT,
+            halt_reason TEXT
+        )
+        """
+    )
+    db.execute(
+        """INSERT OR IGNORE INTO scalper_hf_state(id, status, started_at, halted_at, halt_reason)
+               VALUES(1, 'inactive', NULL, NULL, NULL)"""
+    )
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS scalper_hf_equity (
+            ts TEXT PRIMARY KEY,
+            balance REAL NOT NULL
+        )
+        """
+    )
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS scalper_hf_activity (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trade_date TEXT NOT NULL,
+            ticker TEXT NOT NULL,
+            option_type TEXT NOT NULL,
+            strike REAL,
+            expiry TEXT,
+            qty INTEGER NOT NULL,
+            entry_time TEXT NOT NULL,
+            entry_price REAL NOT NULL,
+            exit_time TEXT,
+            exit_price REAL,
+            roi_pct REAL,
+            fees REAL NOT NULL,
+            status TEXT NOT NULL,
+            dedupe_key TEXT NOT NULL,
+            reason TEXT,
+            realized_pl REAL,
+            net_pl REAL
+        )
+        """
+    )
+    db.connection.commit()
+
+
+def load_settings(db) -> HFSettings:
+    _ensure_schema(db)
+    row = db.execute(
+        """
+        SELECT starting_balance, pct_per_trade, daily_trade_cap, tickers,
+               profit_target_pct, max_adverse_pct, time_cap_minutes,
+               cooldown_minutes, max_open_positions, daily_max_drawdown_pct,
+               per_contract_fee, per_order_fee, volatility_gate
+          FROM scalper_hf_settings WHERE id = 1
+        """
+    ).fetchone()
+    assert row is not None
+    return HFSettings(
+        starting_balance=float(row["starting_balance"]),
+        pct_per_trade=float(row["pct_per_trade"]),
+        daily_trade_cap=int(row["daily_trade_cap"]),
+        tickers=str(row["tickers"] or _DEFAULT_TICKERS),
+        profit_target_pct=float(row["profit_target_pct"]),
+        max_adverse_pct=float(row["max_adverse_pct"]),
+        time_cap_minutes=int(row["time_cap_minutes"]),
+        cooldown_minutes=int(row["cooldown_minutes"]),
+        max_open_positions=int(row["max_open_positions"]),
+        daily_max_drawdown_pct=float(row["daily_max_drawdown_pct"]),
+        per_contract_fee=float(row["per_contract_fee"]),
+        per_order_fee=float(row["per_order_fee"]),
+        volatility_gate=float(row["volatility_gate"]),
+    )
+
+
+def update_settings(
+    db,
+    *,
+    starting_balance: float,
+    pct_per_trade: float,
+    daily_trade_cap: int,
+    tickers: Sequence[str] | str,
+    profit_target_pct: float,
+    max_adverse_pct: float,
+    time_cap_minutes: int,
+    cooldown_minutes: int,
+    max_open_positions: int,
+    daily_max_drawdown_pct: float,
+    per_contract_fee: float,
+    per_order_fee: float,
+    volatility_gate: float,
+) -> HFSettings:
+    _ensure_schema(db)
+    tickers_text = ",".join(tickers) if isinstance(tickers, (list, tuple, set)) else str(tickers)
+    db.execute(
+        """
+        UPDATE scalper_hf_settings
+           SET starting_balance=?, pct_per_trade=?, daily_trade_cap=?, tickers=?,
+               profit_target_pct=?, max_adverse_pct=?, time_cap_minutes=?,
+               cooldown_minutes=?, max_open_positions=?, daily_max_drawdown_pct=?,
+               per_contract_fee=?, per_order_fee=?, volatility_gate=?
+         WHERE id=1
+        """,
+        (
+            float(starting_balance),
+            max(0.1, min(float(pct_per_trade), 3.0)),
+            int(max(0, daily_trade_cap)),
+            tickers_text,
+            float(profit_target_pct),
+            float(max_adverse_pct),
+            int(max(1, time_cap_minutes)),
+            int(max(0, cooldown_minutes)),
+            int(max(1, max_open_positions)),
+            float(daily_max_drawdown_pct),
+            max(0.0, float(per_contract_fee)),
+            max(0.0, float(per_order_fee)),
+            max(0.0, float(volatility_gate)),
+        ),
+    )
+    db.connection.commit()
+    return load_settings(db)
+
+
+def _now_utc(ts: datetime | None = None) -> datetime:
+    if ts:
+        return ts.astimezone(timezone.utc)
+    return datetime.now(timezone.utc)
+
+
+def _ensure_equity_seed(db, settings: HFSettings, *, now: datetime | None = None) -> None:
+    row = db.execute("SELECT COUNT(1) FROM scalper_hf_equity").fetchone()
+    if row and int(row[0]) > 0:
+        return
+    current = _now_utc(now).isoformat()
+    db.execute(
+        "INSERT OR REPLACE INTO scalper_hf_equity(ts, balance) VALUES(?, ?)",
+        (current, float(settings.starting_balance)),
+    )
+    db.connection.commit()
+
+
+def start_engine(db, *, now: datetime | None = None) -> HFStatus:
+    _ensure_schema(db)
+    settings = load_settings(db)
+    started = _now_utc(now).isoformat()
+    db.execute(
+        "UPDATE scalper_hf_state SET status='active', started_at=?, halted_at=NULL, halt_reason=NULL WHERE id=1",
+        (started,),
+    )
+    db.connection.commit()
+    _ensure_equity_seed(db, settings, now=now)
+    return get_status(db)
+
+
+def stop_engine(db, *, now: datetime | None = None) -> HFStatus:
+    _ensure_schema(db)
+    db.execute("UPDATE scalper_hf_state SET status='inactive' WHERE id=1")
+    db.connection.commit()
+    return get_status(db)
+
+
+def restart_engine(db, *, now: datetime | None = None) -> HFStatus:
+    _ensure_schema(db)
+    settings = load_settings(db)
+    started = _now_utc(now).isoformat()
+    db.execute(
+        "UPDATE scalper_hf_state SET status='active', started_at=?, halted_at=NULL, halt_reason=NULL WHERE id=1",
+        (started,),
+    )
+    db.connection.commit()
+    _ensure_equity_seed(db, settings, now=now)
+    return get_status(db)
+
+
+def get_status(db) -> HFStatus:
+    _ensure_schema(db)
+    state = db.execute(
+        "SELECT status, started_at, halted_at FROM scalper_hf_state WHERE id=1"
+    ).fetchone()
+    status = str(state["status"]) if state else "inactive"
+    started_at = state["started_at"] if state else None
+    halted = bool(state["halted_at"]) if state else False
+    equity = _latest_equity(db)
+    open_positions = _count_open_positions(db)
+    realized_today = _realized_today(db)
+    win_rate = _win_rate(db)
+    return HFStatus(
+        status=status,
+        started_at=started_at,
+        account_equity=equity,
+        open_positions=open_positions,
+        realized_pl_day=realized_today,
+        unrealized_pl=0.0,
+        win_rate_pct=win_rate,
+        halted=halted,
+    )
+
+
+def status_payload(db) -> Dict[str, Any]:
+    st = get_status(db)
+    settings = load_settings(db)
+    return {
+        "status": st.status,
+        "started_at": st.started_at,
+        "account_equity": st.account_equity,
+        "open_positions": st.open_positions,
+        "realized_pl_day": st.realized_pl_day,
+        "unrealized_pl": st.unrealized_pl,
+        "win_rate_pct": st.win_rate_pct,
+        "halted": st.halted,
+        "config": {
+            "pct_per_trade": settings.pct_per_trade,
+            "daily_trade_cap": settings.daily_trade_cap,
+            "cooldown_minutes": settings.cooldown_minutes,
+            "max_open_positions": settings.max_open_positions,
+            "daily_max_drawdown_pct": settings.daily_max_drawdown_pct,
+        },
+    }
+
+
+def calculate_position_size(balance: float, pct_per_trade: float, mid_price: float) -> int:
+    return _shared_position_size(balance, pct_per_trade, mid_price)
+
+
+def _latest_equity(db) -> float:
+    row = db.execute(
+        "SELECT balance FROM scalper_hf_equity ORDER BY ts DESC LIMIT 1"
+    ).fetchone()
+    return float(row["balance"]) if row else 0.0
+
+
+def _count_open_positions(db) -> int:
+    row = db.execute(
+        "SELECT COUNT(1) FROM scalper_hf_activity WHERE status='open'"
+    ).fetchone()
+    return int(row[0]) if row else 0
+
+
+def _realized_today(db) -> float:
+    today = now_et().date()
+    start = datetime.combine(today, datetime.min.time()).replace(tzinfo=TZ)
+    end = start + timedelta(days=1)
+    row = db.execute(
+        """
+        SELECT COALESCE(SUM(net_pl), 0) FROM scalper_hf_activity
+         WHERE exit_time >= ? AND exit_time < ?
+        """,
+        (start.astimezone(timezone.utc).isoformat(), end.astimezone(timezone.utc).isoformat()),
+    ).fetchone()
+    return float(row[0]) if row else 0.0
+
+
+def _win_rate(db) -> float:
+    rows = db.execute(
+        "SELECT net_pl FROM scalper_hf_activity WHERE status='closed' AND net_pl IS NOT NULL"
+    ).fetchall()
+    if not rows:
+        return 0.0
+    wins = sum(1 for row in rows if float(row["net_pl"] or 0.0) > 0.0)
+    return round(wins / len(rows) * 100.0, 2)
+
+
+def _dedupe_key(ticker: str, option_type: str, strike: float | None, expiry: str | None) -> str:
+    parts = [ticker.upper(), option_type.upper()]
+    if strike is not None:
+        parts.append(f"{float(strike):.2f}")
+    if expiry:
+        parts.append(str(expiry))
+    return "|".join(parts)
+
+
+def _slippage_ticks(liquidity_score: float | None) -> int:
+    if liquidity_score is None:
+        return 1
+    score = max(0.0, float(liquidity_score))
+    if score >= 0.75:
+        return 1
+    if score >= 0.4:
+        return 2
+    return 3
+
+
+def _cooldown_active(db, now_ts: datetime, *, cooldown_minutes: int) -> bool:
+    row = db.execute(
+        "SELECT exit_time FROM scalper_hf_activity WHERE exit_time IS NOT NULL ORDER BY exit_time DESC LIMIT 1"
+    ).fetchone()
+    if not row or not row["exit_time"]:
+        return False
+    try:
+        exit_ts = datetime.fromisoformat(str(row["exit_time"]))
+    except ValueError:
+        return False
+    cooldown = exit_ts + timedelta(minutes=cooldown_minutes)
+    return now_ts < cooldown
+
+
+def _daily_trade_count(db, session_date: date) -> int:
+    start = datetime.combine(session_date, datetime.min.time(), tzinfo=timezone.utc)
+    end = start + timedelta(days=1)
+    row = db.execute(
+        """
+        SELECT COUNT(1) FROM scalper_hf_activity
+         WHERE entry_time >= ? AND entry_time < ?
+        """,
+        (start.isoformat(), end.isoformat()),
+    ).fetchone()
+    return int(row[0]) if row else 0
+
+
+def _session_start_equity(db, session_date: date, *, default: float) -> float:
+    start = datetime.combine(session_date, datetime.min.time(), tzinfo=timezone.utc)
+    end = start + timedelta(days=1)
+    row = db.execute(
+        """
+        SELECT balance FROM scalper_hf_equity
+         WHERE ts >= ? AND ts < ?
+         ORDER BY ts ASC LIMIT 1
+        """,
+        (start.isoformat(), end.isoformat()),
+    ).fetchone()
+    if not row:
+        return default
+    return float(row["balance"])
+
+
+def _halt_engine(db, *, reason: str, now: datetime) -> None:
+    db.execute(
+        "UPDATE scalper_hf_state SET status='halted', halted_at=?, halt_reason=? WHERE id=1",
+        (now.isoformat(), reason),
+    )
+    db.connection.commit()
+
+
+def _drawdown_breached(db, now_ts: datetime, settings: HFSettings) -> bool:
+    if settings.daily_max_drawdown_pct >= 0:
+        return False
+    current = _latest_equity(db)
+    session_start = _session_start_equity(db, now_ts.date(), default=settings.starting_balance)
+    if session_start <= 0:
+        return False
+    delta_pct = (current - session_start) / session_start * 100.0
+    return delta_pct <= settings.daily_max_drawdown_pct
+
+
+def open_trade(
+    db,
+    *,
+    ticker: str,
+    option_type: str,
+    strike: float | None,
+    expiry: str | None,
+    mid_price: float,
+    entry_time: datetime | None = None,
+    momentum_score: float | None = None,
+    vwap: float | None = None,
+    ema9: float | None = None,
+    volatility: float | None = None,
+    liquidity: float | None = None,
+    settings: HFSettings | None = None,
+) -> Optional[int]:
+    _ensure_schema(db)
+    settings = settings or load_settings(db)
+    state = get_status(db)
+    if state.status != "active":
+        logger.info("hf_trade_skipped status=%s", state.status)
+        return None
+
+    entry_dt = _now_utc(entry_time)
+    if _drawdown_breached(db, entry_dt, settings):
+        _halt_engine(db, reason="drawdown", now=entry_dt)
+        logger.warning("hf_drawdown_halt equity=%s", _latest_equity(db))
+        return None
+
+    if _cooldown_active(db, entry_dt, cooldown_minutes=settings.cooldown_minutes):
+        logger.info("hf_trade_cooldown")
+        return None
+
+    if _count_open_positions(db) >= settings.max_open_positions:
+        logger.info("hf_trade_max_positions")
+        return None
+
+    if _daily_trade_count(db, entry_dt.date()) >= settings.daily_trade_cap:
+        logger.info("hf_trade_cap_reached date=%s cap=%s", entry_dt.date(), settings.daily_trade_cap)
+        return None
+
+    dedupe_key = _dedupe_key(ticker, option_type, strike, expiry)
+    existing = db.execute(
+        "SELECT id FROM scalper_hf_activity WHERE status='open' AND dedupe_key=?",
+        (dedupe_key,),
+    ).fetchone()
+    if existing:
+        logger.info("hf_trade_dedupe ticker=%s option=%s", ticker, option_type)
+        return None
+
+    price = float(mid_price)
+    vwap_val = float(vwap) if vwap is not None else price
+    ema_val = float(ema9) if ema9 is not None else price
+    momentum_val = float(momentum_score) if momentum_score is not None else 0.0
+    vol_val = float(volatility) if volatility is not None else 0.0
+
+    if momentum_val < 0.5:
+        logger.info("hf_trade_signal_momentum_insufficient score=%.3f", momentum_val)
+        return None
+    if price > vwap_val * 1.01:
+        logger.info("hf_trade_signal_no_pullback price=%.2f vwap=%.2f", price, vwap_val)
+        return None
+    if price < ema_val * 0.995:
+        logger.info("hf_trade_signal_below_ema price=%.2f ema=%.2f", price, ema_val)
+        return None
+    if settings.volatility_gate > 0 and vol_val > settings.volatility_gate:
+        logger.info("hf_trade_volatility_block vol=%.2f gate=%.2f", vol_val, settings.volatility_gate)
+        return None
+
+    equity = _latest_equity(db)
+    qty = calculate_position_size(equity, settings.pct_per_trade, price)
+    if qty <= 0:
+        logger.info("hf_trade_qty_zero ticker=%s", ticker)
+        return None
+
+    ticks = _slippage_ticks(liquidity)
+    entry_price = apply_slippage(price, side="buy", ticks=ticks)
+    fee_model = FeeModel(per_contract=settings.per_contract_fee, per_order=settings.per_order_fee)
+    fees = fee_model.order_fees(qty)
+    trade_date = entry_dt.date().isoformat()
+    db.execute(
+        """
+        INSERT INTO scalper_hf_activity(
+            trade_date, ticker, option_type, strike, expiry, qty,
+            entry_time, entry_price, fees, status, dedupe_key
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            trade_date,
+            ticker.upper(),
+            option_type.upper(),
+            strike,
+            expiry,
+            qty,
+            entry_dt.isoformat(),
+            entry_price,
+            fees,
+            "open",
+            dedupe_key,
+        ),
+    )
+    db.connection.commit()
+    row = db.execute("SELECT last_insert_rowid() AS id").fetchone()
+    return int(row["id"]) if row else None
+
+
+def close_trade(
+    db,
+    trade_id: int,
+    *,
+    mid_price: float,
+    exit_time: datetime | None = None,
+    reason: str = "exit",
+    liquidity: float | None = None,
+    settings: HFSettings | None = None,
+) -> Optional[HFActivity]:
+    _ensure_schema(db)
+    settings = settings or load_settings(db)
+    row = db.execute(
+        "SELECT id, qty, entry_price, fees FROM scalper_hf_activity WHERE id=? AND status='open'",
+        (trade_id,),
+    ).fetchone()
+    if not row:
+        return None
+    exit_dt = _now_utc(exit_time)
+    qty = int(row["qty"])
+    entry_price = float(row["entry_price"])
+    entry_fees = float(row["fees"])
+    ticks = _slippage_ticks(liquidity)
+    exit_price = apply_slippage(mid_price, side="sell", ticks=ticks)
+    fee_model = FeeModel(per_contract=settings.per_contract_fee, per_order=settings.per_order_fee)
+    exit_fees = fee_model.order_fees(qty)
+    gross = (exit_price - entry_price) * qty * 100.0
+    total_fees = entry_fees + exit_fees
+    net = gross - total_fees
+    roi = 0.0 if entry_price <= 0 else round((exit_price - entry_price) / entry_price * 100.0, 2)
+
+    db.execute(
+        """
+        UPDATE scalper_hf_activity
+           SET exit_time=?, exit_price=?, roi_pct=?, fees=?, status='closed',
+               reason=?, realized_pl=?, net_pl=?
+         WHERE id=?
+        """,
+        (
+            exit_dt.isoformat(),
+            exit_price,
+            roi,
+            total_fees,
+            reason,
+            gross,
+            net,
+            trade_id,
+        ),
+    )
+    new_equity = _latest_equity(db) + net
+    db.execute(
+        "INSERT INTO scalper_hf_equity(ts, balance) VALUES(?, ?)",
+        (exit_dt.isoformat(), new_equity),
+    )
+    db.connection.commit()
+    updated = db.execute(
+        """
+        SELECT id, trade_date, ticker, option_type, strike, expiry, qty,
+               entry_time, entry_price, exit_time, exit_price, roi_pct,
+               fees, status
+          FROM scalper_hf_activity WHERE id=?
+        """,
+        (trade_id,),
+    ).fetchone()
+    if not updated:
+        return None
+    return HFActivity(
+        id=int(updated["id"]),
+        trade_date=str(updated["trade_date"]),
+        ticker=str(updated["ticker"]),
+        option_type=str(updated["option_type"]),
+        strike=updated["strike"],
+        expiry=updated["expiry"],
+        qty=int(updated["qty"]),
+        entry_time=str(updated["entry_time"]),
+        entry_price=float(updated["entry_price"]),
+        exit_time=updated["exit_time"],
+        exit_price=updated["exit_price"],
+        roi_pct=updated["roi_pct"],
+        fees=float(updated["fees"]),
+        status=str(updated["status"]),
+    )
+
+
+def list_activity(db, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+    _ensure_schema(db)
+    query = (
+        "SELECT trade_date, ticker, option_type, strike, expiry, qty, entry_time,"
+        " entry_price, exit_time, exit_price, roi_pct, fees, status FROM"
+        " scalper_hf_activity ORDER BY entry_time DESC"
+    )
+    if limit is not None:
+        query += f" LIMIT {int(limit)}"
+    rows = db.execute(query).fetchall()
+    data: List[Dict[str, Any]] = []
+    for row in rows:
+        data.append(
+            {
+                "date": row["trade_date"],
+                "ticker": row["ticker"],
+                "call_put": row["option_type"],
+                "strike": row["strike"],
+                "expiry": row["expiry"],
+                "qty": row["qty"],
+                "entry_time": row["entry_time"],
+                "entry_price": row["entry_price"],
+                "exit_time": row["exit_time"],
+                "exit_price": row["exit_price"],
+                "roi_pct": row["roi_pct"],
+                "fees": row["fees"],
+                "status": row["status"],
+            }
+        )
+    return data
+
+
+def export_activity_csv(db) -> tuple[str, str]:
+    rows = list_activity(db)
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(
+        [
+            "Date",
+            "Ticker",
+            "Call/Put",
+            "Strike-Expiry",
+            "Qty",
+            "Entry Time",
+            "Entry Price",
+            "Exit Time",
+            "Exit Price",
+            "ROI%",
+            "Fees",
+        ]
+    )
+    for row in rows:
+        strike = row["strike"]
+        expiry = row["expiry"]
+        strike_label = "—"
+        if strike is not None:
+            strike_label = f"${float(strike):.2f}".rstrip("0").rstrip(".")
+        expiry_label = expiry or "—"
+        writer.writerow(
+            [
+                row["date"],
+                row["ticker"],
+                row["call_put"],
+                f"{strike_label}-{expiry_label}",
+                row["qty"],
+                row["entry_time"],
+                row["entry_price"],
+                row["exit_time"],
+                row["exit_price"],
+                row["roi_pct"],
+                row["fees"],
+            ]
+        )
+    return output.getvalue(), "scalper_hf_activity.csv"
+
+
+def get_equity_points(db, range_key: str) -> List[EquityPoint]:
+    _ensure_schema(db)
+    limit = {
+        "1d": timedelta(days=1),
+        "1w": timedelta(weeks=1),
+        "1m": timedelta(days=30),
+        "1y": timedelta(days=365),
+    }.get(range_key, timedelta(days=30))
+    cutoff = _now_utc() - limit
+    rows = db.execute(
+        "SELECT ts, balance FROM scalper_hf_equity WHERE ts >= ? ORDER BY ts ASC",
+        (cutoff.isoformat(),),
+    ).fetchall()
+    return [EquityPoint(ts=row["ts"], balance=float(row["balance"])) for row in rows]
+
+
+def metrics_snapshot(db) -> Dict[str, float]:
+    _ensure_schema(db)
+    settings = load_settings(db)
+    rows = db.execute(
+        """
+        SELECT entry_time, exit_time, roi_pct, realized_pl, net_pl
+          FROM scalper_hf_activity
+         WHERE status='closed'
+         ORDER BY exit_time ASC
+        """
+    ).fetchall()
+    return dict(compute_trade_metrics(rows, starting_balance=settings.starting_balance))
+
+
+def _ema(values: Sequence[float], period: int) -> List[float]:
+    if not values:
+        return []
+    k = 2 / (period + 1)
+    ema_values: List[float] = []
+    ema = values[0]
+    for price in values:
+        ema = price * k + ema * (1 - k)
+        ema_values.append(ema)
+    return ema_values
+
+
+def _normalize_liquidity(bar: Mapping[str, Any]) -> float:
+    volume = float(bar.get("volume") or bar.get("oi") or 0.0)
+    if volume <= 0:
+        return 0.0
+    scale = 100000.0
+    return max(0.0, min(volume / scale, 1.0))
+
+
+def _estimate_volatility(bar: Mapping[str, Any]) -> float:
+    if "atr" in bar:
+        return float(bar["atr"])
+    if "volatility" in bar:
+        return float(bar["volatility"])
+    high = float(bar.get("high", 0.0))
+    low = float(bar.get("low", 0.0))
+    return abs(high - low)
+
+
+def run_backtest(
+    db,
+    *,
+    bars_by_symbol: Mapping[str, Sequence[Mapping[str, Any]]],
+    settings: HFSettings | None = None,
+) -> Dict[str, Any]:
+    settings = settings or load_settings(db)
+    balance = settings.starting_balance
+    equity_curve: List[Dict[str, Any]] = []
+    cooldown_until: datetime | None = None
+    fee_model = FeeModel(per_contract=settings.per_contract_fee, per_order=settings.per_order_fee)
+
+    for symbol, bars in bars_by_symbol.items():
+        closes = [float(bar.get("close", 0.0)) for bar in bars]
+        ema9 = _ema(closes, 9)
+        open_trade_price: float | None = None
+        entry_idx: int | None = None
+        entry_ts: datetime | None = None
+        for idx, bar in enumerate(bars):
+            ts_raw = bar.get("ts")
+            try:
+                ts = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
+            except ValueError:
+                ts = None
+            price = float(bar.get("close", 0.0))
+            if ts and cooldown_until and ts < cooldown_until:
+                continue
+            momentum = 0.0
+            if idx > 0:
+                momentum = price - float(bars[idx - 1].get("close", price))
+            vwap = float(bar.get("vwap", price))
+            ema_val = ema9[idx] if idx < len(ema9) else price
+            vol = _estimate_volatility(bar)
+            liquidity = _normalize_liquidity(bar)
+
+            if open_trade_price is None:
+                if (
+                    momentum >= 0.4
+                    and price <= vwap * 1.01
+                    and price >= ema_val * 0.995
+                    and (settings.volatility_gate <= 0 or vol <= settings.volatility_gate)
+                ):
+                    open_trade_price = apply_slippage(price, side="buy", ticks=_slippage_ticks(liquidity))
+                    entry_idx = idx
+                    entry_ts = ts
+                continue
+
+            if open_trade_price is not None and entry_idx is not None:
+                segment = bars[entry_idx : idx + 1]
+                exit_price, reason, exit_ts_raw = evaluate_exit(
+                    entry_price=open_trade_price,
+                    bars=segment,
+                    target_pct=settings.profit_target_pct,
+                    stop_pct=settings.max_adverse_pct,
+                    time_cap_minutes=settings.time_cap_minutes,
+                )
+                exit_ts = None
+                if exit_ts_raw:
+                    try:
+                        exit_ts = datetime.fromisoformat(exit_ts_raw)
+                    except ValueError:
+                        exit_ts = ts
+                qty = max(1, calculate_position_size(balance, settings.pct_per_trade, open_trade_price))
+                entry_fees = fee_model.order_fees(qty)
+                exit_fees = fee_model.order_fees(qty)
+                gross = (exit_price - open_trade_price) * qty * 100.0
+                net = gross - (entry_fees + exit_fees)
+                balance += net
+                point_ts = exit_ts or ts or entry_ts
+                equity_curve.append(
+                    {
+                        "ts": point_ts.isoformat() if point_ts else None,
+                        "balance": balance,
+                        "symbol": symbol,
+                        "reason": reason,
+                        "net": net,
+                    }
+                )
+                cooldown_until = (exit_ts or ts or entry_ts or datetime.now(timezone.utc)) + timedelta(
+                    minutes=settings.cooldown_minutes
+                )
+                open_trade_price = None
+                entry_idx = None
+                entry_ts = None
+
+    summary = summarize_backtest(equity_curve, starting_balance=settings.starting_balance)
+    return {"equity_curve": equity_curve, "summary": summary}

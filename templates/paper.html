@@ -1,73 +1,206 @@
 {% extends 'base.html' %}
-{% block title %}Paper Trading — Petra Stock{% endblock %}
+{% block title %}Paper ▸ Scalper — Petra Stock{% endblock %}
 {% block content %}
   <div class="paper-container">
-    <div class="card paper-header-card">
-      <div class="paper-header-top">
-        <div class="paper-balance-group">
-          <p class="paper-label">Account Total</p>
-          {% set balance_value = summary.balance or 0.0 %}
-          <div id="paper-balance" data-balance="{{ balance_value }}">
-            ${{ '{:,.2f}'.format(balance_value) }}
+    <nav class="paper-subtabs" aria-label="Paper trading modes">
+      <a class="paper-subtab" href="/favorites">Favorites</a>
+      <a class="paper-subtab is-active" href="#lf-section">Low Frequency</a>
+      <a class="paper-subtab" href="#hf-section">High Frequency</a>
+    </nav>
+
+    <section id="lf-section" class="paper-section" aria-labelledby="lf-heading">
+      <div class="card paper-header-card">
+        <header class="paper-lf-header">
+          <div class="paper-metrics" id="lf-metrics" data-status="{{ scalper_lf_status.status }}" data-started="{{ scalper_lf_status.started_at or '' }}">
+            <h2 id="lf-heading" class="visually-hidden">Low-frequency scalper</h2>
+            <div class="paper-metric">
+              <p class="paper-label">Account Equity</p>
+              <strong data-metric="equity">$0.00</strong>
+            </div>
+            <div class="paper-metric">
+              <p class="paper-label">Open Positions</p>
+              <strong data-metric="open_positions">0</strong>
+            </div>
+            <div class="paper-metric">
+              <p class="paper-label">Realized P/L (day)</p>
+              <strong data-metric="realized">$0.00</strong>
+            </div>
+            <div class="paper-metric">
+              <p class="paper-label">Unrealized P/L</p>
+              <strong data-metric="unrealized">$0.00</strong>
+            </div>
+            <div class="paper-metric">
+              <p class="paper-label">Win%</p>
+              <strong data-metric="win_rate">0.0%</strong>
+            </div>
+          </div>
+          <div class="paper-range-toggle" role="group" aria-label="LF equity range">
+            {% set default_range = '1m' %}
+            {% for key,label in {'1d':'1D','1w':'1W','1m':'1M','1y':'1Y'}.items() %}
+              <button type="button" class="paper-range-btn {% if key == default_range %}is-active{% endif %}" data-mode="lf" data-range="{{ key }}">{{ label }}</button>
+            {% endfor %}
+          </div>
+        </header>
+        <p id="lf-status-line" class="paper-status-line">Inactive</p>
+        <div class="paper-chart-wrapper">
+          <canvas id="lf-equity-chart" height="260" aria-label="Low-frequency scalper equity chart"></canvas>
+        </div>
+        <div class="paper-secondary-metrics" id="lf-secondary-metrics">
+          <div class="paper-metric">
+            <p class="paper-label">Avg Win</p>
+            <strong data-metric="avg_win">$0.00</strong>
+          </div>
+          <div class="paper-metric">
+            <p class="paper-label">Avg Loss</p>
+            <strong data-metric="avg_loss">$0.00</strong>
+          </div>
+          <div class="paper-metric">
+            <p class="paper-label">Profit Factor</p>
+            <strong data-metric="profit_factor">0.00</strong>
+          </div>
+          <div class="paper-metric">
+            <p class="paper-label">Sharpe</p>
+            <strong data-metric="sharpe">0.00</strong>
+          </div>
+          <div class="paper-metric">
+            <p class="paper-label">Max Drawdown</p>
+            <strong data-metric="max_drawdown">0.0%</strong>
+          </div>
+          <div class="paper-metric">
+            <p class="paper-label">Trades / Day</p>
+            <strong data-metric="trades_per_day">0.0</strong>
           </div>
         </div>
-        {% set roi_value = summary.roi_pct or 0.0 %}
-        <span id="paper-roi-chip" class="paper-roi-chip {% if roi_value >= 0 %}chip-pos{% else %}chip-neg{% endif %}">
-          {{ '%.2f'|format(roi_value) }}%
-        </span>
       </div>
-      <div class="paper-header-bottom">
-        <div class="paper-range-toggle" role="group" aria-label="Equity range">
-          {% set default_range = '1m' %}
-          {% for key,label in {'1d':'1D','1w':'1W','1m':'1M','1y':'1Y'}.items() %}
-            <button type="button" class="paper-range-btn {% if key == default_range %}is-active{% endif %}" data-range="{{ key }}">{{ label }}</button>
-          {% endfor %}
-        </div>
-        <div id="paper-status-line" class="paper-status-line">
-          {% if summary.status == 'active' %}
-            {% if summary.started_at %}
-              Active and running since {{ summary.started_at }}
-            {% else %}
-              Active and running
-            {% endif %}
-          {% else %}
-            Inactive
-          {% endif %}
-        </div>
-      </div>
-      <div class="paper-chart-wrapper">
-        <canvas id="paper-equity-chart" height="260" aria-label="Paper trading equity chart"></canvas>
-      </div>
-    </div>
 
-    <div class="card paper-table-card">
-      <div class="paper-table-toolbar">
-        <h2 class="paper-table-title">Activity</h2>
-        <a id="paper-export" class="btn btn-secondary btn-sm" href="/paper/trades?status=all&export=csv">Export CSV</a>
+      <div class="card paper-table-card">
+        <div class="paper-table-toolbar">
+          <h3 class="paper-table-title">LF Activity</h3>
+          <a id="lf-export" class="btn btn-secondary btn-sm" href="/api/paper/scalper/lf/activity.csv">Export CSV</a>
+        </div>
+        <div class="paper-table-scroll">
+          <table id="lf-activity-table" class="table paper-table" aria-describedby="lf-status-line">
+            <thead>
+              <tr>
+                <th scope="col">Date</th>
+                <th scope="col">Ticker</th>
+                <th scope="col">Call/Put</th>
+                <th scope="col">Strike-Expiry</th>
+                <th scope="col">Qty</th>
+                <th scope="col">Entry Time</th>
+                <th scope="col">Entry Price</th>
+                <th scope="col">Exit Time</th>
+                <th scope="col">Exit Price</th>
+                <th scope="col">ROI%</th>
+                <th scope="col">Fees</th>
+              </tr>
+            </thead>
+            <tbody id="lf-activity-body"></tbody>
+          </table>
+        </div>
       </div>
-      <div class="paper-table-scroll">
-        <table id="paper-trades-table" class="table paper-table" aria-describedby="paper-status-line">
-          <thead>
-            <tr>
-              <th>Ticker</th>
-              <th>Call/Put</th>
-              <th>Strike–Exp</th>
-              <th>Qty</th>
-              <th>Entry Time &amp; Date</th>
-              <th>Entry Price</th>
-              <th>Exit Time &amp; Date</th>
-              <th>Exit Price</th>
-              <th>ROI%</th>
-              <th>Status</th>
-            </tr>
-          </thead>
-          <tbody id="paper-trades-body"></tbody>
-        </table>
+    </section>
+
+    <section id="hf-section" class="paper-section" aria-labelledby="hf-heading">
+      <div class="card paper-header-card">
+        <header class="paper-lf-header">
+          <div class="paper-metrics" id="hf-metrics" data-status="{{ scalper_hf_status.status }}" data-started="{{ scalper_hf_status.started_at or '' }}" data-halted="{{ 'true' if scalper_hf_status.halted else 'false' }}">
+            <h2 id="hf-heading" class="visually-hidden">High-frequency scalper</h2>
+            <div class="paper-metric">
+              <p class="paper-label">Account Equity</p>
+              <strong data-metric="equity">$0.00</strong>
+            </div>
+            <div class="paper-metric">
+              <p class="paper-label">Open Positions</p>
+              <strong data-metric="open_positions">0</strong>
+            </div>
+            <div class="paper-metric">
+              <p class="paper-label">Realized P/L (day)</p>
+              <strong data-metric="realized">$0.00</strong>
+            </div>
+            <div class="paper-metric">
+              <p class="paper-label">Unrealized P/L</p>
+              <strong data-metric="unrealized">$0.00</strong>
+            </div>
+            <div class="paper-metric">
+              <p class="paper-label">Win%</p>
+              <strong data-metric="win_rate">0.0%</strong>
+            </div>
+          </div>
+          <div class="paper-range-toggle" role="group" aria-label="HF equity range">
+            {% set default_range = '1m' %}
+            {% for key,label in {'1d':'1D','1w':'1W','1m':'1M','1y':'1Y'}.items() %}
+              <button type="button" class="paper-range-btn {% if key == default_range %}is-active{% endif %}" data-mode="hf" data-range="{{ key }}">{{ label }}</button>
+            {% endfor %}
+          </div>
+        </header>
+        <p id="hf-status-line" class="paper-status-line">Inactive</p>
+        <div class="paper-chart-wrapper">
+          <canvas id="hf-equity-chart" height="260" aria-label="High-frequency scalper equity chart"></canvas>
+        </div>
+        <div class="paper-secondary-metrics" id="hf-secondary-metrics">
+          <div class="paper-metric">
+            <p class="paper-label">Avg Win</p>
+            <strong data-metric="avg_win">$0.00</strong>
+          </div>
+          <div class="paper-metric">
+            <p class="paper-label">Avg Loss</p>
+            <strong data-metric="avg_loss">$0.00</strong>
+          </div>
+          <div class="paper-metric">
+            <p class="paper-label">Profit Factor</p>
+            <strong data-metric="profit_factor">0.00</strong>
+          </div>
+          <div class="paper-metric">
+            <p class="paper-label">Sharpe</p>
+            <strong data-metric="sharpe">0.00</strong>
+          </div>
+          <div class="paper-metric">
+            <p class="paper-label">Max Drawdown</p>
+            <strong data-metric="max_drawdown">0.0%</strong>
+          </div>
+          <div class="paper-metric">
+            <p class="paper-label">Trades / Day</p>
+            <strong data-metric="trades_per_day">0.0</strong>
+          </div>
+        </div>
       </div>
-    </div>
+
+      <div class="card paper-table-card">
+        <div class="paper-table-toolbar">
+          <h3 class="paper-table-title">HF Activity</h3>
+          <a id="hf-export" class="btn btn-secondary btn-sm" href="/api/paper/scalper/hf/activity.csv">Export CSV</a>
+        </div>
+        <div class="paper-table-scroll">
+          <table id="hf-activity-table" class="table paper-table" aria-describedby="hf-status-line">
+            <thead>
+              <tr>
+                <th scope="col">Date</th>
+                <th scope="col">Ticker</th>
+                <th scope="col">Call/Put</th>
+                <th scope="col">Strike-Expiry</th>
+                <th scope="col">Qty</th>
+                <th scope="col">Entry Time</th>
+                <th scope="col">Entry Price</th>
+                <th scope="col">Exit Time</th>
+                <th scope="col">Exit Price</th>
+                <th scope="col">ROI%</th>
+                <th scope="col">Fees</th>
+              </tr>
+            </thead>
+            <tbody id="hf-activity-body"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
   </div>
-  <script type="application/json" id="paper-summary-seed">{{ summary|tojson|safe }}</script>
+  <script type="application/json" id="lf-status-seed">{{ scalper_lf_status|tojson|safe }}</script>
+  <script type="application/json" id="lf-equity-seed">{{ scalper_lf_equity|tojson|safe }}</script>
+  <script type="application/json" id="lf-activity-seed">{{ scalper_lf_activity|tojson|safe }}</script>
+  <script type="application/json" id="hf-status-seed">{{ scalper_hf_status|tojson|safe }}</script>
+  <script type="application/json" id="hf-equity-seed">{{ scalper_hf_equity|tojson|safe }}</script>
+  <script type="application/json" id="hf-activity-seed">{{ scalper_hf_activity|tojson|safe }}</script>
 {% endblock %}
 {% block extra_body %}
-  <script src="{{ url_for('static', path='js/paper.js') }}" defer></script>
+  <script src="{{ url_for('static', path='js/paper_scalper_lf.js') }}" defer></script>
 {% endblock %}
