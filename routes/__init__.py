@@ -55,6 +55,7 @@ from services import (
     sms_consent,
     twilio_client,
 )
+from services.scalper import hf_engine as scalper_hf, lf_engine as scalper_lf
 from services.favorites import canonical_direction, ensure_favorite_directions
 from services.notify import send_email_smtp
 from services.scanner_params import coerce_scan_params
@@ -2550,6 +2551,18 @@ def forward_page(request: Request, db=Depends(get_db)):
 def paper_page(request: Request, db=Depends(get_db)):
     summary = paper_trading.get_summary(db)
     settings = paper_trading.load_settings(db)
+    scalper_lf_status = scalper_lf.status_payload(db)
+    scalper_hf_status = scalper_hf.status_payload(db)
+    lf_equity_seed = [
+        {"ts": point.ts, "balance": point.balance}
+        for point in scalper_lf.get_equity_points(db, "1m")
+    ]
+    hf_equity_seed = [
+        {"ts": point.ts, "balance": point.balance}
+        for point in scalper_hf.get_equity_points(db, "1m")
+    ]
+    lf_activity_seed = scalper_lf.list_activity(db, limit=250)
+    hf_activity_seed = scalper_hf.list_activity(db, limit=250)
     return templates.TemplateResponse(
         request,
         "paper.html",
@@ -2558,6 +2571,12 @@ def paper_page(request: Request, db=Depends(get_db)):
             "canonical_path": "/paper",
             "summary": summary,
             "paper_settings": settings,
+            "scalper_lf_status": scalper_lf_status,
+            "scalper_lf_equity": lf_equity_seed,
+            "scalper_lf_activity": lf_activity_seed,
+            "scalper_hf_status": scalper_hf_status,
+            "scalper_hf_equity": hf_equity_seed,
+            "scalper_hf_activity": hf_activity_seed,
         },
     )
 
@@ -2628,6 +2647,122 @@ def paper_restart(db=Depends(get_db)):
     _enforce_paper_rate_limit("paper_restart", interval=2.0)
     paper_trading.restart_engine(db)
     return paper_trading.get_summary(db)
+
+
+@router.get("/api/paper/scalper/lf/status")
+def scalper_lf_status(db=Depends(get_db)):
+    return scalper_lf.status_payload(db)
+
+
+@router.post("/api/paper/scalper/lf/start")
+def scalper_lf_start(db=Depends(get_db)):
+    scalper_lf.start_engine(db)
+    return scalper_lf.status_payload(db)
+
+
+@router.post("/api/paper/scalper/lf/stop")
+def scalper_lf_stop(db=Depends(get_db)):
+    scalper_lf.stop_engine(db)
+    return scalper_lf.status_payload(db)
+
+
+@router.post("/api/paper/scalper/lf/restart")
+def scalper_lf_restart(db=Depends(get_db)):
+    scalper_lf.restart_engine(db)
+    return scalper_lf.status_payload(db)
+
+
+@router.get("/api/paper/scalper/lf/equity.json")
+def scalper_lf_equity(range: str = Query("1m"), db=Depends(get_db)):
+    range_key = (range or "").lower()
+    allowed = {"1d", "1w", "1m", "1y"}
+    if range_key not in allowed:
+        raise HTTPException(status_code=400, detail="Invalid range")
+    points = scalper_lf.get_equity_points(db, range_key)
+    return {
+        "range": range_key,
+        "points": [
+            {"ts": point.ts, "balance": point.balance}
+            for point in points
+        ],
+    }
+
+
+@router.get("/api/paper/scalper/lf/activity.csv")
+def scalper_lf_activity_csv(db=Depends(get_db)):
+    csv_text, filename = scalper_lf.export_activity_csv(db)
+    headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+    return Response(content=csv_text, media_type="text/csv", headers=headers)
+
+
+@router.get("/api/paper/scalper/lf/activity")
+def scalper_lf_activity(db=Depends(get_db)):
+    return {"rows": scalper_lf.list_activity(db, limit=500)}
+
+
+@router.get("/api/paper/scalper/hf/status")
+def scalper_hf_status(db=Depends(get_db)):
+    return scalper_hf.status_payload(db)
+
+
+@router.post("/api/paper/scalper/hf/start")
+def scalper_hf_start(db=Depends(get_db)):
+    scalper_hf.start_engine(db)
+    return scalper_hf.status_payload(db)
+
+
+@router.post("/api/paper/scalper/hf/stop")
+def scalper_hf_stop(db=Depends(get_db)):
+    scalper_hf.stop_engine(db)
+    return scalper_hf.status_payload(db)
+
+
+@router.post("/api/paper/scalper/hf/restart")
+def scalper_hf_restart(db=Depends(get_db)):
+    scalper_hf.restart_engine(db)
+    return scalper_hf.status_payload(db)
+
+
+@router.get("/api/paper/scalper/hf/equity.json")
+def scalper_hf_equity(range: str = Query("1m"), db=Depends(get_db)):
+    range_key = (range or "").lower()
+    allowed = {"1d", "1w", "1m", "1y"}
+    if range_key not in allowed:
+        raise HTTPException(status_code=400, detail="Invalid range")
+    points = scalper_hf.get_equity_points(db, range_key)
+    return {
+        "range": range_key,
+        "points": [
+            {"ts": point.ts, "balance": point.balance}
+            for point in points
+        ],
+    }
+
+
+@router.get("/api/paper/scalper/hf/activity.csv")
+def scalper_hf_activity_csv(db=Depends(get_db)):
+    csv_text, filename = scalper_hf.export_activity_csv(db)
+    headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+    return Response(content=csv_text, media_type="text/csv", headers=headers)
+
+
+@router.get("/api/paper/scalper/hf/activity")
+def scalper_hf_activity(db=Depends(get_db)):
+    return {"rows": scalper_hf.list_activity(db, limit=500)}
+
+
+@router.get("/api/paper/scalper/metrics.json")
+def scalper_metrics(mode: str = Query("lf"), db=Depends(get_db)):
+    mode_key = (mode or "").lower()
+    if mode_key == "lf":
+        metrics = scalper_lf.metrics_snapshot(db)
+    elif mode_key == "hf":
+        metrics = scalper_hf.metrics_snapshot(db)
+    else:
+        raise HTTPException(status_code=400, detail="Invalid mode")
+    return {"mode": mode_key, "metrics": metrics}
+
+
 
 
 def _sanitize_pagination(
@@ -3336,6 +3471,10 @@ def settings_page(request: Request, db=Depends(get_db)):
     }
     paper_settings_state = paper_trading.load_settings(db)
     paper_summary = paper_trading.get_summary(db)
+    scalper_settings = scalper_lf.load_settings(db)
+    scalper_status = scalper_lf.status_payload(db)
+    scalper_hf_settings = scalper_hf.load_settings(db)
+    scalper_hf_status = scalper_hf.status_payload(db)
     return templates.TemplateResponse(
         request,
         "settings.html",
@@ -3355,6 +3494,10 @@ def settings_page(request: Request, db=Depends(get_db)):
             "twilio_verify_enabled": twilio_verify_enabled,
             "paper_settings": paper_settings_state,
             "paper_summary": paper_summary,
+            "scalper_settings": scalper_settings,
+            "scalper_status": scalper_status,
+            "scalper_hf_settings": scalper_hf_settings,
+            "scalper_hf_status": scalper_hf_status,
             "canonical_path": "/settings",
         },
     )
@@ -3423,6 +3566,33 @@ def settings_save(
     forward_recency_halflife_days: str = Form("30"),
     paper_starting_balance: str = Form("10000"),
     paper_max_pct: str = Form("10"),
+    scalper_starting_balance: str = Form("100000"),
+    scalper_pct_per_trade: str = Form("3"),
+    scalper_daily_cap: str = Form("20"),
+    scalper_tickers: str = Form("SPY,QQQ,TSLA,NVDA"),
+    scalper_target_pct: str = Form("6"),
+    scalper_stop_pct: str = Form("-3"),
+    scalper_time_cap: str = Form("15"),
+    scalper_session_start: str = Form("09:30"),
+    scalper_session_end: str = Form("16:00"),
+    scalper_allow_premarket: int = Form(0),
+    scalper_allow_postmarket: int = Form(0),
+    scalper_per_contract_fee: str = Form("0.65"),
+    scalper_per_order_fee: str = Form("0"),
+    scalper_rsi_filter: int = Form(0),
+    scalper_hf_starting_balance: str = Form("100000"),
+    scalper_hf_pct_per_trade: str = Form("1"),
+    scalper_hf_daily_cap: str = Form("50"),
+    scalper_hf_tickers: str = Form("SPY,QQQ,NVDA,TSLA,META,AMD"),
+    scalper_hf_target_pct: str = Form("4"),
+    scalper_hf_stop_pct: str = Form("-2"),
+    scalper_hf_time_cap: str = Form("5"),
+    scalper_hf_cooldown: str = Form("2"),
+    scalper_hf_max_positions: str = Form("2"),
+    scalper_hf_drawdown: str = Form("-6"),
+    scalper_hf_volatility_gate: str = Form("3"),
+    scalper_hf_per_contract_fee: str = Form("0.65"),
+    scalper_hf_per_order_fee: str = Form("0"),
     db=Depends(get_db),
 ):
     _ensure_scanner_column(db)
@@ -3466,6 +3636,8 @@ def settings_save(
         half_life_value = getattr(settings, "forward_recency_halflife_days", 30.0) or 30.0
 
     current_paper_settings = paper_trading.load_settings(db)
+    current_scalper_settings = scalper_lf.load_settings(db)
+    current_scalper_hf_settings = scalper_hf.load_settings(db)
     try:
         start_balance_value = float(
             (paper_starting_balance or "").replace(",", "").strip() or current_paper_settings.starting_balance
@@ -3514,6 +3686,76 @@ def settings_save(
         db,
         starting_balance=start_balance_value,
         max_pct=max_pct_value,
+    )
+
+    def _float(value: str, default: float) -> float:
+        try:
+            return float((value or "").replace(",", "").strip() or default)
+        except (TypeError, ValueError):
+            return default
+
+    def _int(value: str, default: int) -> int:
+        try:
+            return int((value or "").strip() or default)
+        except (TypeError, ValueError):
+            return default
+
+    scalper_balance = _float(scalper_starting_balance, current_scalper_settings.starting_balance)
+    scalper_pct_value = _float(scalper_pct_per_trade, current_scalper_settings.pct_per_trade)
+    scalper_cap_value = _int(scalper_daily_cap, current_scalper_settings.daily_trade_cap)
+    scalper_tickers_value = scalper_tickers or current_scalper_settings.tickers
+    scalper_target_value = _float(scalper_target_pct, current_scalper_settings.profit_target_pct)
+    scalper_stop_value = _float(scalper_stop_pct, current_scalper_settings.max_adverse_pct)
+    scalper_time_cap_value = _int(scalper_time_cap, current_scalper_settings.time_cap_minutes)
+    session_start_value = (scalper_session_start or current_scalper_settings.session_start).strip()
+    session_end_value = (scalper_session_end or current_scalper_settings.session_end).strip()
+    per_contract_value = _float(scalper_per_contract_fee, current_scalper_settings.per_contract_fee)
+    per_order_value = _float(scalper_per_order_fee, current_scalper_settings.per_order_fee)
+    scalper_hf_balance = _float(scalper_hf_starting_balance, current_scalper_hf_settings.starting_balance)
+    scalper_hf_pct_value = _float(scalper_hf_pct_per_trade, current_scalper_hf_settings.pct_per_trade)
+    scalper_hf_cap_value = _int(scalper_hf_daily_cap, current_scalper_hf_settings.daily_trade_cap)
+    scalper_hf_tickers_value = scalper_hf_tickers or current_scalper_hf_settings.tickers
+    scalper_hf_target_value = _float(scalper_hf_target_pct, current_scalper_hf_settings.profit_target_pct)
+    scalper_hf_stop_value = _float(scalper_hf_stop_pct, current_scalper_hf_settings.max_adverse_pct)
+    scalper_hf_time_cap_value = _int(scalper_hf_time_cap, current_scalper_hf_settings.time_cap_minutes)
+    scalper_hf_cooldown_value = _int(scalper_hf_cooldown, current_scalper_hf_settings.cooldown_minutes)
+    scalper_hf_positions_value = _int(scalper_hf_max_positions, current_scalper_hf_settings.max_open_positions)
+    scalper_hf_drawdown_value = _float(scalper_hf_drawdown, current_scalper_hf_settings.daily_max_drawdown_pct)
+    scalper_hf_vol_gate = _float(scalper_hf_volatility_gate, current_scalper_hf_settings.volatility_gate)
+    scalper_hf_per_contract_value = _float(scalper_hf_per_contract_fee, current_scalper_hf_settings.per_contract_fee)
+    scalper_hf_per_order_value = _float(scalper_hf_per_order_fee, current_scalper_hf_settings.per_order_fee)
+    scalper_lf.update_settings(
+        db,
+        starting_balance=scalper_balance,
+        pct_per_trade=scalper_pct_value,
+        daily_trade_cap=scalper_cap_value,
+        tickers=scalper_tickers_value,
+        profit_target_pct=scalper_target_value,
+        max_adverse_pct=scalper_stop_value,
+        time_cap_minutes=scalper_time_cap_value,
+        session_start=session_start_value,
+        session_end=session_end_value,
+        allow_premarket=bool(scalper_allow_premarket),
+        allow_postmarket=bool(scalper_allow_postmarket),
+        per_contract_fee=per_contract_value,
+        per_order_fee=per_order_value,
+        rsi_filter=bool(scalper_rsi_filter),
+    )
+    scalper_hf.update_settings(
+        db,
+        starting_balance=scalper_hf_balance,
+        pct_per_trade=scalper_hf_pct_value,
+        daily_trade_cap=scalper_hf_cap_value,
+        tickers=scalper_hf_tickers_value,
+        profit_target_pct=scalper_hf_target_value,
+        max_adverse_pct=scalper_hf_stop_value,
+        time_cap_minutes=scalper_hf_time_cap_value,
+        cooldown_minutes=scalper_hf_cooldown_value,
+        max_open_positions=scalper_hf_positions_value,
+        daily_max_drawdown_pct=scalper_hf_drawdown_value,
+        per_contract_fee=scalper_hf_per_contract_value,
+        per_order_fee=scalper_hf_per_order_value,
+        volatility_gate=scalper_hf_vol_gate,
     )
     return RedirectResponse(url="/settings", status_code=302)
 

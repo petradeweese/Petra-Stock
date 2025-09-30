@@ -122,6 +122,23 @@
     gap: 1rem;
     margin-top: 1rem;
   }
+  .lf-settings-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 1rem;
+    margin-top: 1rem;
+  }
+  .session-inputs {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .session-inputs input[type="time"] {
+    width: 6rem;
+  }
+  .session-sep {
+    color: var(--muted);
+  }
   .paper-settings-actions {
     display: flex;
     gap: 0.5rem;
@@ -199,37 +216,156 @@
       <p class="note status-error" style="margin-top:.5rem;">SMTP configuration incomplete: {{ smtp_missing_label }}</p>
       {% endif %}
 
-      <div class="paper-settings-card" id="paper-settings-card" data-status="{{ paper_summary.status }}" data-started="{{ paper_summary.started_at or '' }}">
+      <div class="paper-settings-card" id="lf-settings-card" data-status="{{ scalper_status.status }}" data-started="{{ scalper_status.started_at or '' }}">
         <div class="paper-settings-header">
-          <h2 style="margin:0;">Paper Trading</h2>
-          <span id="paper-status-pill" class="paper-status-pill {% if paper_summary.status == 'active' %}active{% endif %}">
-            {% if paper_summary.status == 'active' %}Active{% else %}Inactive{% endif %}
+          <h2 style="margin:0;">Paper ▸ Scalper (Low Frequency)</h2>
+          <span id="lf-status-pill" class="paper-status-pill {% if scalper_status.status == 'active' %}active{% endif %}">
+            {% if scalper_status.status == 'active' %}Active{% else %}Inactive{% endif %}
           </span>
         </div>
-        <p class="note" style="margin:0;">Configure the simulated account balance and per-trade sizing limit.</p>
-        <div class="paper-settings-grid">
+        <p class="note" style="margin:0;">Controls for the simulated low-frequency scalper engine.</p>
+        <div class="lf-settings-grid">
           <label>Starting balance
-            <input name="paper_starting_balance" type="number" step="0.01" min="0" value="{{ '%.2f'|format(paper_settings.starting_balance) }}" />
+            <input name="scalper_starting_balance" type="number" step="0.01" min="0" value="{{ '%.2f'|format(scalper_settings.starting_balance) }}" />
           </label>
-          <label>Max % of account per trade
-            <input name="paper_max_pct" type="number" step="0.1" min="0.1" value="{{ '%.2f'|format(paper_settings.max_pct) }}" />
+          <label>% of equity per trade
+            <input name="scalper_pct_per_trade" type="number" step="0.1" min="0.5" max="10" value="{{ '%.1f'|format(scalper_settings.pct_per_trade) }}" />
+          </label>
+          <label>Daily trade cap
+            <input name="scalper_daily_cap" type="number" min="0" value="{{ scalper_settings.daily_trade_cap }}" />
+          </label>
+          <label>Tickers (CSV)
+            <input name="scalper_tickers" type="text" value="{{ scalper_settings.tickers }}" />
           </label>
         </div>
+        <div class="lf-settings-grid">
+          <label>Profit target %
+            <input name="scalper_target_pct" type="number" step="0.1" value="{{ '%.1f'|format(scalper_settings.profit_target_pct) }}" />
+          </label>
+          <label>Max adverse excursion %
+            <input name="scalper_stop_pct" type="number" step="0.1" value="{{ '%.1f'|format(scalper_settings.max_adverse_pct) }}" />
+          </label>
+          <label>Time cap (minutes)
+            <input name="scalper_time_cap" type="number" min="1" value="{{ scalper_settings.time_cap_minutes }}" />
+          </label>
+          <label>Session window
+            <div class="session-inputs">
+              <input name="scalper_session_start" type="time" value="{{ scalper_settings.session_start }}" />
+              <span class="session-sep">–</span>
+              <input name="scalper_session_end" type="time" value="{{ scalper_settings.session_end }}" />
+            </div>
+          </label>
+        </div>
+        <div class="lf-settings-grid">
+          <label>Per-contract fee
+            <input name="scalper_per_contract_fee" type="number" step="0.01" min="0" value="{{ '%.2f'|format(scalper_settings.per_contract_fee) }}" />
+          </label>
+          <label>Per-order fee
+            <input name="scalper_per_order_fee" type="number" step="0.01" min="0" value="{{ '%.2f'|format(scalper_settings.per_order_fee) }}" />
+          </label>
+          <label class="checkbox" style="align-items:center;">
+            <input type="checkbox" name="scalper_allow_premarket" value="1" {% if scalper_settings.allow_premarket %}checked{% endif %} />
+            <span>Allow pre-market</span>
+          </label>
+          <label class="checkbox" style="align-items:center;">
+            <input type="checkbox" name="scalper_allow_postmarket" value="1" {% if scalper_settings.allow_postmarket %}checked{% endif %} />
+            <span>Allow post-market</span>
+          </label>
+        </div>
+        <label class="checkbox" style="margin-top:0.5rem;">
+          <input type="checkbox" name="scalper_rsi_filter" value="1" {% if scalper_settings.rsi_filter %}checked{% endif %} />
+          <span>Enable RSI filter (>= 50)</span>
+        </label>
         <div class="paper-settings-actions">
-          <button type="button" class="btn btn-secondary" data-paper-action="start">Start</button>
-          <button type="button" class="btn btn-secondary" data-paper-action="stop">Stop</button>
-          <button type="button" class="btn btn-secondary" data-paper-action="restart">Restart</button>
+          <button type="button" class="btn btn-secondary" data-lf-action="start">Start</button>
+          <button type="button" class="btn btn-secondary" data-lf-action="stop">Stop</button>
+          <button type="button" class="btn btn-secondary" data-lf-action="restart">Restart</button>
         </div>
-        <p id="paper-settings-status" class="note" style="margin-top:0.5rem;">
-          {% if paper_summary.status == 'active' and paper_summary.started_at %}
-            Active and running since {{ paper_summary.started_at }}
-          {% elif paper_summary.status == 'active' %}
-            Active and running.
+        <p id="lf-settings-status" class="note" style="margin-top:0.5rem;">
+          {% if scalper_status.status == 'active' and scalper_status.started_at %}
+            Active since {{ scalper_status.started_at }}
+          {% elif scalper_status.status == 'active' %}
+            Active and monitoring.
           {% else %}
-            Paper trading is currently inactive.
+            Scalper engine is currently inactive.
           {% endif %}
         </p>
       </div>
+      <script type="application/json" id="lf-status-data">{{ scalper_status|tojson|safe }}</script>
+
+      <div class="paper-settings-card" id="hf-settings-card" data-status="{{ scalper_hf_status.status }}" data-started="{{ scalper_hf_status.started_at or '' }}">
+        <div class="paper-settings-header">
+          <h2 style="margin:0;">Paper ▸ Scalper (High Frequency)</h2>
+          <span id="hf-status-pill" class="paper-status-pill {% if scalper_hf_status.status == 'active' %}active{% endif %}">
+            {% if scalper_hf_status.status == 'active' %}Active{% elif scalper_hf_status.status == 'halted' %}Halted{% else %}Inactive{% endif %}
+          </span>
+        </div>
+        <p class="note" style="margin:0;">Controls for the simulated high-frequency scalper engine with momentum + volatility guardrails.</p>
+        <div class="lf-settings-grid">
+          <label>Starting balance
+            <input name="scalper_hf_starting_balance" type="number" step="0.01" min="0" value="{{ '%.2f'|format(scalper_hf_settings.starting_balance) }}" />
+          </label>
+          <label>% of equity per trade
+            <input name="scalper_hf_pct_per_trade" type="number" step="0.1" min="0.1" max="3" value="{{ '%.1f'|format(scalper_hf_settings.pct_per_trade) }}" />
+          </label>
+          <label>Daily trade cap
+            <input name="scalper_hf_daily_cap" type="number" min="0" value="{{ scalper_hf_settings.daily_trade_cap }}" />
+          </label>
+          <label>Tickers (CSV)
+            <input name="scalper_hf_tickers" type="text" value="{{ scalper_hf_settings.tickers }}" />
+          </label>
+        </div>
+        <div class="lf-settings-grid">
+          <label>Profit target %
+            <input name="scalper_hf_target_pct" type="number" step="0.1" value="{{ '%.1f'|format(scalper_hf_settings.profit_target_pct) }}" />
+          </label>
+          <label>Max adverse excursion %
+            <input name="scalper_hf_stop_pct" type="number" step="0.1" value="{{ '%.1f'|format(scalper_hf_settings.max_adverse_pct) }}" />
+          </label>
+          <label>Time cap (minutes)
+            <input name="scalper_hf_time_cap" type="number" min="1" value="{{ scalper_hf_settings.time_cap_minutes }}" />
+          </label>
+          <label>Cool-down (minutes)
+            <input name="scalper_hf_cooldown" type="number" min="0" value="{{ scalper_hf_settings.cooldown_minutes }}" />
+          </label>
+        </div>
+        <div class="lf-settings-grid">
+          <label>Max open positions
+            <input name="scalper_hf_max_positions" type="number" min="1" value="{{ scalper_hf_settings.max_open_positions }}" />
+          </label>
+          <label>Daily max drawdown %
+            <input name="scalper_hf_drawdown" type="number" step="0.1" value="{{ '%.1f'|format(scalper_hf_settings.daily_max_drawdown_pct) }}" />
+          </label>
+          <label>Volatility gate
+            <input name="scalper_hf_volatility_gate" type="number" step="0.1" min="0" value="{{ '%.1f'|format(scalper_hf_settings.volatility_gate) }}" />
+          </label>
+          <label>Per-contract fee
+            <input name="scalper_hf_per_contract_fee" type="number" step="0.01" min="0" value="{{ '%.2f'|format(scalper_hf_settings.per_contract_fee) }}" />
+          </label>
+        </div>
+        <div class="lf-settings-grid">
+          <label>Per-order fee
+            <input name="scalper_hf_per_order_fee" type="number" step="0.01" min="0" value="{{ '%.2f'|format(scalper_hf_settings.per_order_fee) }}" />
+          </label>
+        </div>
+        <div class="paper-settings-actions">
+          <button type="button" class="btn btn-secondary" data-hf-action="start">Start</button>
+          <button type="button" class="btn btn-secondary" data-hf-action="stop">Stop</button>
+          <button type="button" class="btn btn-secondary" data-hf-action="restart">Restart</button>
+        </div>
+        <p id="hf-settings-status" class="note" style="margin-top:0.5rem;">
+          {% if scalper_hf_status.status == 'active' and scalper_hf_status.started_at %}
+            Active since {{ scalper_hf_status.started_at }}{% if scalper_hf_status.halted %} (halt guard engaged){% endif %}
+          {% elif scalper_hf_status.status == 'halted' %}
+            Halted — risk guard engaged. Restart to resume.
+          {% elif scalper_hf_status.status == 'active' %}
+            Active and monitoring.
+          {% else %}
+            Scalper engine is currently inactive.
+          {% endif %}
+        </p>
+      </div>
+      <script type="application/json" id="hf-status-data">{{ scalper_hf_status|tojson|safe }}</script>
 
   <div class="actions">
     <button type="submit">Save</button>
@@ -357,12 +493,19 @@
       setTimeout(() => { toast.hidden = true; }, 2000);
     }
 
-    const paperStatusEl = document.getElementById('paper-settings-status');
-    const paperPill = document.getElementById('paper-status-pill');
-    const paperButtons = Array.from(document.querySelectorAll('[data-paper-action]'));
-    const paperDateFmt = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+    const lfStatusEl = document.getElementById('lf-settings-status');
+    const lfPill = document.getElementById('lf-status-pill');
+    const lfButtons = Array.from(document.querySelectorAll('[data-lf-action]'));
+    const lfSeedEl = document.getElementById('lf-status-data');
+    const lfDateFmt = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+    let lfSeed = {};
+    try {
+      lfSeed = JSON.parse(lfSeedEl?.textContent || '{}') || {};
+    } catch (err) {
+      lfSeed = {};
+    }
 
-    function renderPaperSummary(data) {
+    function renderLfStatus(data) {
       if (!data) return;
       const status = (data.status || '').toLowerCase();
       const startedRaw = data.started_at || '';
@@ -370,39 +513,39 @@
       if (startedRaw) {
         const parsed = new Date(startedRaw);
         if (!Number.isNaN(parsed.valueOf())) {
-          startedLabel = paperDateFmt.format(parsed);
+          startedLabel = lfDateFmt.format(parsed);
         }
       }
-      if (paperStatusEl) {
+      if (lfStatusEl) {
         if (status === 'active' && startedLabel) {
-          paperStatusEl.textContent = `Active and running since ${startedLabel}`;
+          lfStatusEl.textContent = `Active since ${startedLabel}`;
         } else if (status === 'active') {
-          paperStatusEl.textContent = 'Active and running.';
+          lfStatusEl.textContent = 'Active and monitoring.';
         } else {
-          paperStatusEl.textContent = 'Paper trading is currently inactive.';
+          lfStatusEl.textContent = 'Scalper engine is currently inactive.';
         }
       }
-      if (paperPill) {
+      if (lfPill) {
         if (status === 'active') {
-          paperPill.classList.add('active');
-          paperPill.textContent = 'Active';
+          lfPill.classList.add('active');
+          lfPill.textContent = 'Active';
         } else {
-          paperPill.classList.remove('active');
-          paperPill.textContent = 'Inactive';
+          lfPill.classList.remove('active');
+          lfPill.textContent = 'Inactive';
         }
       }
     }
 
-    function setPaperButtonsDisabled(disabled) {
-      paperButtons.forEach((btn) => {
+    function setLfButtonsDisabled(disabled) {
+      lfButtons.forEach((btn) => {
         btn.disabled = disabled;
       });
     }
 
-    function requestPaperAction(action) {
+    function requestLfAction(action) {
       if (!action) return;
-      setPaperButtonsDisabled(true);
-      fetch(`/paper/${action}`, {
+      setLfButtonsDisabled(true);
+      fetch(`/api/paper/scalper/lf/${action}`, {
         method: 'POST',
         credentials: 'same-origin',
       })
@@ -411,22 +554,118 @@
           return resp.json();
         })
         .then((payload) => {
-          renderPaperSummary(payload);
-          const msg = action === 'start' ? 'Paper trading started.' : action === 'stop' ? 'Paper trading stopped.' : 'Paper trading restarted.';
+          renderLfStatus(payload);
+          const msg = action === 'start'
+            ? 'Low-frequency scalper started.'
+            : action === 'stop'
+              ? 'Low-frequency scalper stopped.'
+              : 'Low-frequency scalper restarted.';
           showToast(msg, true);
         })
         .catch(() => {
-          showToast('Unable to update paper trading.', false);
+          showToast('Unable to update scalper engine.', false);
         })
-        .finally(() => setPaperButtonsDisabled(false));
+        .finally(() => setLfButtonsDisabled(false));
     }
 
-    paperButtons.forEach((btn) => {
+    lfButtons.forEach((btn) => {
       btn.addEventListener('click', () => {
-        const action = btn.dataset.paperAction;
-        requestPaperAction(action);
+        const action = btn.dataset.lfAction;
+        requestLfAction(action);
       });
     });
+
+    renderLfStatus(lfSeed);
+
+    const hfStatusEl = document.getElementById('hf-settings-status');
+    const hfPill = document.getElementById('hf-status-pill');
+    const hfButtons = Array.from(document.querySelectorAll('[data-hf-action]'));
+    const hfSeedEl = document.getElementById('hf-status-data');
+    let hfSeed = {};
+    try {
+      hfSeed = JSON.parse(hfSeedEl?.textContent || '{}') || {};
+    } catch (err) {
+      hfSeed = {};
+    }
+
+    function renderHfStatus(data) {
+      if (!data) return;
+      const status = (data.status || '').toLowerCase();
+      const startedRaw = data.started_at || '';
+      let startedLabel = startedRaw;
+      if (startedRaw) {
+        const parsed = new Date(startedRaw);
+        if (!Number.isNaN(parsed.valueOf())) {
+          startedLabel = lfDateFmt.format(parsed);
+        }
+      }
+      if (hfStatusEl) {
+        if (status === 'active' && data.halted) {
+          hfStatusEl.textContent = 'Halted — risk guard engaged. Restart to resume.';
+        } else if (status === 'active' && startedLabel) {
+          hfStatusEl.textContent = `Active since ${startedLabel}`;
+        } else if (status === 'active') {
+          hfStatusEl.textContent = 'Active and monitoring.';
+        } else if (status === 'halted') {
+          hfStatusEl.textContent = 'Halted — risk guard engaged. Restart to resume.';
+        } else {
+          hfStatusEl.textContent = 'Scalper engine is currently inactive.';
+        }
+      }
+      if (hfPill) {
+        if (status === 'active' && !data.halted) {
+          hfPill.classList.add('active');
+          hfPill.textContent = 'Active';
+        } else if (status === 'halted' || data.halted) {
+          hfPill.classList.remove('active');
+          hfPill.textContent = 'Halted';
+        } else {
+          hfPill.classList.remove('active');
+          hfPill.textContent = 'Inactive';
+        }
+      }
+    }
+
+    function setHfButtonsDisabled(disabled) {
+      hfButtons.forEach((btn) => {
+        btn.disabled = disabled;
+      });
+    }
+
+    function requestHfAction(action) {
+      if (!action) return;
+      setHfButtonsDisabled(true);
+      fetch(`/api/paper/scalper/hf/${action}`, {
+        method: 'POST',
+        credentials: 'same-origin',
+      })
+        .then((resp) => {
+          if (!resp.ok) throw new Error('request_failed');
+          return resp.json();
+        })
+        .then((payload) => {
+          renderHfStatus(payload);
+          const msg = action === 'start'
+            ? 'High-frequency scalper started.'
+            : action === 'stop'
+              ? 'High-frequency scalper stopped.'
+              : 'High-frequency scalper restarted.';
+          showToast(msg, true);
+        })
+        .catch(() => {
+          showToast('Unable to update high-frequency scalper.', false);
+        })
+        .finally(() => setHfButtonsDisabled(false));
+    }
+
+    hfButtons.forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const action = btn.dataset.hfAction;
+        requestHfAction(action);
+      });
+    });
+
+    renderHfStatus(hfSeed);
 
     const sendBtn = document.getElementById('send_test_alert');
     const testForm = document.getElementById('test-alert-form');
