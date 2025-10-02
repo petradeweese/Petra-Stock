@@ -1,6 +1,8 @@
 import os
+import shlex
 from dataclasses import dataclass
-from typing import Tuple
+from pathlib import Path
+from typing import Iterable, Tuple
 
 
 def _bool(name: str, default: str = "false") -> bool:
@@ -36,6 +38,72 @@ def _float(name: str, default: float) -> float:
         return float(str(raw).strip() or default)
     except (TypeError, ValueError):
         return float(default)
+
+
+def _env_files() -> Iterable[Path]:
+    """Yield candidate environment files in priority order."""
+
+    paths: list[str] = []
+    override = os.getenv("PETRA_ENV_FILE")
+    if override:
+        paths.append(override)
+
+    project_default = Path(__file__).resolve().parent / ".env"
+    paths.append(str(project_default))
+    paths.append("/etc/petra/petra.env")
+
+    seen: set[Path] = set()
+    for raw in paths:
+        if not raw:
+            continue
+        candidate = Path(raw).expanduser()
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        yield candidate
+
+
+def _load_environment_from_file(path: Path) -> None:
+    """Load KEY=VALUE pairs from *path* into ``os.environ`` if missing."""
+
+    try:
+        text = path.read_text()
+    except FileNotFoundError:
+        return
+    except OSError:
+        # Ignore unreadable files so a missing optional file does not abort import.
+        return
+
+    for raw_line in text.splitlines():
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+
+        lexer = shlex.shlex(raw_line, posix=True)
+        lexer.whitespace_split = True
+        try:
+            tokens = list(lexer)
+        except ValueError:
+            # Skip malformed lines.
+            continue
+
+        for token in tokens:
+            if token == "export" or "=" not in token:
+                continue
+            name, value = token.split("=", 1)
+            name = name.strip()
+            if not name:
+                continue
+            value = value.strip()
+            os.environ.setdefault(name, value)
+
+
+def _load_environment() -> None:
+    for candidate in _env_files():
+        _load_environment_from_file(candidate)
+
+
+_load_environment()
 
 
 @dataclass
