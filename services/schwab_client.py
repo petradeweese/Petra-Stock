@@ -19,7 +19,11 @@ TOKEN_URL = os.getenv(
     "SCHWAB_TOKEN_URL", "https://api.schwabapi.com/v1/oauth/token"
 )
 API_BASE_URL = os.getenv(
-    "SCHWAB_API_BASE", "https://api.schwab.com/trader/v1/marketdata"
+    "SCHWAB_API_BASE", "https://api.schwabapi.com/marketdata/v1"
+)
+PRICE_HISTORY_URL = os.getenv(
+    "SCHWAB_PRICE_HISTORY_URL",
+    "https://api.schwabapi.com/marketdata/v1/pricehistory",
 )
 
 
@@ -161,13 +165,19 @@ class SchwabClient:
     async def _authed_request(
         self,
         method: str,
-        path: str,
+        path_or_url: str,
         *,
         params: Optional[Dict[str, Any]] = None,
         timeout_ctx: Optional[dict] = None,
     ) -> Tuple[Dict[str, Any], int]:
         token = await self._ensure_token()
-        url = f"{API_BASE_URL.rstrip('/')}/{path.lstrip('/')}"
+        if path_or_url.startswith(("http://", "https://")):
+            url = path_or_url
+            log_target = path_or_url
+        else:
+            base = API_BASE_URL.rstrip("/")
+            url = f"{base}/{path_or_url.lstrip('/')}"
+            log_target = path_or_url
         headers = {
             "Authorization": f"Bearer {token}",
             "Accept": "application/json",
@@ -186,12 +196,12 @@ class SchwabClient:
         logger.info(
             "schwab_http method=%s path=%s status=%s duration=%.2f",
             method,
-            path,
+            log_target,
             resp.status_code,
             duration,
         )
         if resp.status_code == 401:
-            logger.info("schwab_token_expired path=%s", path)
+            logger.info("schwab_token_expired path=%s", log_target)
             self.clear_cached_token()
             token = await self._ensure_token()
             headers["Authorization"] = f"Bearer {token}"
@@ -208,7 +218,7 @@ class SchwabClient:
             logger.info(
                 "schwab_http method=%s path=%s status=%s duration=%.2f retry=1",
                 method,
-                path,
+                log_target,
                 resp.status_code,
                 duration,
             )
@@ -239,24 +249,109 @@ class SchwabClient:
     async def get_price_history(
         self,
         symbol: str,
-        start: dt.datetime,
-        end: dt.datetime,
+        start: Optional[dt.datetime],
+        end: Optional[dt.datetime],
         interval: str,
         *,
         timeout_ctx: Optional[dict] = None,
     ) -> pd.DataFrame:
-        params = {
+        def _normalize_ts(ts: dt.datetime) -> int:
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=dt.timezone.utc)
+            else:
+                ts = ts.astimezone(dt.timezone.utc)
+            return int(ts.timestamp() * 1000)
+
+        def _interval_to_frequency(value: str) -> Tuple[str, int]:
+            raw = (value or "").strip().lower()
+            aliases = {
+                "m": ("minute", 1),
+                "1m": ("minute", 1),
+                "one_minute": ("minute", 1),
+                "minute": ("minute", 1),
+                "minutes": ("minute", 1),
+                "d": ("daily", 1),
+                "1d": ("daily", 1),
+                "day": ("daily", 1),
+                "daily": ("daily", 1),
+                "w": ("weekly", 1),
+                "1w": ("weekly", 1),
+                "week": ("weekly", 1),
+                "weekly": ("weekly", 1),
+                "mo": ("monthly", 1),
+                "1mo": ("monthly", 1),
+                "1mon": ("monthly", 1),
+                "1month": ("monthly", 1),
+                "month": ("monthly", 1),
+                "monthly": ("monthly", 1),
+            }
+            if raw in aliases:
+                return aliases[raw]
+            if raw.endswith("min"):
+                digits = "".join(ch for ch in raw if ch.isdigit())
+                freq = int(digits) if digits else 1
+                return "minute", max(1, freq)
+            if raw.endswith("m"):
+                try:
+                    freq = int(raw[:-1])
+                except ValueError:
+                    freq = 1
+                return "minute", max(1, freq)
+            if raw.endswith("h"):
+                try:
+                    hours = int(raw[:-1])
+                except ValueError:
+                    hours = 1
+                return "minute", max(1, hours * 60)
+            if raw.endswith("d"):
+                try:
+                    days = int(raw[:-1])
+                except ValueError:
+                    days = 1
+                return "daily", max(1, days)
+            if raw.endswith("w"):
+                try:
+                    weeks = int(raw[:-1])
+                except ValueError:
+                    weeks = 1
+                return "weekly", max(1, weeks)
+            if raw.endswith("mo") or raw.endswith("mon"):
+                digits = "".join(ch for ch in raw if ch.isdigit())
+                freq = int(digits) if digits else 1
+                return "monthly", max(1, freq)
+            return "minute", 1
+
+        frequency_type, frequency = _interval_to_frequency(interval)
+
+        if frequency_type == "minute":
+            allowed = [1, 5, 10, 15, 30]
+            if frequency not in allowed:
+                # Clamp to the nearest supported Schwab intraday frequency.
+                frequency = min(allowed, key=lambda opt: abs(opt - frequency))
+
+        params: Dict[str, Any] = {
             "symbol": symbol,
-            "interval": interval,
-            "start": int(start.timestamp() * 1000),
-            "end": int(end.timestamp() * 1000),
+            "frequencyType": frequency_type,
+            "frequency": frequency,
         }
-        if self._account_id:
-            params.setdefault("accountId", self._account_id)
+
+        if start is not None and end is not None:
+            params["startDate"] = _normalize_ts(start)
+            params["endDate"] = _normalize_ts(end)
+        else:
+            if frequency_type == "minute":
+                params["periodType"] = "day"
+                params["period"] = 10
+            else:
+                params["periodType"] = "year"
+                params["period"] = 1
+
+        params["needExtendedHoursData"] = "true"
+        params["needPreviousClose"] = "false"
 
         data, _ = await self._authed_request(
             "GET",
-            f"{symbol}/pricehistory",
+            PRICE_HISTORY_URL,
             params=params,
             timeout_ctx=timeout_ctx,
         )
@@ -370,8 +465,8 @@ _client = SchwabClient()
 
 async def get_price_history(
     symbol: str,
-    start: dt.datetime,
-    end: dt.datetime,
+    start: Optional[dt.datetime],
+    end: Optional[dt.datetime],
     interval: str,
     *,
     timeout_ctx: Optional[dict] = None,
