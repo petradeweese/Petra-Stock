@@ -165,6 +165,12 @@ def _ensure_schema(db) -> None:
         )
         """
     )
+    cols = {
+        (col["name"] if isinstance(col, Mapping) else col[1])
+        for col in db.execute("PRAGMA table_info(scalper_lf_activity)").fetchall()
+    }
+    if "mark_price" not in cols:
+        db.execute("ALTER TABLE scalper_lf_activity ADD COLUMN mark_price REAL")
     db.connection.commit()
 
 
