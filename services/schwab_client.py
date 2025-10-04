@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import datetime as dt
 import logging
 import os
@@ -14,7 +15,9 @@ from services.oauth_tokens import latest_refresh_token
 
 logger = logging.getLogger(__name__)
 
-TOKEN_URL = os.getenv("SCHWAB_TOKEN_URL", "https://api.schwab.com/oauth2/v1/token")
+TOKEN_URL = os.getenv(
+    "SCHWAB_TOKEN_URL", "https://api.schwabapi.com/v1/oauth/token"
+)
 API_BASE_URL = os.getenv(
     "SCHWAB_API_BASE", "https://api.schwab.com/trader/v1/marketdata"
 )
@@ -80,11 +83,16 @@ class SchwabClient:
         payload = {
             "grant_type": "refresh_token",
             "refresh_token": refresh_token,
-            "client_id": self._client_id,
-            "client_secret": self._client_secret,
             "redirect_uri": self._redirect_uri,
+            "client_id": self._client_id,
         }
-        headers = {"Content-Type": "application/x-www-form-urlencoded"}
+        basic_token = base64.b64encode(
+            f"{self._client_id}:{self._client_secret}".encode()
+        ).decode()
+        headers = {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Authorization": f"Basic {basic_token}",
+        }
 
         t0 = time.monotonic()
         resp = await http_client.request(
