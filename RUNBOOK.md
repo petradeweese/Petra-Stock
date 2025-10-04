@@ -19,6 +19,14 @@ as needed.
 - Use `services.price_store.detect_gaps` to identify missing bars.
 - Fetch via `services.data_provider.fetch_bars` and `upsert_bars` to heal.
 
+## Intraday Scan / Paper Trading Source
+- Intraday requests call `services.data_provider.fetch_range` which serves
+  historical bars from SQLite and only hits Schwab for the most recent ~60 days.
+- Any bars fetched from Schwab are persisted via `INSERT OR REPLACE` so repeated
+  scans and paper trades are DB-only once the window is warm.
+- Daily (and higher) intervals are also persisted for consistency even though
+  they continue to source from Schwab directly.
+
 ## Rotate API Key
 - Rotate Schwab OAuth credentials (client ID/secret and refresh token) and
   update the corresponding environment variables before restarting processes.

@@ -48,8 +48,9 @@ def test_fetch_bars_uses_schwab(monkeypatch):
     monkeypatch.setattr(data_provider, "_fetch_yfinance", fail_yf)
     monkeypatch.setattr(data_provider, "_fetch_yfinance_quote", fail_yf_quote)
 
-    start = dt.datetime(2024, 1, 2, 14, 30, tzinfo=dt.timezone.utc)
-    end = start + dt.timedelta(minutes=30)
+    now = dt.datetime.now(dt.timezone.utc)
+    start = now - dt.timedelta(minutes=30)
+    end = now
     bars = asyncio.run(data_provider.fetch_bars_async(["AAPL"], "15m", start, end))
     df = bars["AAPL"]
     assert len(df) == 2
@@ -94,8 +95,9 @@ def test_fetch_bars_fallbacks_to_yfinance(monkeypatch, caplog):
     monkeypatch.setattr(data_provider, "_fetch_yfinance", fake_yf)
     monkeypatch.setattr(data_provider, "_fetch_yfinance_quote", fake_yf_quote)
 
-    start = dt.datetime(2024, 1, 2, 14, 30, tzinfo=dt.timezone.utc)
-    end = start + dt.timedelta(minutes=15)
+    now = dt.datetime.now(dt.timezone.utc)
+    start = now - dt.timedelta(minutes=15)
+    end = now
     with caplog.at_level("INFO"):
         bars = asyncio.run(
             data_provider.fetch_bars_async(["MSFT"], "15m", start, end)
