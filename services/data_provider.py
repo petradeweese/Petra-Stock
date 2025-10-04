@@ -4,13 +4,14 @@ import logging
 import os
 import random
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 import yfinance as yf
 
 from config import settings
+import db
 from services import price_store
 from services import schwab_client
 from services.schwab_client import SchwabAPIError, SchwabAuthError
@@ -31,6 +32,453 @@ NY_TZ = ZoneInfo("America/New_York")
 FIFTEEN_MIN = dt.timedelta(minutes=15)
 
 EXPECTED_COLUMNS = ["Open", "High", "Low", "Close", "Adj Close", "Volume"]
+
+INTRADAY_INTERVALS = {"1m", "2m", "5m", "15m", "30m", "60m"}
+INTRADAY_LOOKBACK = dt.timedelta(days=59)
+
+
+def _ensure_utc(ts: dt.datetime) -> dt.datetime:
+    if ts.tzinfo is None:
+        return ts.replace(tzinfo=dt.timezone.utc)
+    return ts.astimezone(dt.timezone.utc)
+
+
+def _normalize_bounds(
+    start: dt.datetime, end: dt.datetime
+) -> Tuple[dt.datetime, dt.datetime]:
+    start_utc = _ensure_utc(start)
+    end_utc = _ensure_utc(end)
+    if end_utc <= start_utc:
+        end_utc = start_utc + dt.timedelta(minutes=1)
+    return start_utc, end_utc
+
+
+def _parse_db_timestamp(raw: object) -> Optional[dt.datetime]:
+    if isinstance(raw, dt.datetime):
+        return _ensure_utc(raw)
+    if isinstance(raw, str):
+        try:
+            parsed = dt.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return _ensure_utc(parsed)
+    return None
+
+
+def _interval_to_freq(interval: str) -> Optional[str]:
+    if not interval:
+        return None
+    value = interval.strip().lower()
+    if value.endswith("m"):
+        try:
+            minutes = int(value[:-1] or "0")
+        except ValueError:
+            return None
+        minutes = max(1, minutes)
+        return f"{minutes}min"
+    if value.endswith("h"):
+        try:
+            hours = int(value[:-1] or "0")
+        except ValueError:
+            return None
+        hours = max(1, hours)
+        return f"{hours * 60}min"
+    if value.endswith("d"):
+        try:
+            days = int(value[:-1] or "0")
+        except ValueError:
+            return None
+        days = max(1, days)
+        return f"{days}D"
+    return None
+
+
+def _bars_to_dataframe(bars: Sequence[Dict[str, object]]) -> pd.DataFrame:
+    if not bars:
+        df = pd.DataFrame(columns=EXPECTED_COLUMNS)
+        df.index = pd.DatetimeIndex([], tz="UTC")
+        return df
+
+    sorted_rows = sorted(bars, key=lambda row: _ensure_utc(row["ts"]))  # type: ignore[arg-type]
+    index = pd.DatetimeIndex([_ensure_utc(row["ts"]) for row in sorted_rows], tz="UTC")  # type: ignore[index]
+    data = {
+        "Open": [float(row.get("open", 0.0)) for row in sorted_rows],
+        "High": [float(row.get("high", 0.0)) for row in sorted_rows],
+        "Low": [float(row.get("low", 0.0)) for row in sorted_rows],
+        "Close": [float(row.get("close", 0.0)) for row in sorted_rows],
+        "Adj Close": [float(row.get("close", 0.0)) for row in sorted_rows],
+        "Volume": [float(row.get("volume", 0.0)) for row in sorted_rows],
+    }
+    df = pd.DataFrame(data, index=index)
+    df = df[["Open", "High", "Low", "Close", "Adj Close", "Volume"]]
+    return df
+
+
+def _fetch_from_db(
+    symbol: str, interval: str, start: dt.datetime, end: dt.datetime
+) -> List[Dict[str, object]]:
+    if end <= start:
+        return []
+    conn = db.get_engine().raw_connection()
+    try:
+        cursor = conn.execute(
+            (
+                "SELECT ts, open, high, low, close, volume "
+                "FROM bars WHERE symbol=? AND interval=? AND ts>=? AND ts<? ORDER BY ts"
+            ),
+            (symbol.upper(), interval, start.isoformat(), end.isoformat()),
+        )
+        rows = cursor.fetchall()
+    finally:
+        conn.close()
+
+    results: List[Dict[str, object]] = []
+    for row in rows:
+        ts = _parse_db_timestamp(row[0])
+        if ts is None:
+            continue
+        results.append(
+            {
+                "ts": ts,
+                "open": float(row[1]) if row[1] is not None else None,
+                "high": float(row[2]) if row[2] is not None else None,
+                "low": float(row[3]) if row[3] is not None else None,
+                "close": float(row[4]) if row[4] is not None else None,
+                "volume": float(row[5]) if row[5] is not None else 0.0,
+            }
+        )
+    return results
+
+
+async def _fetch_from_provider(
+    symbol: str,
+    interval: str,
+    start: dt.datetime,
+    end: dt.datetime,
+    *,
+    timeout_ctx: Optional[dict] = None,
+) -> Tuple[List[Dict[str, object]], str]:
+    df, provider = await _fetch_single(
+        symbol,
+        start,
+        end,
+        interval=interval,
+        timeout_ctx=timeout_ctx,
+    )
+    bars: List[Dict[str, object]] = []
+    if not df.empty:
+        for ts, row in df.iterrows():
+            bars.append(
+                {
+                    "ts": _ensure_utc(ts.to_pydatetime()),
+                    "open": float(row.get("Open", 0.0)),
+                    "high": float(row.get("High", 0.0)),
+                    "low": float(row.get("Low", 0.0)),
+                    "close": float(row.get("Close", 0.0)),
+                    "volume": float(row.get("Volume", 0.0)),
+                }
+            )
+    return bars, provider
+
+
+def _persist_bars(
+    symbol: str, interval: str, bars: Sequence[Dict[str, object]]
+) -> Tuple[int, int]:
+    if not bars:
+        return 0, 0
+    symbol_norm = symbol.upper()
+    conn = db.get_engine().raw_connection()
+    try:
+        cursor = conn.cursor()
+        ts_values = [
+            _ensure_utc(bar["ts"]).isoformat()  # type: ignore[arg-type]
+            for bar in bars
+        ]
+        min_ts = min(ts_values)
+        max_ts = max(ts_values)
+        existing_rows = cursor.execute(
+            (
+                "SELECT ts FROM bars WHERE symbol=? AND interval=? AND ts>=? AND ts<=?"
+            ),
+            (symbol_norm, interval, min_ts, max_ts),
+        ).fetchall()
+        existing = {row[0] for row in existing_rows}
+
+        rows_to_write: List[Tuple[object, ...]] = []
+        inserted = 0
+        replaced = 0
+        for bar, ts_iso in zip(bars, ts_values):
+            if ts_iso in existing:
+                replaced += 1
+            else:
+                inserted += 1
+            rows_to_write.append(
+                (
+                    symbol_norm,
+                    interval,
+                    ts_iso,
+                    float(bar.get("open", 0.0)),
+                    float(bar.get("high", 0.0)),
+                    float(bar.get("low", 0.0)),
+                    float(bar.get("close", 0.0)),
+                    float(bar.get("volume", 0.0)),
+                )
+            )
+        if rows_to_write:
+            cursor.executemany(
+                """
+                INSERT INTO bars(symbol, interval, ts, open, high, low, close, volume)
+                VALUES(?,?,?,?,?,?,?,?)
+                ON CONFLICT(symbol, interval, ts) DO UPDATE SET
+                    open=excluded.open,
+                    high=excluded.high,
+                    low=excluded.low,
+                    close=excluded.close,
+                    volume=excluded.volume
+                """,
+                rows_to_write,
+            )
+            conn.commit()
+        return inserted, replaced
+    finally:
+        conn.close()
+
+
+def _missing_ranges(
+    bars: Sequence[Dict[str, object]],
+    start: dt.datetime,
+    end: dt.datetime,
+    interval: str,
+) -> List[Tuple[dt.datetime, dt.datetime]]:
+    freq = _interval_to_freq(interval)
+    if freq is None:
+        return [(start, end)] if end > start else []
+    index = pd.date_range(start=start, end=end, freq=freq, inclusive="left", tz="UTC")
+    have = {_ensure_utc(row["ts"]) for row in bars}  # type: ignore[arg-type]
+    gaps: List[Tuple[dt.datetime, dt.datetime]] = []
+    gap_start: Optional[dt.datetime] = None
+    for ts in index:
+        ts_val = _ensure_utc(ts.to_pydatetime())
+        if ts_val in have:
+            if gap_start is not None:
+                gaps.append((gap_start, ts_val))
+                gap_start = None
+        else:
+            if gap_start is None:
+                gap_start = ts_val
+    if gap_start is not None and end > gap_start:
+        gaps.append((gap_start, end))
+    return gaps
+
+
+async def _fetch_intraday_range(
+    symbol: str,
+    interval: str,
+    start: dt.datetime,
+    end: dt.datetime,
+    *,
+    timeout_ctx: Optional[dict] = None,
+) -> Tuple[List[Dict[str, object]], str]:
+    now_utc = dt.datetime.now(dt.timezone.utc)
+    cutoff = now_utc - INTRADAY_LOOKBACK
+    symbol_norm = symbol.upper()
+
+    initial_rows = _fetch_from_db(symbol_norm, interval, start, end)
+    if end <= cutoff:
+        logger.info(
+            "db_only_intraday symbol=%s interval=%s rows=%d",
+            symbol_norm,
+            interval,
+            len(initial_rows),
+        )
+        return initial_rows, "db"
+
+    recent_start = max(start, cutoff)
+    recent_rows = [row for row in initial_rows if row["ts"] >= recent_start]
+    gaps = _missing_ranges(recent_rows, recent_start, end, interval)
+
+    total_inserted = 0
+    total_replaced = 0
+    provider_used = "db"
+    if gaps:
+        aggregated_rows: List[Dict[str, object]] = []
+        for gap_start, gap_end in gaps:
+            if gap_end <= gap_start:
+                continue
+            bars, provider = await _fetch_from_provider(
+                symbol_norm,
+                interval,
+                gap_start,
+                gap_end,
+                timeout_ctx=_clone_timeout_ctx(timeout_ctx),
+            )
+            if provider and provider != "none":
+                provider_used = provider
+            if not bars:
+                continue
+            filtered = [
+                bar
+                for bar in bars
+                if gap_start <= _ensure_utc(bar["ts"]) < gap_end  # type: ignore[arg-type]
+            ]
+            aggregated_rows.extend(filtered)
+        if aggregated_rows:
+            inserted, replaced = _persist_bars(symbol_norm, interval, aggregated_rows)
+            total_inserted += inserted
+            total_replaced += replaced
+            if inserted or replaced:
+                logger.info(
+                    "schwab_persist symbol=%s interval=%s inserted=%d replaced=%d",
+                    symbol_norm,
+                    interval,
+                    inserted,
+                    replaced,
+                )
+            initial_rows = _fetch_from_db(symbol_norm, interval, start, end)
+        else:
+            provider_used = provider_used or "none"
+
+    if gaps and (total_inserted or total_replaced):
+        old_rows = [row for row in initial_rows if row["ts"] < recent_start]
+        new_rows = [row for row in initial_rows if row["ts"] >= recent_start]
+        logger.info(
+            "db+schwab_intraday symbol=%s interval=%s old_rows=%d new_rows=%d saved=%d",
+            symbol_norm,
+            interval,
+            len(old_rows),
+            len(new_rows),
+            total_inserted + total_replaced,
+        )
+    elif gaps:
+        logger.info(
+            "db_only_intraday symbol=%s interval=%s rows=%d",
+            symbol_norm,
+            interval,
+            len(initial_rows),
+        )
+    elif start >= cutoff and not gaps:
+        logger.info(
+            "db_only_intraday symbol=%s interval=%s rows=%d",
+            symbol_norm,
+            interval,
+            len(initial_rows),
+        )
+    elif start < cutoff and not gaps:
+        logger.info(
+            "db_only_intraday symbol=%s interval=%s rows=%d",
+            symbol_norm,
+            interval,
+            len(initial_rows),
+        )
+
+    return initial_rows, provider_used or "db"
+
+
+async def _fetch_higher_interval_range(
+    symbol: str,
+    interval: str,
+    start: dt.datetime,
+    end: dt.datetime,
+    *,
+    timeout_ctx: Optional[dict] = None,
+) -> Tuple[List[Dict[str, object]], str]:
+    bars, provider = await _fetch_from_provider(
+        symbol,
+        interval,
+        start,
+        end,
+        timeout_ctx=timeout_ctx,
+    )
+    filtered = [
+        bar
+        for bar in bars
+        if start <= _ensure_utc(bar["ts"]) < end  # type: ignore[arg-type]
+    ]
+    bars = filtered
+    if bars:
+        inserted, replaced = _persist_bars(symbol, interval, bars)
+        if inserted or replaced:
+            logger.info(
+                "schwab_persist symbol=%s interval=%s inserted=%d replaced=%d",
+                symbol.upper(),
+                interval,
+                inserted,
+                replaced,
+            )
+    final_rows = _fetch_from_db(symbol, interval, start, end)
+    if final_rows:
+        return final_rows, provider or "db"
+    return bars, provider or "none"
+
+
+async def _fetch_range(
+    symbol: str,
+    interval: str,
+    start: dt.datetime,
+    end: dt.datetime,
+    *,
+    timeout_ctx: Optional[dict] = None,
+) -> Tuple[List[Dict[str, object]], str]:
+    start_utc, end_utc = _normalize_bounds(start, end)
+    if interval.strip().lower() in INTRADAY_INTERVALS:
+        return await _fetch_intraday_range(
+            symbol,
+            interval,
+            start_utc,
+            end_utc,
+            timeout_ctx=timeout_ctx,
+        )
+    return await _fetch_higher_interval_range(
+        symbol,
+        interval,
+        start_utc,
+        end_utc,
+        timeout_ctx=timeout_ctx,
+    )
+
+
+async def fetch_range_async(
+    symbol: str,
+    interval: str,
+    start: dt.datetime,
+    end: dt.datetime,
+    *,
+    timeout_ctx: Optional[dict] = None,
+) -> List[Dict[str, object]]:
+    rows, _ = await _fetch_range(
+        symbol,
+        interval,
+        start,
+        end,
+        timeout_ctx=timeout_ctx,
+    )
+    return rows
+
+
+def fetch_range(
+    symbol: str,
+    interval: str,
+    start: dt.datetime,
+    end: dt.datetime,
+    *,
+    timeout_ctx: Optional[dict] = None,
+) -> List[Dict[str, object]]:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(
+            fetch_range_async(
+                symbol,
+                interval,
+                start,
+                end,
+                timeout_ctx=timeout_ctx,
+            )
+        )
+    raise RuntimeError(
+        "fetch_range() cannot be called from a running event loop; use "
+        "fetch_range_async() instead",
+    )
 
 
 def _current_session_start(now: dt.datetime) -> dt.datetime:
@@ -373,50 +821,17 @@ async def fetch_bars_async(
     timeout_ctx: Optional[dict] = None,
 ) -> Dict[str, pd.DataFrame]:
     out: Dict[str, pd.DataFrame] = {}
-    chunk = dt.timedelta(days=7)
     for sym in symbols:
-        dfs: List[pd.DataFrame] = []
-        providers: List[str] = []
-        cur = start
-        while cur < end:
-            nxt = min(cur + chunk, end)
-            logger.info(
-                "provider_range symbol=%s interval=%s start=%s end=%s",
-                sym,
-                interval,
-                cur.isoformat(),
-                nxt.isoformat(),
-            )
-            fetch_kwargs = {}
-            if timeout_ctx is not None:
-                fetch_kwargs["timeout_ctx"] = timeout_ctx
-            chunk_df, provider = await _fetch_single(
-                sym,
-                cur,
-                nxt,
-                interval=interval,
-                **fetch_kwargs,
-            )
-            dfs.append(chunk_df)
-            providers.append(provider)
-            cur = nxt
-
-        if dfs:
-            df = pd.concat(dfs).sort_index()
-            df = df[~df.index.duplicated(keep="first")]
-            unique = {p for p in providers if p and p != "none"}
-            if not unique:
-                source = "none"
-            elif len(unique) == 1:
-                source = unique.pop()
-            else:
-                source = "mixed"
-            df.attrs["provider"] = source
-            out[sym] = df
-        else:  # pragma: no cover - defensive
-            empty = pd.DataFrame(columns=EXPECTED_COLUMNS)
-            empty.attrs["provider"] = "none"
-            out[sym] = empty
+        rows, provider = await _fetch_range(
+            sym,
+            interval,
+            start,
+            end,
+            timeout_ctx=timeout_ctx,
+        )
+        df = _bars_to_dataframe(rows)
+        df.attrs["provider"] = provider or ("db" if not df.empty else "none")
+        out[sym] = df
     return out
 
 

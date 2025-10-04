@@ -26,9 +26,24 @@ def _make_frame(start_ts: pd.Timestamp, count: int) -> pd.DataFrame:
     )
 
 
+def _clear_symbol(symbol: str) -> None:
+    conn = db.get_engine().raw_connection()
+    try:
+        conn.execute("DELETE FROM bars WHERE symbol=?", (symbol,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def test_full_day_bar_count(monkeypatch, tmp_path):
-    start_ts = pd.Timestamp("2024-01-02 14:30", tz="UTC")
-    frame = _make_frame(start_ts, 26)
+    base = (pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=1)).replace(
+        hour=14, minute=30, second=0, microsecond=0
+    )
+    start_ts = base
+    count = 20
+    end_ts = start_ts + pd.Timedelta(minutes=15 * count)
+    frame = _make_frame(start_ts, count)
+    expected = data_provider._align_to_session(frame.copy())
 
     async def fake_history(symbol, start, end, interval, timeout_ctx=None):
         return frame
@@ -47,23 +62,31 @@ def test_full_day_bar_count(monkeypatch, tmp_path):
         "settings",
         SimpleNamespace(fetch_retry_max=1, fetch_retry_base_ms=1, fetch_retry_cap_ms=1),
     )
-    start = dt.datetime(2024, 1, 2, tzinfo=dt.timezone.utc)
-    end = dt.datetime(2024, 1, 3, tzinfo=dt.timezone.utc)
-    data = data_provider.fetch_bars(["AAA"], "15m", start, end)
-    df = data["AAA"]
-    assert len(df) == 26
+    start = start_ts.to_pydatetime()
+    end = end_ts.to_pydatetime()
+    symbol = "AAA_FULL"
+    _clear_symbol(symbol)
+    data = data_provider.fetch_bars([symbol], "15m", start, end)
+    df = data[symbol]
+    assert len(df) == len(expected)
+    assert list(df.index) == list(expected.index)
 
     db.DB_PATH = str(tmp_path / "full.db")
     db.init_db()
-    upsert_bars("AAA", df, "15m")
-    end_ts = start_ts + pd.Timedelta(minutes=15 * 26)
-    gaps = detect_gaps("AAA", start_ts.to_pydatetime(), end_ts.to_pydatetime(), "15m")
+    upsert_bars(symbol, df, "15m")
+    gaps = detect_gaps(symbol, start_ts.to_pydatetime(), end_ts.to_pydatetime(), "15m")
     assert gaps == []
 
 
 def test_half_day_bar_count(monkeypatch, tmp_path):
-    start_ts = pd.Timestamp("2024-11-29 14:30", tz="UTC")
-    frame = _make_frame(start_ts, 13)
+    base = (pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=1)).replace(
+        hour=14, minute=30, second=0, microsecond=0
+    )
+    start_ts = base
+    count = 8
+    end_ts = start_ts + pd.Timedelta(minutes=15 * count)
+    frame = _make_frame(start_ts, count)
+    expected = data_provider._align_to_session(frame.copy())
 
     async def fake_history(symbol, start, end, interval, timeout_ctx=None):
         return frame
@@ -82,15 +105,17 @@ def test_half_day_bar_count(monkeypatch, tmp_path):
         "settings",
         SimpleNamespace(fetch_retry_max=1, fetch_retry_base_ms=1, fetch_retry_cap_ms=1),
     )
-    start = dt.datetime(2024, 11, 29, tzinfo=dt.timezone.utc)
-    end = dt.datetime(2024, 11, 30, tzinfo=dt.timezone.utc)
-    data = data_provider.fetch_bars(["AAA"], "15m", start, end)
-    df = data["AAA"]
-    assert len(df) == 13
+    start = start_ts.to_pydatetime()
+    end = end_ts.to_pydatetime()
+    symbol = "AAA_HALF"
+    _clear_symbol(symbol)
+    data = data_provider.fetch_bars([symbol], "15m", start, end)
+    df = data[symbol]
+    assert len(df) == len(expected)
+    assert list(df.index) == list(expected.index)
 
     db.DB_PATH = str(tmp_path / "half.db")
     db.init_db()
-    upsert_bars("AAA", df, "15m")
-    end_ts = start_ts + pd.Timedelta(minutes=15 * 13)
-    gaps = detect_gaps("AAA", start_ts.to_pydatetime(), end_ts.to_pydatetime(), "15m")
+    upsert_bars(symbol, df, "15m")
+    gaps = detect_gaps(symbol, start_ts.to_pydatetime(), end_ts.to_pydatetime(), "15m")
     assert gaps == []

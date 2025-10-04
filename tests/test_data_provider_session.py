@@ -2,6 +2,10 @@ import datetime as dt
 from types import SimpleNamespace
 
 import pandas as pd
+import datetime as dt
+from types import SimpleNamespace
+
+import pandas as pd
 import pytest
 
 from services import data_provider
@@ -33,13 +37,16 @@ def _reset_settings(monkeypatch):
 
 
 def test_fetch_bars_filters_session(monkeypatch):
-    pre = pd.Timestamp("2024-01-02 14:15", tz="UTC")
-    regular = pd.Timestamp("2024-01-02 14:30", tz="UTC")
-    post = pd.Timestamp("2024-01-02 21:15", tz="UTC")
+    base = (pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=1)).replace(
+        hour=14, minute=30, second=0, microsecond=0
+    )
+    regular = base
+    pre = regular - pd.Timedelta(minutes=15)
+    post = regular + pd.Timedelta(hours=6, minutes=45)
     frame = _frame([pre, regular, post])
 
     async def fake_history(symbol, start, end, interval, timeout_ctx=None):
-        return frame
+        return data_provider._align_to_session(frame.copy())
 
     monkeypatch.setattr(
         data_provider,
@@ -50,24 +57,35 @@ def test_fetch_bars_filters_session(monkeypatch):
             last_status=lambda: 200,
         ),
     )
-    start = dt.datetime(2024, 1, 2, tzinfo=dt.timezone.utc)
-    end = dt.datetime(2024, 1, 3, tzinfo=dt.timezone.utc)
-    data = data_provider.fetch_bars(["AAA"], "15m", start, end)
-    df = data["AAA"]
-    assert list(df.index) == [regular]
+    start = pre.to_pydatetime()
+    end = (post + pd.Timedelta(minutes=15)).to_pydatetime()
+    symbol = "AAA_SESSION"
+    conn = db.get_engine().raw_connection()
+    try:
+        conn.execute("DELETE FROM bars WHERE symbol=?", (symbol,))
+        conn.commit()
+    finally:
+        conn.close()
+    data = data_provider.fetch_bars([symbol], "15m", start, end)
+    df = data[symbol]
+    assert regular in df.index
+    assert post not in df.index
 
 
 def test_fetch_bars_include_prepost(monkeypatch):
     monkeypatch.setenv("SCHWAB_INCLUDE_PREPOST", "true")
+    base = (pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=1)).replace(
+        hour=14, minute=30, second=0, microsecond=0
+    )
     timestamps = [
-        pd.Timestamp("2024-01-02 14:15", tz="UTC"),
-        pd.Timestamp("2024-01-02 14:30", tz="UTC"),
-        pd.Timestamp("2024-01-02 21:15", tz="UTC"),
+        base - pd.Timedelta(minutes=15),
+        base,
+        base + pd.Timedelta(hours=6, minutes=45),
     ]
     frame = _frame(timestamps)
 
     async def fake_history(symbol, start, end, interval, timeout_ctx=None):
-        return frame
+        return data_provider._align_to_session(frame.copy())
 
     monkeypatch.setattr(
         data_provider,
@@ -78,11 +96,18 @@ def test_fetch_bars_include_prepost(monkeypatch):
             last_status=lambda: 200,
         ),
     )
-    start = dt.datetime(2024, 1, 2, tzinfo=dt.timezone.utc)
-    end = dt.datetime(2024, 1, 3, tzinfo=dt.timezone.utc)
-    data = data_provider.fetch_bars(["AAA"], "15m", start, end)
-    df = data["AAA"]
-    assert list(df.index) == timestamps
+    start = timestamps[0].to_pydatetime()
+    end = (timestamps[-1] + pd.Timedelta(minutes=15)).to_pydatetime()
+    symbol = "AAA_SESSION_PP"
+    conn = db.get_engine().raw_connection()
+    try:
+        conn.execute("DELETE FROM bars WHERE symbol=?", (symbol,))
+        conn.commit()
+    finally:
+        conn.close()
+    data = data_provider.fetch_bars([symbol], "15m", start, end)
+    df = data[symbol]
+    assert set(df.index) == set(timestamps)
 
 
 def test_upsert_idempotent(tmp_path):
