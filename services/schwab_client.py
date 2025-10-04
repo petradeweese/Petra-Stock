@@ -60,6 +60,7 @@ class SchwabClient:
         self._account_id = settings.schwab_account_id
         self._token: Optional[_Token] = None
         self._token_lock = asyncio.Lock()
+        self._lock_loop: Optional[asyncio.AbstractEventLoop] = None
         self._last_status: Optional[int] = None
 
     # ------------------------------------------------------------------
@@ -127,6 +128,10 @@ class SchwabClient:
         return self._refresh_token
 
     async def _ensure_token(self) -> str:
+        loop = asyncio.get_running_loop()
+        if getattr(self, "_lock_loop", None) is not loop:
+            self._token_lock = asyncio.Lock()
+            self._lock_loop = loop
         async with self._token_lock:
             if self._token and self._token.expires_at > dt.datetime.now(dt.timezone.utc):
                 return self._token.access_token
@@ -373,7 +378,7 @@ async def get_quote(
     *,
     timeout_ctx: Optional[dict] = None,
 ) -> Dict[str, Any]:
-        return await _client.get_quote(symbol, timeout_ctx=timeout_ctx)
+    return await _client.get_quote(symbol, timeout_ctx=timeout_ctx)
 
 
 def clear_cached_token() -> None:
