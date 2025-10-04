@@ -81,6 +81,7 @@ def _load_environment_from_file(path: Path) -> None:
 
         lexer = shlex.shlex(raw_line, posix=True)
         lexer.whitespace_split = True
+        lexer.commenters = ""
         try:
             tokens = list(lexer)
         except ValueError:
@@ -95,7 +96,9 @@ def _load_environment_from_file(path: Path) -> None:
             if not name:
                 continue
             value = value.strip()
-            os.environ.setdefault(name, value)
+            current = os.getenv(name)
+            if current is None or (isinstance(current, str) and not current.strip()):
+                os.environ[name] = value
 
 
 def _load_environment() -> None:
