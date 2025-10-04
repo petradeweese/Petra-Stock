@@ -9,7 +9,7 @@ import os
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional, Sequence
+from typing import List, Optional, Sequence, Mapping
 
 from utils import now_et
 
@@ -58,6 +58,23 @@ class EquityPoint:
     balance: float
 
 
+def _row_get(row, key: int | str, idx: int, default=None):
+    if row is None:
+        return default
+    if isinstance(row, Mapping):
+        return row.get(key, default)
+    try:
+        return row[key]
+    except Exception:
+        pass
+    if isinstance(row, Sequence) and not isinstance(row, (str, bytes)):
+        try:
+            return row[idx]
+        except Exception:
+            return default
+    return default
+
+
 def _now_utc_iso(dt: datetime | None = None) -> str:
     current = dt or datetime.now(timezone.utc)
     if current.tzinfo is None:
@@ -66,6 +83,17 @@ def _now_utc_iso(dt: datetime | None = None) -> str:
 
 
 def ensure_settings(db) -> None:
+    db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS paper_settings (
+            id INTEGER PRIMARY KEY CHECK (id=1),
+            starting_balance REAL NOT NULL DEFAULT 10000,
+            max_pct REAL NOT NULL DEFAULT 10,
+            started_at TEXT,
+            status TEXT NOT NULL DEFAULT 'inactive'
+        )
+        """
+    )
     db.execute(
         """
         INSERT OR IGNORE INTO paper_settings(id, starting_balance, max_pct, started_at, status)
@@ -83,10 +111,10 @@ def load_settings(db) -> PaperSettings:
     if not row:
         return PaperSettings(10000.0, 10.0, "inactive", None)
     return PaperSettings(
-        float(row["starting_balance"] or 0.0),
-        float(row["max_pct"] or 0.0),
-        str(row["status"] or "inactive"),
-        row["started_at"],
+        float(_row_get(row, "starting_balance", 0, 0.0) or 0.0),
+        float(_row_get(row, "max_pct", 1, 0.0) or 0.0),
+        str(_row_get(row, "status", 2, "inactive") or "inactive"),
+        _row_get(row, "started_at", 3),
     )
 
 
@@ -103,7 +131,7 @@ def update_settings(db, *, starting_balance: float, max_pct: float) -> None:
 
 def _seed_equity(db, settings: PaperSettings, *, now: datetime | None = None) -> None:
     row = db.execute("SELECT COUNT(1) FROM paper_equity").fetchone()
-    count = int(row[0]) if row else 0
+    count = int(_row_get(row, 0, 0, 0) or 0) if row else 0
     if count == 0:
         ts = _now_utc_iso(now)
         db.execute(
@@ -118,7 +146,7 @@ def _latest_balance(db, settings: PaperSettings | None = None) -> float:
         "SELECT balance FROM paper_equity ORDER BY ts DESC LIMIT 1"
     ).fetchone()
     if row:
-        return float(row["balance"] or 0.0)
+        return float(_row_get(row, "balance", 0, 0.0) or 0.0)
     if settings is None:
         settings = load_settings(db)
     return float(settings.starting_balance)
@@ -391,12 +419,13 @@ def close_position(
         "SELECT * FROM paper_trades WHERE id=? LIMIT 1",
         (int(trade_id),),
     ).fetchone()
-    if not row or str(row["status"]).lower() != "open":
+    status = str(_row_get(row, "status", 13, "")).lower() if row else ""
+    if not row or status != "open":
         return None
     settings = load_settings(db)
     balance = _latest_balance(db, settings)
-    qty = int(row["qty"])
-    entry_price = float(row["entry_price"])
+    qty = int(_row_get(row, "qty", 5, 0))
+    entry_price = float(_row_get(row, "entry_price", 9, 0.0))
     roi = calculate_roi(entry_price, exit_price)
     exit_ts = _now_utc_iso(now or now_et())
     db.execute(
@@ -413,7 +442,7 @@ def close_position(
     logger.info(
         "paper_trade_closed",
         extra={
-            "symbol": row["ticker"],
+            "symbol": _row_get(row, "ticker", 1),
             "qty": qty,
             "price": exit_price,
             "roi": roi,
@@ -423,21 +452,21 @@ def close_position(
     )
     return PaperTrade(
         id=int(trade_id),
-        ticker=row["ticker"],
-        call_put=row["call_put"],
-        strike=row["strike"],
-        expiry=row["expiry"],
+        ticker=_row_get(row, "ticker", 1),
+        call_put=_row_get(row, "call_put", 2),
+        strike=_row_get(row, "strike", 3),
+        expiry=_row_get(row, "expiry", 4),
         qty=qty,
-        interval=row["interval"],
-        entry_time=row["entry_time"],
-        executed_at=row["executed_at"],
+        interval=_row_get(row, "interval", 6),
+        entry_time=_row_get(row, "entry_time", 7),
+        executed_at=_row_get(row, "executed_at", 8),
         entry_price=entry_price,
         exit_time=exit_ts,
         exit_price=float(exit_price),
         roi_pct=roi,
         status="closed",
-        source_alert_id=row["source_alert_id"],
-        price_source=row["price_source"],
+        source_alert_id=_row_get(row, "source_alert_id", 14),
+        price_source=_row_get(row, "price_source", 15),
     )
 
 
@@ -479,9 +508,10 @@ def get_summary(db) -> dict:
     balance = _latest_balance(db, settings)
     starting = float(settings.starting_balance) or 0.0
     roi = calculate_roi(starting or 1.0, balance) if starting else 0.0
-    open_count = db.execute(
+    open_row = db.execute(
         "SELECT COUNT(1) FROM paper_trades WHERE status='open'"
-    ).fetchone()[0]
+    ).fetchone()
+    open_count = int(_row_get(open_row, 0, 0, 0) or 0) if open_row else 0
     return {
         "balance": balance,
         "starting_balance": starting,
@@ -510,7 +540,13 @@ def get_equity_points(db, range_key: str) -> List[EquityPoint]:
         "SELECT ts, balance FROM paper_equity WHERE ts >= ? ORDER BY ts",
         (_now_utc_iso(start_ts),),
     ).fetchall()
-    return [EquityPoint(ts=row["ts"], balance=float(row["balance"])) for row in rows]
+    return [
+        EquityPoint(
+            ts=_row_get(row, "ts", 0),
+            balance=float(_row_get(row, "balance", 1, 0.0)),
+        )
+        for row in rows
+    ]
 
 
 def _query_trades(db, status: str | None) -> Sequence[PaperTrade]:
@@ -523,22 +559,26 @@ def _query_trades(db, status: str | None) -> Sequence[PaperTrade]:
     rows = db.execute(sql, tuple(params)).fetchall()
     return [
         PaperTrade(
-            id=int(row["id"]),
-            ticker=row["ticker"],
-            call_put=row["call_put"],
-            strike=row["strike"],
-            expiry=row["expiry"],
-            qty=int(row["qty"]),
-            interval=row["interval"],
-            entry_time=row["entry_time"],
-            executed_at=row["executed_at"],
-            entry_price=float(row["entry_price"]),
-            exit_time=row["exit_time"],
-            exit_price=float(row["exit_price"]) if row["exit_price"] is not None else None,
-            roi_pct=float(row["roi_pct"]) if row["roi_pct"] is not None else None,
-            status=row["status"],
-            source_alert_id=row["source_alert_id"],
-            price_source=row["price_source"],
+            id=int(_row_get(row, "id", 0, 0)),
+            ticker=_row_get(row, "ticker", 1),
+            call_put=_row_get(row, "call_put", 2),
+            strike=_row_get(row, "strike", 3),
+            expiry=_row_get(row, "expiry", 4),
+            qty=int(_row_get(row, "qty", 5, 0)),
+            interval=_row_get(row, "interval", 6),
+            entry_time=_row_get(row, "entry_time", 7),
+            executed_at=_row_get(row, "executed_at", 8),
+            entry_price=float(_row_get(row, "entry_price", 9, 0.0)),
+            exit_time=_row_get(row, "exit_time", 10),
+            exit_price=float(_row_get(row, "exit_price", 11))
+            if _row_get(row, "exit_price", 11) is not None
+            else None,
+            roi_pct=float(_row_get(row, "roi_pct", 12))
+            if _row_get(row, "roi_pct", 12) is not None
+            else None,
+            status=_row_get(row, "status", 13),
+            source_alert_id=_row_get(row, "source_alert_id", 14),
+            price_source=_row_get(row, "price_source", 15),
         )
         for row in rows
     ]

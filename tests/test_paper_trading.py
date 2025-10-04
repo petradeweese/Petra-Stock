@@ -1,11 +1,13 @@
 import csv
 import logging
+import sqlite3
 from datetime import datetime, timezone
 from typing import Iterator
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from fastapi.staticfiles import StaticFiles
 
 import db
 import routes
@@ -35,6 +37,40 @@ def db_cursor(tmp_path) -> Iterator:
 def _restart_active(cursor, *, when: datetime | None = None) -> None:
     paper_trading.restart_engine(cursor, now=when)
     paper_trading.start_engine(cursor, now=when)
+
+
+def test_load_settings_creates_defaults_when_missing(db_cursor):
+    db_cursor.execute("DROP TABLE IF EXISTS paper_settings")
+    db_cursor.connection.commit()
+    settings = paper_trading.load_settings(db_cursor)
+    assert settings == paper_trading.PaperSettings(10000.0, 10.0, "inactive", None)
+
+
+def test_settings_roundtrip_with_tuple_rows(tmp_path):
+    original_path = db.DB_PATH
+    try:
+        db.DB_PATH = str(tmp_path / "paper_tuple.db")
+        db.init_db()
+        conn = sqlite3.connect(db.DB_PATH, check_same_thread=False)
+        try:
+            cursor = conn.cursor()
+            cursor.execute("DROP TABLE IF EXISTS paper_settings")
+            conn.commit()
+            first = paper_trading.load_settings(cursor)
+            raw_row = cursor.execute(
+                "SELECT starting_balance, max_pct FROM paper_settings WHERE id=1"
+            ).fetchone()
+            assert isinstance(raw_row, tuple)
+            assert first.starting_balance == 10000.0
+            assert first.max_pct == 10.0
+            paper_trading.update_settings(cursor, starting_balance=15000, max_pct=12.5)
+            second = paper_trading.load_settings(cursor)
+            assert second.starting_balance == 15000.0
+            assert second.max_pct == 12.5
+        finally:
+            conn.close()
+    finally:
+        db.DB_PATH = original_path
 
 
 def test_calculate_max_contracts_respects_cap():
@@ -263,6 +299,7 @@ def test_paper_page_roi_chip_class(tmp_path):
 
     app = FastAPI()
     app.include_router(routes.router)
+    app.mount("/static", StaticFiles(directory="static"), name="static")
     client = TestClient(app)
     res = client.get("/paper")
     assert res.status_code == 200

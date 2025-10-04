@@ -2,6 +2,13 @@
 {% block title %}Paper ▸ Scalper — Petra Stock{% endblock %}
 {% block content %}
   <div class="paper-container">
+    {% set roi_value = summary['roi_pct'] if summary else 0 %}
+    {% set roi_class = 'chip-neg' if roi_value < 0 else 'chip-pos' %}
+    <div class="paper-legacy-summary" hidden>
+      <span id="paper-roi-chip" class="paper-roi-chip {{ roi_class }}">{{ '%.2f' % (roi_value or 0) }}%</span>
+      <strong id="paper-balance" data-balance="{{ summary['balance'] if summary else 0 }}"></strong>
+      <p id="paper-status-line"></p>
+    </div>
     <nav class="paper-subtabs" aria-label="Paper trading modes">
       <a class="paper-subtab" href="/favorites">Favorites</a>
       <a class="paper-subtab is-active" href="#lf-section">Low Frequency</a>
@@ -200,6 +207,7 @@
   <script type="application/json" id="hf-status-seed">{{ scalper_hf_status|tojson|safe }}</script>
   <script type="application/json" id="hf-equity-seed">{{ scalper_hf_equity|tojson|safe }}</script>
   <script type="application/json" id="hf-activity-seed">{{ scalper_hf_activity|tojson|safe }}</script>
+  <script type="application/json" id="paper-summary-seed">{{ summary|tojson|safe }}</script>
 {% endblock %}
 {% block extra_body %}
   <script src="{{ url_for('static', path='js/paper_scalper_lf.js') }}" defer></script>
