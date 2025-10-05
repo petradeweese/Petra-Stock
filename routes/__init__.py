@@ -15,13 +15,13 @@ import re
 import secrets
 import sqlite3
 import statistics
-import time
 import urllib.parse
 from concurrent.futures import as_completed
 from datetime import datetime, timedelta, timezone
 from threading import Lock, Thread
 from typing import Any, Callable, Dict, List, Mapping, Optional
 from uuid import uuid4
+import traceback
 
 import pandas as pd
 from fastapi import APIRouter, Body, Depends, Form, HTTPException, Query, Request, Response
@@ -105,6 +105,8 @@ _PAPER_RATE_LOCK = Lock()
 _EMPTY_HEATMAP: Dict[str, Any] = {"index": [], "columns": [], "values": [], "meta": {}}
 _LATEST_HEATMAP: Dict[str, Any] = dict(_EMPTY_HEATMAP)
 _HEATMAP_CACHE: Dict[str, Any] = {"data": None, "expires": 0.0}
+
+_SCAN_TASKS: dict[str, asyncio.Task] = {}
 
 _SMS_CONSENT_TEXT = (
     "I agree to receive automated Petra Stock SMS alerts. Msg & data rates may apply. "
@@ -1367,6 +1369,7 @@ def _task_create(task_id: str, total: int) -> None:
         "ctx": None,
         "started_at": now_iso,
         "updated_at": now_iso,
+        "first_status_seen": False,
     }
     _TASK_WRITE_TS[task_id] = time.monotonic()
 
@@ -1379,6 +1382,8 @@ def _task_update_db(task_id: str, fields: dict[str, Any]) -> None:
         cols = ["updated_at=?"]
         vals: list[Any] = [now_et().isoformat()]
         for k, v in fields.items():
+            if k == "first_status_seen":
+                continue
             cols.append(f"{k}=?")
             if k == "ctx" and v is not None:
                 vals.append(json.dumps(v))
@@ -1446,6 +1451,7 @@ def _task_get(task_id: str) -> Optional[Dict[str, Any]]:
         "ctx": json.loads(ctx_json) if ctx_json else None,
         "started_at": started_at,
         "updated_at": updated_at,
+        "first_status_seen": False,
     }
     _TASK_MEM[task_id] = task
     _TASK_WRITE_TS[task_id] = time.monotonic()
@@ -1565,11 +1571,20 @@ def _perform_scan(
                     logger.debug("fetch_gap symbol=%s", sym)
                     await asyncio.to_thread(fetch_prices, [sym], interval, lookback)
 
-            await asyncio.gather(*(_worker(s) for s in symbols))
+            await asyncio.gather(
+                *(_worker(s) for s in symbols),
+                return_exceptions=False,
+            )
 
         fetch_start = _perf_counter()
+        logger.info("fetch_start symbols=%d", len(need_fetch))
         asyncio.run(_fetch_all(need_fetch))
         fetch_elapsed = (_perf_counter() - fetch_start) * 1000.0
+        logger.info(
+            "fetch_done symbols=%d elapsed_ms=%.0f",
+            len(need_fetch),
+            fetch_elapsed,
+        )
 
     if progress_cb:
         progress_cb(0, total, "preloading")
@@ -3788,71 +3803,15 @@ async def scanner_run(request: Request):
     task_id = uuid4().hex
     _task_create(task_id, len(tickers))
 
-    def _task():
-        start_ts = time.time()
-        _task_update(task_id, state="running")
-        logger.info("task_start id=%s total=%d", task_id, len(tickers))
+    loop = asyncio.get_running_loop()
 
-        def prog(done: int, total: int, msg: str) -> None:
-            pct = 0.0 if total == 0 else (done / total) * 100.0
-            _task_update(task_id, done=done, total=total, percent=pct, state="running")
-            logger.info("task_progress id=%s %d/%d", task_id, done, total)
+    async def _run() -> None:
+        await _run_scan_task(task_id, tickers, params, sort_key, scan_type)
 
-        # Surface rate limit waits to the task table so the UI can show a
-        # friendly "waiting" message during backoff.
-        from services import http_client
+    task = loop.create_task(_run(), name=f"scan-{task_id}")
+    _SCAN_TASKS[task_id] = task
+    task.add_done_callback(lambda _: _SCAN_TASKS.pop(task_id, None))
 
-        def wait_cb(wait: float) -> None:
-            if wait > 0:
-                _task_update(task_id, message=f"waiting {wait:.1f}s due to rate limit")
-            else:
-                _task_update(task_id, message="")
-
-        http_client.set_wait_callback(wait_cb)
-
-        try:
-            rows, skipped, metrics = _perform_scan(
-                tickers, params, sort_key, progress_cb=prog
-            )
-            duration = time.time() - start_ts
-            csv_headers, csv_rows = _rows_to_csv_table(rows)
-            ctx = {
-                "rows": rows,
-                "ran_at": now_et().strftime("%I:%M:%S %p").lstrip("0"),
-                "note": f"{scan_type} • {params.get('interval')} • {params.get('direction')} • window {params.get('window_value')} {params.get('window_unit')}",
-                "skipped_missing_data": skipped,
-                "metrics": metrics,
-                "summary": {
-                    "successes": len(rows),
-                    "empties": skipped,
-                    "errors": 0,
-                    "duration": duration,
-                },
-                "errors": [],
-                "csv_headers": csv_headers,
-                "csv_rows": csv_rows,
-            }
-            _task_update(
-                task_id, state="succeeded", percent=100.0, done=len(tickers), ctx=ctx
-            )
-            logger.info(
-                "task_done id=%s duration=%.2fs successes=%d empties=%d errors=%d no_gap=%d avg_ms=%.1f p95_ms=%.1f",
-                task_id,
-                duration,
-                len(rows),
-                skipped,
-                0,
-                metrics.get("symbols_no_gap", 0),
-                metrics.get("avg_per_symbol_ms", 0.0),
-                metrics.get("p95_per_symbol_ms", 0.0),
-            )
-        except Exception as e:
-            logger.error("task_error id=%s error=%s", task_id, e)
-            _task_update(task_id, state="failed", message=str(e))
-        finally:
-            http_client.set_wait_callback(None)
-
-    Thread(target=_task, daemon=True).start()
     return JSONResponse({"task_id": task_id})
 
 
@@ -3890,6 +3849,14 @@ async def scanner_status(task_id: str):
         "updated_at": task.get("updated_at"),
         "ctx": task.get("ctx"),
     }
+    percent_value = data.get("percent")
+    state_value = data.get("state")
+    if isinstance(percent_value, (int, float)):
+        if state_value not in {"succeeded", "failed"}:
+            data["percent"] = min(float(percent_value), 99.9)
+        elif not task.get("first_status_seen"):
+            data["percent"] = min(float(percent_value), 99.9)
+    task["first_status_seen"] = True
     return JSONResponse(data, headers={"Cache-Control": "no-store"})
 
 
@@ -3905,6 +3872,150 @@ async def scanner_results(request: Request, task_id: str):
     )
     _task_delete(task_id)
     return response
+
+
+async def _run_scan_task(
+    task_id: str,
+    tickers: list[str],
+    params: dict,
+    sort_key: str,
+    scan_type: str,
+) -> None:
+    total = len(tickers)
+    start_ts = time.monotonic()
+    _task_update(task_id, state="running", done=0, total=total, percent=0.0)
+    logger.info("scan_start id=%s total=%d", task_id, total)
+
+    def prog(done: int, total_count: int, msg: str) -> None:
+        pct = 0.0 if total_count == 0 else (done / total_count) * 100.0
+        if total_count and done >= total_count:
+            pct = min(pct, 99.9)
+        _task_update(
+            task_id,
+            done=done,
+            total=total_count,
+            percent=pct,
+            state="running",
+        )
+        logger.info("task_progress id=%s %d/%d", task_id, done, total_count)
+
+    def wait_cb(wait: float) -> None:
+        if wait > 0:
+            _task_update(task_id, message=f"waiting {wait:.1f}s due to rate limit")
+        else:
+            _task_update(task_id, message="")
+
+    http_client.set_wait_callback(wait_cb)
+
+    success = False
+    loop = asyncio.get_running_loop()
+    event = asyncio.Event()
+    result: dict[str, Any] = {}
+
+    def _worker() -> None:
+        try:
+            rows, skipped, metrics = _perform_scan(
+                tickers,
+                params,
+                sort_key,
+                progress_cb=prog,
+            )
+            duration = time.monotonic() - start_ts
+            csv_headers, csv_rows = _rows_to_csv_table(rows)
+            ctx = {
+                "rows": rows,
+                "ran_at": now_et().strftime("%I:%M:%S %p").lstrip("0"),
+                "note": f"{scan_type} • {params.get('interval')} • {params.get('direction')} • window {params.get('window_value')} {params.get('window_unit')}",
+                "skipped_missing_data": skipped,
+                "metrics": metrics,
+                "summary": {
+                    "successes": len(rows),
+                    "empties": skipped,
+                    "errors": 0,
+                    "duration": duration,
+                },
+                "errors": [],
+                "csv_headers": csv_headers,
+                "csv_rows": csv_rows,
+            }
+            interim_percent = 100.0 if total == 0 else 99.9
+            _task_update(
+                task_id,
+                state="running",
+                percent=interim_percent,
+                done=total,
+                ctx=ctx,
+                message="",
+            )
+            time.sleep(0.1)
+            _task_update(
+                task_id,
+                state="succeeded",
+                percent=100.0,
+                done=total,
+                ctx=ctx,
+                message="",
+            )
+            logger.info(
+                "scan_done id=%s duration=%.2fs successes=%d empties=%d errors=%d no_gap=%d avg_ms=%.1f p95_ms=%.1f",
+                task_id,
+                duration,
+                len(rows),
+                skipped,
+                0,
+                metrics.get("symbols_no_gap", 0),
+                metrics.get("avg_per_symbol_ms", 0.0),
+                metrics.get("p95_per_symbol_ms", 0.0),
+            )
+            result["data"] = (rows, skipped, metrics)
+        except Exception as exc:  # pragma: no cover - error path exercised in tests
+            result["error"] = exc
+            result["traceback"] = traceback.format_exc()
+        finally:
+            try:
+                loop.call_soon_threadsafe(event.set)
+            except RuntimeError:
+                pass
+
+    Thread(target=_worker, daemon=True).start()
+
+    try:
+        try:
+            await asyncio.sleep(0.1)
+        except asyncio.CancelledError:
+            task = asyncio.current_task()
+            if task is not None:
+                while task.uncancel():
+                    pass
+            logger.warning("scan_cancelled id=%s", task_id)
+        while True:
+            try:
+                await event.wait()
+                break
+            except asyncio.CancelledError:
+                task = asyncio.current_task()
+                if task is not None:
+                    while task.uncancel():
+                        pass
+                logger.warning("scan_cancelled id=%s", task_id)
+        if "error" in result:
+            raise result["error"]
+        success = True
+    except asyncio.CancelledError:
+        logger.warning("scan_cancelled id=%s", task_id)
+        if not success:
+            _task_update(task_id, message="cancelled")
+    except Exception as exc:
+        tb = result.get("traceback") or traceback.format_exc()
+        logger.exception("scan_error id=%s", task_id)
+        _task_update(
+            task_id,
+            state="failed",
+            message=str(exc),
+            ctx={"errors": [tb]},
+        )
+    finally:
+        http_client.set_wait_callback(None)
 
 
 @router.post("/scanner/parity")
