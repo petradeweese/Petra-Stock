@@ -456,10 +456,14 @@ def _drawdown_breached(db, now_ts: datetime, settings: HFSettings) -> bool:
         return False
     current = _latest_equity(db)
     session_start = _session_start_equity(db, now_ts.date(), default=settings.starting_balance)
-    if session_start <= 0:
+    baseline = float(settings.starting_balance) if settings.starting_balance > 0 else session_start
+    if session_start <= 0 or baseline <= 0:
         return False
-    delta_pct = (current - session_start) / session_start * 100.0
-    return delta_pct <= settings.daily_max_drawdown_pct
+    loss = session_start - current
+    if loss <= 0:
+        return False
+    threshold = abs(float(settings.daily_max_drawdown_pct)) / 100.0 * baseline
+    return loss >= threshold
 
 
 def open_trade(
@@ -755,7 +759,19 @@ def metrics_snapshot(db) -> Dict[str, float]:
          ORDER BY exit_time ASC
         """
     ).fetchall()
-    return dict(compute_trade_metrics(rows, starting_balance=settings.starting_balance))
+    trade_rows = [
+        {
+            "entry_time": row["entry_time"],
+            "exit_time": row["exit_time"],
+            "roi_pct": row["roi_pct"],
+            "realized_pl": row["realized_pl"],
+            "net_pl": row["net_pl"],
+        }
+        for row in rows
+    ]
+    return dict(
+        compute_trade_metrics(trade_rows, starting_balance=settings.starting_balance)
+    )
 
 
 def _ema(values: Sequence[float], period: int) -> List[float]:
