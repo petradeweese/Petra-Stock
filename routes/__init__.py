@@ -49,6 +49,7 @@ from scanner import compute_scan_for_ticker, export_simulation_artifacts
 from services import (
     executor,
     favorites_alerts,
+    favorites_sim,
     http_client,
     paper_trading,
     price_store,
@@ -2601,6 +2602,30 @@ def paper_page(request: Request, db=Depends(get_db)):
     )
 
 
+@router.get("/paper/favorites", response_class=HTMLResponse)
+def paper_favorites_page(request: Request, db=Depends(get_db)):
+    settings = favorites_sim.load_settings(db)
+    status = favorites_sim.status_payload(db)
+    summary = favorites_sim.summary_payload(db)
+    equity_seed = favorites_sim.get_equity_points(db, "all")
+    activity_seed = favorites_sim.activity_payload(db)
+    universe_count = favorites_sim.favorites_count(db)
+    return templates.TemplateResponse(
+        request,
+        "paper_favorites.html",
+        {
+            "active_tab": "paper",
+            "canonical_path": "/paper/favorites",
+            "favorites_settings": settings,
+            "favorites_status": status,
+            "favorites_summary": summary,
+            "favorites_equity": equity_seed,
+            "favorites_activity": activity_seed,
+            "favorites_universe_count": universe_count,
+        },
+    )
+
+
 def _enforce_paper_rate_limit(key: str, interval: float = 1.0) -> None:
     now_ts = time.time()
     with _PAPER_RATE_LOCK:
@@ -2769,6 +2794,50 @@ def scalper_hf_activity_csv(db=Depends(get_db)):
 @router.get("/api/paper/scalper/hf/activity")
 def scalper_hf_activity(db=Depends(get_db)):
     return {"rows": scalper_hf.list_activity(db, limit=500)}
+
+
+@router.get("/api/paper/favorites/status")
+def favorites_sim_status(db=Depends(get_db)):
+    status = favorites_sim.status_payload(db)
+    summary = favorites_sim.summary_payload(db)
+    universe = favorites_sim.favorites_count(db)
+    payload = dict(summary)
+    payload.update(status)
+    payload["favorites_universe_count"] = universe
+    return payload
+
+
+@router.post("/api/paper/favorites/start")
+def favorites_sim_start(db=Depends(get_db)):
+    favorites_sim.start(db)
+    return favorites_sim_status(db)
+
+
+@router.post("/api/paper/favorites/stop")
+def favorites_sim_stop(db=Depends(get_db)):
+    favorites_sim.stop(db)
+    return favorites_sim_status(db)
+
+
+@router.post("/api/paper/favorites/restart")
+def favorites_sim_restart(db=Depends(get_db)):
+    favorites_sim.restart(db)
+    return favorites_sim_status(db)
+
+
+@router.get("/api/paper/favorites/equity.json")
+def favorites_sim_equity(range: str = Query("1m"), db=Depends(get_db)):
+    range_key = (range or "").lower()
+    allowed = {"1d", "1w", "1m", "3m", "all"}
+    if range_key not in allowed:
+        raise HTTPException(status_code=400, detail="Invalid range")
+    points = favorites_sim.get_equity_points(db, range_key)
+    return {"range": range_key, "points": points}
+
+
+@router.get("/api/paper/favorites/activity")
+def favorites_sim_activity(db=Depends(get_db)):
+    return favorites_sim.activity_payload(db)
 
 
 @router.get("/api/paper/scalper/metrics.json")
@@ -3495,6 +3564,10 @@ def settings_page(request: Request, db=Depends(get_db)):
     scalper_status = scalper_lf.status_payload(db)
     scalper_hf_settings = scalper_hf.load_settings(db)
     scalper_hf_status = scalper_hf.status_payload(db)
+    fav_sim_settings = favorites_sim.load_settings(db)
+    fav_sim_status = favorites_sim.status_payload(db)
+    fav_sim_summary = favorites_sim.summary_payload(db)
+    fav_universe_count = favorites_sim.favorites_count(db)
     return templates.TemplateResponse(
         request,
         "settings.html",
@@ -3518,6 +3591,10 @@ def settings_page(request: Request, db=Depends(get_db)):
             "scalper_status": scalper_status,
             "scalper_hf_settings": scalper_hf_settings,
             "scalper_hf_status": scalper_hf_status,
+            "favorites_sim_settings": fav_sim_settings,
+            "favorites_sim_status": fav_sim_status,
+            "favorites_sim_summary": fav_sim_summary,
+            "favorites_universe_count": fav_universe_count,
             "canonical_path": "/settings",
         },
     )
@@ -3613,6 +3690,19 @@ def settings_save(
     scalper_hf_volatility_gate: str = Form("3"),
     scalper_hf_per_contract_fee: str = Form("0.65"),
     scalper_hf_per_order_fee: str = Form("0"),
+    favorites_starting_balance: str = Form("100000"),
+    favorites_allocation_mode: str = Form("percent"),
+    favorites_allocation_value: str = Form("10"),
+    favorites_per_contract_fee: str = Form("0"),
+    favorites_per_order_fee: str = Form("0"),
+    favorites_slippage_bps: str = Form("0"),
+    favorites_daily_cap: str = Form("10"),
+    favorites_allow_premarket: int = Form(0),
+    favorites_allow_postmarket: int = Form(0),
+    favorites_entry_rule: str = Form("next_open"),
+    favorites_exit_time_cap: str = Form("15"),
+    favorites_exit_profit_target: str = Form(""),
+    favorites_exit_max_adverse: str = Form(""),
     db=Depends(get_db),
 ):
     _ensure_scanner_column(db)
@@ -3658,6 +3748,7 @@ def settings_save(
     current_paper_settings = paper_trading.load_settings(db)
     current_scalper_settings = scalper_lf.load_settings(db)
     current_scalper_hf_settings = scalper_hf.load_settings(db)
+    current_favorites_settings = favorites_sim.load_settings(db)
     try:
         start_balance_value = float(
             (paper_starting_balance or "").replace(",", "").strip() or current_paper_settings.starting_balance
@@ -3720,6 +3811,15 @@ def settings_save(
         except (TypeError, ValueError):
             return default
 
+    def _optional_float(value: str, default: float | None) -> float | None:
+        text = (value or "").replace(",", "").strip()
+        if text == "":
+            return None
+        try:
+            return float(text)
+        except (TypeError, ValueError):
+            return default
+
     scalper_balance = _float(scalper_starting_balance, current_scalper_settings.starting_balance)
     scalper_pct_value = _float(scalper_pct_per_trade, current_scalper_settings.pct_per_trade)
     scalper_cap_value = _int(scalper_daily_cap, current_scalper_settings.daily_trade_cap)
@@ -3744,6 +3844,72 @@ def settings_save(
     scalper_hf_vol_gate = _float(scalper_hf_volatility_gate, current_scalper_hf_settings.volatility_gate)
     scalper_hf_per_contract_value = _float(scalper_hf_per_contract_fee, current_scalper_hf_settings.per_contract_fee)
     scalper_hf_per_order_value = _float(scalper_hf_per_order_fee, current_scalper_hf_settings.per_order_fee)
+    fav_balance_value = _float(
+        favorites_starting_balance,
+        current_favorites_settings.starting_balance,
+    )
+    fav_allocation_mode_value = (
+        (favorites_allocation_mode or current_favorites_settings.allocation_mode)
+        .strip()
+        .lower()
+    )
+    if fav_allocation_mode_value not in {"percent", "fixed"}:
+        fav_allocation_mode_value = current_favorites_settings.allocation_mode
+    fav_allocation_value = _float(
+        favorites_allocation_value,
+        current_favorites_settings.allocation_value,
+    )
+    fav_per_contract_value = _float(
+        favorites_per_contract_fee,
+        current_favorites_settings.per_contract_fee,
+    )
+    fav_per_order_value = _float(
+        favorites_per_order_fee,
+        current_favorites_settings.per_order_fee,
+    )
+    fav_slippage_value = _float(
+        favorites_slippage_bps,
+        current_favorites_settings.slippage_bps,
+    )
+    fav_daily_cap_value = _int(
+        favorites_daily_cap,
+        current_favorites_settings.daily_trade_cap,
+    )
+    fav_entry_rule_value = (
+        (favorites_entry_rule or current_favorites_settings.entry_rule)
+        .strip()
+        .lower()
+    )
+    if fav_entry_rule_value not in {"next_open", "signal_close"}:
+        fav_entry_rule_value = current_favorites_settings.entry_rule
+    fav_exit_time_cap_value = _int(
+        favorites_exit_time_cap,
+        current_favorites_settings.exit_time_cap_minutes,
+    )
+    fav_profit_target_value = _optional_float(
+        favorites_exit_profit_target,
+        current_favorites_settings.exit_profit_target_pct,
+    )
+    fav_max_adverse_value = _optional_float(
+        favorites_exit_max_adverse,
+        current_favorites_settings.exit_max_adverse_pct,
+    )
+    favorites_sim.update_settings(
+        db,
+        starting_balance=fav_balance_value,
+        allocation_mode=fav_allocation_mode_value,
+        allocation_value=fav_allocation_value,
+        per_contract_fee=fav_per_contract_value,
+        per_order_fee=fav_per_order_value,
+        slippage_bps=fav_slippage_value,
+        daily_trade_cap=fav_daily_cap_value,
+        allow_premarket=bool(favorites_allow_premarket),
+        allow_postmarket=bool(favorites_allow_postmarket),
+        entry_rule=fav_entry_rule_value,
+        exit_time_cap_minutes=fav_exit_time_cap_value,
+        exit_profit_target_pct=fav_profit_target_value,
+        exit_max_adverse_pct=fav_max_adverse_value,
+    )
     scalper_lf.update_settings(
         db,
         starting_balance=scalper_balance,

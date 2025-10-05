@@ -216,6 +216,90 @@
       <p class="note status-error" style="margin-top:.5rem;">SMTP configuration incomplete: {{ smtp_missing_label }}</p>
       {% endif %}
 
+      <div class="paper-settings-card" id="favorites-settings-card" data-status="{{ favorites_sim_status['status'] }}" data-started="{{ favorites_sim_status['started_at'] or '' }}" data-universe="{{ favorites_universe_count }}">
+        <div class="paper-settings-header">
+          <h2 style="margin:0;">Paper ▸ Favorites (Sim)</h2>
+          <span id="favorites-settings-pill" class="paper-status-pill {% if favorites_sim_status['status'] == 'active' %}active{% endif %}">
+            {% if favorites_sim_status['status'] == 'active' %}Active{% else %}Inactive{% endif %}
+          </span>
+        </div>
+        <p class="note" style="margin:0;">Simulates trades using your Favorites hit stream. Universe currently <strong>{{ favorites_universe_count }}</strong> symbols.</p>
+        <div class="lf-settings-grid">
+          <label>Starting balance
+            <input name="favorites_starting_balance" type="number" step="0.01" min="0" value="{{ '%.2f'|format(favorites_sim_settings.starting_balance) }}" />
+          </label>
+          <label>Allocation mode
+            <select name="favorites_allocation_mode">
+              {% set fav_mode = favorites_sim_settings.allocation_mode %}
+              <option value="percent" {% if fav_mode == 'percent' %}selected{% endif %}>% of equity</option>
+              <option value="fixed" {% if fav_mode == 'fixed' %}selected{% endif %}>Fixed $</option>
+            </select>
+          </label>
+          <label>Allocation value
+            <input name="favorites_allocation_value" type="number" step="0.01" min="0" value="{{ '%.2f'|format(favorites_sim_settings.allocation_value) }}" />
+          </label>
+          <label>Daily trade cap
+            <input name="favorites_daily_cap" type="number" min="0" value="{{ favorites_sim_settings.daily_trade_cap }}" />
+          </label>
+        </div>
+        <div class="lf-settings-grid">
+          <label>Per-contract fee
+            <input name="favorites_per_contract_fee" type="number" step="0.01" min="0" value="{{ '%.2f'|format(favorites_sim_settings.per_contract_fee) }}" />
+          </label>
+          <label>Per-order fee
+            <input name="favorites_per_order_fee" type="number" step="0.01" min="0" value="{{ '%.2f'|format(favorites_sim_settings.per_order_fee) }}" />
+          </label>
+          <label>Slippage (bps)
+            <input name="favorites_slippage_bps" type="number" step="0.1" value="{{ '%.1f'|format(favorites_sim_settings.slippage_bps) }}" />
+          </label>
+          <label>Entry price rule
+            {% set fav_entry = favorites_sim_settings.entry_rule %}
+            <select name="favorites_entry_rule">
+              <option value="next_open" {% if fav_entry == 'next_open' %}selected{% endif %}>Next bar open</option>
+              <option value="signal_close" {% if fav_entry == 'signal_close' %}selected{% endif %}>Signal bar close</option>
+            </select>
+          </label>
+        </div>
+        <div class="lf-settings-grid">
+          <label>Time cap (minutes)
+            <input name="favorites_exit_time_cap" type="number" min="0" value="{{ favorites_sim_settings.exit_time_cap_minutes }}" />
+          </label>
+          <label>Profit target % (optional)
+            <input name="favorites_exit_profit_target" type="number" step="0.1" value="{{ '' if favorites_sim_settings.exit_profit_target_pct is none else '%.1f'|format(favorites_sim_settings.exit_profit_target_pct) }}" />
+          </label>
+          <label>Max adverse % (optional)
+            <input name="favorites_exit_max_adverse" type="number" step="0.1" value="{{ '' if favorites_sim_settings.exit_max_adverse_pct is none else '%.1f'|format(favorites_sim_settings.exit_max_adverse_pct) }}" />
+          </label>
+        </div>
+        <div class="lf-settings-grid">
+          <label class="checkbox" style="align-items:center;">
+            <input type="checkbox" name="favorites_allow_premarket" value="1" {% if favorites_sim_settings.allow_premarket %}checked{% endif %} />
+            <span>Allow pre-market</span>
+          </label>
+          <label class="checkbox" style="align-items:center;">
+            <input type="checkbox" name="favorites_allow_postmarket" value="1" {% if favorites_sim_settings.allow_postmarket %}checked{% endif %} />
+            <span>Allow post-market</span>
+          </label>
+        </div>
+        <div class="paper-settings-actions">
+          <button type="button" class="btn btn-secondary" data-favorites-sim-action="start" {% if favorites_universe_count == 0 %}disabled{% endif %}>Start</button>
+          <button type="button" class="btn btn-secondary" data-favorites-sim-action="stop" {% if favorites_universe_count == 0 %}disabled{% endif %}>Stop</button>
+          <button type="button" class="btn btn-secondary" data-favorites-sim-action="restart" {% if favorites_universe_count == 0 %}disabled{% endif %}>Restart</button>
+        </div>
+        <p id="favorites-settings-status" class="note" style="margin-top:0.5rem;">
+          {% if favorites_universe_count == 0 %}
+            Add favorites from the scanner to enable the simulator.
+          {% elif favorites_sim_status['status'] == 'active' and favorites_sim_status['started_at'] %}
+            Active since {{ favorites_sim_status['started_at'] }}
+          {% elif favorites_sim_status['status'] == 'active' %}
+            Active and monitoring favorites hits.
+          {% else %}
+            Simulator is currently inactive.
+          {% endif %}
+        </p>
+      </div>
+      <script type="application/json" id="favorites-settings-status-seed">{{ favorites_sim_status|tojson|safe }}</script>
+
       <div class="paper-settings-card" id="lf-settings-card" data-status="{{ scalper_status.status }}" data-started="{{ scalper_status.started_at or '' }}">
         <div class="paper-settings-header">
           <h2 style="margin:0;">Paper ▸ Scalper (Low Frequency)</h2>
@@ -576,6 +660,104 @@
     });
 
     renderLfStatus(lfSeed);
+
+    const favSettingsCard = document.getElementById('favorites-settings-card');
+    const favSettingsStatusEl = document.getElementById('favorites-settings-status');
+    const favSettingsPill = document.getElementById('favorites-settings-pill');
+    const favButtons = Array.from(document.querySelectorAll('[data-favorites-sim-action]'));
+    favButtons.forEach((btn) => {
+      btn.dataset.disabledInitial = btn.disabled ? '1' : '0';
+    });
+    const favHasUniverse = Number(favSettingsCard?.dataset.universe || '0') > 0;
+    const favSeedEl = document.getElementById('favorites-settings-status-seed');
+    let favSeed = {};
+    try {
+      favSeed = JSON.parse(favSeedEl?.textContent || '{}') || {};
+    } catch (err) {
+      favSeed = {};
+    }
+
+    function renderFavStatus(data) {
+      if (!data) return;
+      if (!favHasUniverse) {
+        if (favSettingsStatusEl) {
+          favSettingsStatusEl.textContent = 'Add favorites from the scanner to enable the simulator.';
+        }
+        return;
+      }
+      const status = (data.status || '').toLowerCase();
+      const startedRaw = data.started_at || '';
+      let startedLabel = startedRaw;
+      if (startedRaw) {
+        const parsed = new Date(startedRaw);
+        if (!Number.isNaN(parsed.valueOf())) {
+          startedLabel = lfDateFmt.format(parsed);
+        }
+      }
+      if (favSettingsStatusEl) {
+        if (status === 'active' && startedLabel) {
+          favSettingsStatusEl.textContent = `Active since ${startedLabel}`;
+        } else if (status === 'active') {
+          favSettingsStatusEl.textContent = 'Active and monitoring favorites hits.';
+        } else {
+          favSettingsStatusEl.textContent = 'Simulator is currently inactive.';
+        }
+      }
+      if (favSettingsPill) {
+        if (status === 'active') {
+          favSettingsPill.classList.add('active');
+          favSettingsPill.textContent = 'Active';
+        } else {
+          favSettingsPill.classList.remove('active');
+          favSettingsPill.textContent = 'Inactive';
+        }
+      }
+    }
+
+    function setFavButtonsDisabled(disabled) {
+      favButtons.forEach((btn) => {
+        if (disabled) {
+          btn.disabled = true;
+        } else {
+          btn.disabled = btn.dataset.disabledInitial === '1';
+        }
+      });
+    }
+
+    function requestFavAction(action) {
+      if (!action) return;
+      setFavButtonsDisabled(true);
+      fetch(`/api/paper/favorites/${action}`, {
+        method: 'POST',
+        credentials: 'same-origin',
+      })
+        .then((resp) => {
+          if (!resp.ok) throw new Error('request_failed');
+          return resp.json();
+        })
+        .then((payload) => {
+          renderFavStatus(payload);
+          const verb = action === 'start'
+            ? 'started'
+            : action === 'stop'
+              ? 'stopped'
+              : 'restarted';
+          showToast(`Favorites simulator ${verb}.`, true);
+        })
+        .catch(() => {
+          showToast('Unable to update favorites simulator.', false);
+        })
+        .finally(() => setFavButtonsDisabled(false));
+    }
+
+    favButtons.forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const action = btn.dataset.favoritesSimAction;
+        requestFavAction(action);
+      });
+    });
+
+    renderFavStatus(favSeed);
 
     const hfStatusEl = document.getElementById('hf-settings-status');
     const hfPill = document.getElementById('hf-status-pill');
