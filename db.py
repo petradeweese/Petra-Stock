@@ -378,7 +378,20 @@ def get_db():
         conn.execute("PRAGMA foreign_keys=ON")
     if hasattr(conn, "row_factory"):
         conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
+
+    cursor_kwargs = {}
+    if _ENV_DATABASE_URL:
+        try:
+            from psycopg2.extras import DictCursor  # type: ignore[import]
+        except ImportError:  # pragma: no cover - optional dependency
+            DictCursor = None  # type: ignore[assignment]
+        else:
+            if DictCursor is not None and "psycopg2" in type(conn).__module__:
+                cursor_kwargs["cursor_factory"] = DictCursor
+    try:
+        cursor = conn.cursor(**cursor_kwargs)
+    except TypeError:
+        cursor = conn.cursor()
     try:
         yield cursor
         conn.commit()
