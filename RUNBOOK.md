@@ -44,3 +44,15 @@ as needed.
   affecting email alerts.
 - The minute scheduler now triggers the autoscan batch every 15 minutes while
   XNYS is open so alerts dispatch automatically during the trading session.
+
+## Testing notes
+- `tests/test_data_provider.py::test_fetch_bars_uses_schwab` currently fails
+  because the Schwab stub in the test returns an empty DataFrame, so the data
+  provider falls back to yfinance despite the test expecting a Schwab hit.
+- `tests/test_data_provider.py::test_fetch_bars_fallbacks_to_yfinance` also
+  fails because the fallback path hydrates from the DB cache when the simulated
+  yfinance fetch returns zero rows. Both failures reproduce on the main branch
+  and are unrelated to the HTTP client event loop caching changes.
+- `tests/test_scanner_safeguards.py::test_gap_fill_inside_event_loop` still
+  fails due to the same DB-only gap-fill behavior above; the regression predates
+  the HTTP client fix. The remainder of the scanner safeguards suite passes.

@@ -4,7 +4,7 @@ import os
 import random
 import time
 from collections import defaultdict, deque
-from typing import Callable, Deque, Dict, Optional, Tuple
+from typing import Callable, Deque, DefaultDict, Dict, Optional, Tuple
 
 import httpx
 
@@ -37,7 +37,7 @@ _rate_limiters: Dict[str, "TokenBucket"] = {}
 # Simple in-memory cache and in-flight tracking so duplicate requests coalesce
 # and short-lived results can be reused.
 _CACHE: Dict[str, Tuple[float, httpx.Response]] = {}
-_INFLIGHT: Dict[str, asyncio.Future] = {}
+_INFLIGHT: DefaultDict[int, Dict[str, asyncio.Future]] = defaultdict(dict)
 CACHE_TTL = int(os.getenv("HTTP_CACHE_TTL", "90"))  # seconds
 
 # Callback used by the scanner to surface rate limiting waits to the UI.
@@ -149,6 +149,8 @@ def clear_cache() -> None:
 async def request(method: str, url: str, **kwargs) -> httpx.Response:
     """Robust HTTP request with retries, caching, coalescing and circuit breaker."""
 
+    loop = asyncio.get_running_loop()
+    loop_id = id(loop)
     key = None
     if method.upper() == "GET" and not kwargs.get("no_cache"):
         key = f"{method}:{url}"
@@ -156,9 +158,16 @@ async def request(method: str, url: str, **kwargs) -> httpx.Response:
         if cached and cached[0] > time.monotonic():
             logger.info("http_cache_hit url=%s", url)
             return cached[1]
-        inflight = _INFLIGHT.get(key)
+        loop_inflight = _INFLIGHT.get(loop_id)
+        inflight = loop_inflight.get(key) if loop_inflight else None
         if inflight:
-            return await inflight
+            if inflight.get_loop() is loop:
+                if inflight.done():
+                    loop_inflight.pop(key, None)
+                else:
+                    return await inflight
+            else:
+                loop_inflight.pop(key, None)
 
     timeout_ctx = kwargs.pop("timeout_ctx", None)
 
@@ -315,12 +324,15 @@ async def request(method: str, url: str, **kwargs) -> httpx.Response:
                 _wait_cb(0)
 
     if key:
+        loop_inflight = _INFLIGHT.setdefault(loop_id, {})
         task = asyncio.create_task(_do_request())
-        _INFLIGHT[key] = task
+        loop_inflight[key] = task
         try:
             return await task
         finally:
-            _INFLIGHT.pop(key, None)
+            loop_inflight.pop(key, None)
+            if not loop_inflight:
+                _INFLIGHT.pop(loop_id, None)
     else:
         return await _do_request()
 
