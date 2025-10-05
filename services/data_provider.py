@@ -4,7 +4,7 @@ import logging
 import os
 import random
 import time
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -812,6 +812,17 @@ async def _fetch_yfinance_quote(symbol: str) -> Dict[str, object]:
     return await asyncio.to_thread(_quote)
 
 
+class FetchResult(dict):
+    """Dictionary-like container that also tracks fetch statistics."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.ok: int = 0
+        self.err: int = 0
+        self.errors: Dict[str, Exception] = {}
+        self.elapsed: float = 0.0
+
+
 async def fetch_bars_async(
     symbols: List[str],
     interval: str,
@@ -819,20 +830,86 @@ async def fetch_bars_async(
     end: dt.datetime,
     *,
     timeout_ctx: Optional[dict] = None,
-) -> Dict[str, pd.DataFrame]:
-    out: Dict[str, pd.DataFrame] = {}
-    for sym in symbols:
-        rows, provider = await _fetch_range(
-            sym,
-            interval,
-            start,
-            end,
-            timeout_ctx=timeout_ctx,
-        )
-        df = _bars_to_dataframe(rows)
-        df.attrs["provider"] = provider or ("db" if not df.empty else "none")
-        out[sym] = df
-    return out
+    progress_cb: Optional[Callable[[str, int, int], None]] = None,
+) -> FetchResult:
+    total = len(symbols)
+    result = FetchResult()
+    if total == 0:
+        return result
+
+    try:
+        max_concurrency = int(os.getenv("SCANNER_MAX_CONCURRENCY", "8"))
+    except ValueError:
+        max_concurrency = 8
+    if max_concurrency <= 0:
+        max_concurrency = 1
+
+    semaphore = asyncio.Semaphore(max_concurrency)
+    pending = total
+    started = time.perf_counter()
+    logger.info(
+        "data_provider fetch_async_start symbols=%d interval=%s",
+        total,
+        interval,
+    )
+
+    async def _guarded(symbol: str) -> Tuple[str, pd.DataFrame, Optional[Exception]]:
+        nonlocal pending
+        provider_used = "none"
+        try:
+            async with semaphore:
+                rows, provider_used = await _fetch_range(
+                    symbol,
+                    interval,
+                    start,
+                    end,
+                    timeout_ctx=_clone_timeout_ctx(timeout_ctx),
+                )
+            df = _bars_to_dataframe(rows)
+            provider_value = provider_used or ("db" if not df.empty else "none")
+            df.attrs["provider"] = provider_value
+            return symbol, df, None
+        except Exception as exc:
+            logger.exception(
+                "data_provider fetch_async_error symbol=%s interval=%s",
+                symbol,
+                interval,
+            )
+            empty = _bars_to_dataframe([])
+            empty.attrs["provider"] = provider_used or "error"
+            return symbol, empty, exc
+        finally:
+            pending = max(0, pending - 1)
+            if progress_cb:
+                try:
+                    progress_cb(symbol, pending, total)
+                except Exception:
+                    logger.exception("data_provider progress callback failed")
+
+    tasks = [asyncio.create_task(_guarded(sym)) for sym in symbols]
+    gathered = await asyncio.gather(*tasks)
+
+    ok = 0
+    err = 0
+    for symbol, df, exc in gathered:
+        result[symbol] = df
+        if exc is None:
+            ok += 1
+        else:
+            err += 1
+            result.errors[symbol] = exc
+
+    result.ok = ok
+    result.err = err
+    result.elapsed = time.perf_counter() - started
+    logger.info(
+        "data_provider fetch_async_done symbols=%d ok=%d err=%d elapsed=%.2fs",
+        total,
+        ok,
+        err,
+        result.elapsed,
+    )
+    return result
 
 
 def fetch_bars(
