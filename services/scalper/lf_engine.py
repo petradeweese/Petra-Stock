@@ -28,6 +28,88 @@ logger = logging.getLogger(__name__)
 _DEFAULT_TICKERS = "SPY,QQQ,TSLA,NVDA"
 
 
+def _row_value(row: Any, key: str, index: int | None = None, default: Any = None) -> Any:
+    """Return a column value from either mapping-style or tuple rows."""
+
+    if row is None:
+        return default
+    if key:
+        try:
+            return row[key]  # type: ignore[index]
+        except (KeyError, IndexError, TypeError):
+            pass
+    if index is not None:
+        try:
+            return row[index]  # type: ignore[index]
+        except (IndexError, TypeError):
+            pass
+    return default
+
+
+def _coerce_float(value: Any, *, default: float, key: str) -> float:
+    try:
+        if value is None:
+            raise ValueError("missing")
+        return float(value)
+    except (TypeError, ValueError):
+        logger.warning("lf_settings_invalid_float key=%s value=%r", key, value)
+        return float(default)
+
+
+def _coerce_int(value: Any, *, default: int, key: str) -> int:
+    try:
+        if value is None:
+            raise ValueError("missing")
+        return int(value)
+    except (TypeError, ValueError):
+        logger.warning("lf_settings_invalid_int key=%s value=%r", key, value)
+        return int(default)
+
+
+def _coerce_str(value: Any, *, default: str, key: str) -> str:
+    if value is None:
+        logger.warning("lf_settings_missing_str key=%s", key)
+        return default
+    return str(value)
+
+
+def _coerce_bool(value: Any, *, default: bool, key: str) -> bool:
+    if value is None:
+        logger.warning("lf_settings_missing_bool key=%s", key)
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(int(value))
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "y", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "n", "off", ""}:
+            return False
+    logger.warning("lf_settings_invalid_bool key=%s value=%r", key, value)
+    return default
+
+
+def _default_settings() -> LFSettings:
+    return LFSettings(
+        starting_balance=100000.0,
+        pct_per_trade=3.0,
+        daily_trade_cap=20,
+        tickers=_DEFAULT_TICKERS,
+        profit_target_pct=6.0,
+        max_adverse_pct=-3.0,
+        time_cap_minutes=15,
+        session_start="09:30",
+        session_end="16:00",
+        allow_premarket=False,
+        allow_postmarket=False,
+        per_contract_fee=0.65,
+        per_order_fee=0.0,
+        rsi_filter=False,
+    )
+
+
 @dataclass(slots=True)
 class LFSettings:
     starting_balance: float
@@ -185,22 +267,81 @@ def load_settings(db) -> LFSettings:
           FROM scalper_lf_settings WHERE id=1
         """
     ).fetchone()
-    assert row is not None
+    defaults = _default_settings()
+    if row is None:
+        logger.warning("lf_settings_missing_row using defaults")
+        return defaults
+    tickers_value = _row_value(row, "tickers", 3)
+    tickers = str(tickers_value).strip() if tickers_value is not None else ""
+    if not tickers:
+        tickers = defaults.tickers
     return LFSettings(
-        starting_balance=float(row["starting_balance"]),
-        pct_per_trade=float(row["pct_per_trade"]),
-        daily_trade_cap=int(row["daily_trade_cap"]),
-        tickers=str(row["tickers"] or _DEFAULT_TICKERS),
-        profit_target_pct=float(row["profit_target_pct"]),
-        max_adverse_pct=float(row["max_adverse_pct"]),
-        time_cap_minutes=int(row["time_cap_minutes"]),
-        session_start=str(row["session_start"]),
-        session_end=str(row["session_end"]),
-        allow_premarket=bool(row["allow_premarket"]),
-        allow_postmarket=bool(row["allow_postmarket"]),
-        per_contract_fee=float(row["per_contract_fee"]),
-        per_order_fee=float(row["per_order_fee"]),
-        rsi_filter=bool(row["rsi_filter"]),
+        starting_balance=_coerce_float(
+            _row_value(row, "starting_balance", 0),
+            default=defaults.starting_balance,
+            key="starting_balance",
+        ),
+        pct_per_trade=_coerce_float(
+            _row_value(row, "pct_per_trade", 1),
+            default=defaults.pct_per_trade,
+            key="pct_per_trade",
+        ),
+        daily_trade_cap=_coerce_int(
+            _row_value(row, "daily_trade_cap", 2),
+            default=defaults.daily_trade_cap,
+            key="daily_trade_cap",
+        ),
+        tickers=tickers or defaults.tickers,
+        profit_target_pct=_coerce_float(
+            _row_value(row, "profit_target_pct", 4),
+            default=defaults.profit_target_pct,
+            key="profit_target_pct",
+        ),
+        max_adverse_pct=_coerce_float(
+            _row_value(row, "max_adverse_pct", 5),
+            default=defaults.max_adverse_pct,
+            key="max_adverse_pct",
+        ),
+        time_cap_minutes=_coerce_int(
+            _row_value(row, "time_cap_minutes", 6),
+            default=defaults.time_cap_minutes,
+            key="time_cap_minutes",
+        ),
+        session_start=_coerce_str(
+            _row_value(row, "session_start", 7),
+            default=defaults.session_start,
+            key="session_start",
+        ),
+        session_end=_coerce_str(
+            _row_value(row, "session_end", 8),
+            default=defaults.session_end,
+            key="session_end",
+        ),
+        allow_premarket=_coerce_bool(
+            _row_value(row, "allow_premarket", 9),
+            default=defaults.allow_premarket,
+            key="allow_premarket",
+        ),
+        allow_postmarket=_coerce_bool(
+            _row_value(row, "allow_postmarket", 10),
+            default=defaults.allow_postmarket,
+            key="allow_postmarket",
+        ),
+        per_contract_fee=_coerce_float(
+            _row_value(row, "per_contract_fee", 11),
+            default=defaults.per_contract_fee,
+            key="per_contract_fee",
+        ),
+        per_order_fee=_coerce_float(
+            _row_value(row, "per_order_fee", 12),
+            default=defaults.per_order_fee,
+            key="per_order_fee",
+        ),
+        rsi_filter=_coerce_bool(
+            _row_value(row, "rsi_filter", 13),
+            default=defaults.rsi_filter,
+            key="rsi_filter",
+        ),
     )
 
 
@@ -322,8 +463,12 @@ def get_status(db) -> LFStatus:
     state = db.execute(
         "SELECT status, started_at FROM scalper_lf_state WHERE id=1"
     ).fetchone()
-    status = str(state["status"]) if state else "inactive"
-    started_at = state["started_at"] if state else None
+    if state is None:
+        logger.warning("lf_state_missing defaulting to inactive")
+    status_value = _row_value(state, "status", 0, "inactive")
+    status = str(status_value or "inactive")
+    started_raw = _row_value(state, "started_at", 1)
+    started_at = str(started_raw) if started_raw else None
     equity = _latest_equity(db)
     open_positions = _count_open_positions(db)
     realized_today = _realized_today(db)
@@ -391,7 +536,9 @@ def _latest_equity(db) -> float:
         "SELECT balance FROM scalper_lf_equity ORDER BY ts DESC LIMIT 1"
     ).fetchone()
     if row:
-        return float(row["balance"])
+        balance = _row_value(row, "balance", 0)
+        if balance is not None:
+            return float(balance)
     settings = load_settings(db)
     return float(settings.starting_balance)
 
@@ -441,7 +588,11 @@ def _win_rate(db, lookback: int = 20) -> float:
     ).fetchall()
     if not rows:
         return 0.0
-    wins = sum(1 for row in rows if float(row["net_pl"] or 0.0) > 0.0)
+    wins = sum(
+        1
+        for row in rows
+        if float(_row_value(row, "net_pl", 0, 0.0) or 0.0) > 0.0
+    )
     return round(wins / len(rows) * 100.0, 2)
 
 
@@ -523,7 +674,10 @@ def open_trade(
     )
     db.connection.commit()
     row = db.execute("SELECT last_insert_rowid() AS id").fetchone()
-    return int(row["id"]) if row else None
+    if not row:
+        return None
+    identifier = _row_value(row, "id", 0)
+    return int(identifier) if identifier is not None else None
 
 
 def _daily_trade_count(db, session_date: date) -> int:
@@ -566,9 +720,9 @@ def close_trade(
     if not row:
         return None
     exit_dt = _now_utc(exit_time)
-    qty = int(row["qty"])
-    entry_price = float(row["entry_price"])
-    entry_fees = float(row["fees"])
+    qty = int(_row_value(row, "qty", 1, 0))
+    entry_price = float(_row_value(row, "entry_price", 2, 0.0))
+    entry_fees = float(_row_value(row, "fees", 3, 0.0))
     exit_price = _apply_tick(mid_price, is_buy=False)
     exit_fees = _order_fees(qty, per_contract=settings.per_contract_fee, per_order=settings.per_order_fee)
     gross = (exit_price - entry_price) * qty * 100.0
@@ -611,21 +765,35 @@ def close_trade(
     ).fetchone()
     if not updated:
         return None
+    updated_id = _row_value(updated, "id", 0, trade_id)
+    trade_date = _row_value(updated, "trade_date", 1, "")
+    ticker = _row_value(updated, "ticker", 2, "")
+    option_type = _row_value(updated, "option_type", 3, "")
+    strike = _row_value(updated, "strike", 4)
+    expiry = _row_value(updated, "expiry", 5)
+    qty_value = _row_value(updated, "qty", 6, 0)
+    entry_time = _row_value(updated, "entry_time", 7, "")
+    entry_price_val = _row_value(updated, "entry_price", 8, 0.0)
+    exit_time = _row_value(updated, "exit_time", 9)
+    exit_price = _row_value(updated, "exit_price", 10)
+    roi_pct = _row_value(updated, "roi_pct", 11)
+    fees_value = _row_value(updated, "fees", 12, 0.0)
+    status_value = _row_value(updated, "status", 13, "")
     return LFActivity(
-        id=int(updated["id"]),
-        trade_date=str(updated["trade_date"]),
-        ticker=str(updated["ticker"]),
-        option_type=str(updated["option_type"]),
-        strike=updated["strike"],
-        expiry=updated["expiry"],
-        qty=int(updated["qty"]),
-        entry_time=str(updated["entry_time"]),
-        entry_price=float(updated["entry_price"]),
-        exit_time=updated["exit_time"],
-        exit_price=updated["exit_price"],
-        roi_pct=updated["roi_pct"],
-        fees=float(updated["fees"]),
-        status=str(updated["status"]),
+        id=int(updated_id) if updated_id is not None else trade_id,
+        trade_date=str(trade_date),
+        ticker=str(ticker),
+        option_type=str(option_type),
+        strike=strike,
+        expiry=expiry,
+        qty=int(qty_value),
+        entry_time=str(entry_time),
+        entry_price=float(entry_price_val),
+        exit_time=None if exit_time is None else str(exit_time),
+        exit_price=None if exit_price is None else float(exit_price),
+        roi_pct=roi_pct,
+        fees=float(fees_value),
+        status=str(status_value),
     )
 
 
@@ -641,21 +809,34 @@ def list_activity(db, limit: Optional[int] = None) -> List[Dict[str, Any]]:
     rows = db.execute(query).fetchall()
     results: List[Dict[str, Any]] = []
     for row in rows:
+        trade_date = _row_value(row, "trade_date", 0, "")
+        ticker = _row_value(row, "ticker", 1, "")
+        option_type = _row_value(row, "option_type", 2, "")
+        strike = _row_value(row, "strike", 3)
+        expiry = _row_value(row, "expiry", 4)
+        qty_value = _row_value(row, "qty", 5, 0)
+        entry_time = _row_value(row, "entry_time", 6, "")
+        entry_price_val = _row_value(row, "entry_price", 7)
+        exit_time = _row_value(row, "exit_time", 8)
+        exit_price = _row_value(row, "exit_price", 9)
+        roi_pct = _row_value(row, "roi_pct", 10)
+        fees_value = _row_value(row, "fees", 11, 0.0)
+        status_value = _row_value(row, "status", 12, "")
         results.append(
             {
-                "date": row["trade_date"],
-                "ticker": row["ticker"],
-                "call_put": row["option_type"],
-                "strike": row["strike"],
-                "expiry": row["expiry"],
-                "qty": row["qty"],
-                "entry_time": row["entry_time"],
-                "entry_price": row["entry_price"],
-                "exit_time": row["exit_time"],
-                "exit_price": row["exit_price"],
-                "roi_pct": row["roi_pct"],
-                "fees": row["fees"],
-                "status": row["status"],
+                "date": str(trade_date),
+                "ticker": str(ticker),
+                "call_put": str(option_type),
+                "strike": strike,
+                "expiry": expiry,
+                "qty": int(qty_value),
+                "entry_time": str(entry_time),
+                "entry_price": None if entry_price_val is None else float(entry_price_val),
+                "exit_time": None if exit_time is None else str(exit_time),
+                "exit_price": None if exit_price is None else float(exit_price),
+                "roi_pct": roi_pct,
+                "fees": float(fees_value),
+                "status": str(status_value),
             }
         )
     return results
@@ -729,7 +910,17 @@ def get_equity_points(db, range_key: str) -> List[EquityPoint]:
         """,
         (start.isoformat(),),
     ).fetchall()
-    return [EquityPoint(ts=row["ts"], balance=float(row["balance"])) for row in rows]
+    points: List[EquityPoint] = []
+    for row in rows:
+        ts_value = _row_value(row, "ts", 0, "")
+        balance = _row_value(row, "balance", 1, 0.0)
+        points.append(
+            EquityPoint(
+                ts=str(ts_value),
+                balance=float(balance) if balance is not None else 0.0,
+            )
+        )
+    return points
 
 
 async def _fetch_schwab_quote(symbol: str) -> Dict[str, Any]:  # pragma: no cover - network
