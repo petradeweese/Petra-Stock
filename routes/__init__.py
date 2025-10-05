@@ -9,19 +9,21 @@ import io
 import json
 import logging
 import math
-import time
 import os
 import re
 import secrets
 import sqlite3
 import statistics
+import time
+import traceback
 import urllib.parse
 from concurrent.futures import as_completed
+from contextlib import suppress
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from threading import Lock, Thread
+from threading import Lock
 from typing import Any, Callable, Dict, List, Mapping, Optional
 from uuid import uuid4
-import traceback
 
 import pandas as pd
 from fastapi import APIRouter, Body, Depends, Form, HTTPException, Query, Request, Response
@@ -47,6 +49,7 @@ from indices import SP100, TOP150, TOP250
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 from scanner import compute_scan_for_ticker, export_simulation_artifacts
 from services import (
+    data_provider,
     executor,
     favorites_alerts,
     favorites_sim,
@@ -108,6 +111,64 @@ _LATEST_HEATMAP: Dict[str, Any] = dict(_EMPTY_HEATMAP)
 _HEATMAP_CACHE: Dict[str, Any] = {"data": None, "expires": 0.0}
 
 _SCAN_TASKS: dict[str, asyncio.Task] = {}
+
+
+@dataclass
+class ScanPlan:
+    tickers: list[str]
+    interval: str
+    lookback: float
+    window_start: datetime
+    window_end: datetime
+    need_fetch: list[str]
+    no_gap: list[str]
+    expected: int
+    coverage_ms: float
+
+
+def _build_scan_plan(tickers: list[str], params: dict) -> ScanPlan:
+    total = len(tickers)
+    interval = params.get("interval", "15m")
+    lookback = float(params.get("lookback_years", 2.0))
+    window_start, window_end = window_from_lookback(lookback)
+
+    cov_start = _perf_counter()
+    cov: dict[str, tuple[datetime, datetime, int]] = {}
+    batch = max(1, settings.scan_coverage_batch_size)
+    for i in range(0, len(tickers), batch):
+        chunk = tickers[i : i + batch]
+        cov.update(price_store.bulk_coverage(chunk, interval, window_start, window_end))
+    expected = expected_bar_count(window_start, window_end, interval)
+    no_gap: list[str] = []
+    need_fetch: list[str] = []
+    for sym in tickers:
+        cmin, cmax, cnt = cov.get(sym, (None, None, 0))
+        if cnt >= expected and price_store.covers(window_start, window_end, cmin, cmax):
+            no_gap.append(sym)
+        else:
+            need_fetch.append(sym)
+    cov_elapsed = (_perf_counter() - cov_start) * 1000.0
+    coverage_symbols_total.inc(total)
+    coverage_symbols_no_gap.inc(len(no_gap))
+    coverage_symbols_gap_fetched.inc(len(need_fetch))
+    coverage_elapsed_seconds.observe(cov_elapsed / 1000.0)
+    logger.info(
+        "coverage_mode=batch symbols=%d rows=%d elapsed_ms=%.0f",
+        total,
+        len(cov),
+        cov_elapsed,
+    )
+    return ScanPlan(
+        tickers=tickers,
+        interval=interval,
+        lookback=lookback,
+        window_start=window_start,
+        window_end=window_end,
+        need_fetch=need_fetch,
+        no_gap=no_gap,
+        expected=expected,
+        coverage_ms=cov_elapsed,
+    )
 
 _SMS_CONSENT_TEXT = (
     "I agree to receive automated Petra Stock SMS alerts. Msg & data rates may apply. "
@@ -1522,42 +1583,22 @@ def _perform_scan(
     sort_key: str,
     progress_cb: Optional[Callable[[int, int, str], None]] = None,
     progress_every: int = 5,
+    *,
+    plan: Optional[ScanPlan] = None,
+    fetch_missing: bool = True,
+    fetch_elapsed_ms: Optional[float] = None,
 ) -> tuple[list[dict], int, dict]:
     start = _perf_counter()
+    active_plan = plan or _build_scan_plan(tickers, params)
     total = len(tickers)
-    interval = params.get("interval", "15m")
-    lookback = float(params.get("lookback_years", 2.0))
-    window_start, window_end = window_from_lookback(lookback)
+    interval = active_plan.interval
+    lookback = active_plan.lookback
+    need_fetch = list(active_plan.need_fetch)
+    no_gap = list(active_plan.no_gap)
+    cov_elapsed = active_plan.coverage_ms
 
-    cov_start = _perf_counter()
-    cov: dict[str, tuple[datetime, datetime, int]] = {}
-    batch = max(1, settings.scan_coverage_batch_size)
-    for i in range(0, len(tickers), batch):
-        chunk = tickers[i : i + batch]
-        cov.update(price_store.bulk_coverage(chunk, interval, window_start, window_end))
-    expected = expected_bar_count(window_start, window_end, interval)
-    no_gap: list[str] = []
-    need_fetch: list[str] = []
-    for sym in tickers:
-        cmin, cmax, cnt = cov.get(sym, (None, None, 0))
-        if cnt >= expected and price_store.covers(window_start, window_end, cmin, cmax):
-            no_gap.append(sym)
-        else:
-            need_fetch.append(sym)
-    cov_elapsed = (_perf_counter() - cov_start) * 1000.0
-    coverage_symbols_total.inc(total)
-    coverage_symbols_no_gap.inc(len(no_gap))
-    coverage_symbols_gap_fetched.inc(len(need_fetch))
-    coverage_elapsed_seconds.observe(cov_elapsed / 1000.0)
-    logger.info(
-        "coverage_mode=batch symbols=%d rows=%d elapsed_ms=%.0f",
-        total,
-        len(cov),
-        cov_elapsed,
-    )
-
-    fetch_elapsed = 0.0
-    if need_fetch:
+    fetch_elapsed = float(fetch_elapsed_ms or 0.0)
+    if fetch_missing and need_fetch:
 
         async def _fetch_all(symbols: list[str]) -> None:
             fetch_concurrency = int(settings.scan_fetch_concurrency or 0)
@@ -4074,105 +4115,129 @@ async def _run_scan_task(
     http_client.set_wait_callback(wait_cb)
 
     success = False
-    loop = asyncio.get_running_loop()
-    event = asyncio.Event()
-    result: dict[str, Any] = {}
+    plan = _build_scan_plan(tickers, params)
+    remaining_symbols = len(plan.need_fetch)
+    fetch_elapsed_ms = 0.0
 
-    def _worker() -> None:
+    if remaining_symbols:
+        logger.info(
+            "routes fetch_start symbols=%d interval=%s",
+            remaining_symbols,
+            plan.interval,
+        )
+
+        def _progress(symbol: str, pending: int, _total: int) -> None:
+            nonlocal remaining_symbols
+            remaining_symbols = pending
+
+        fetch_started = _perf_counter()
+        fetch_task = asyncio.create_task(
+            data_provider.fetch_bars_async(
+                plan.need_fetch,
+                plan.interval,
+                plan.window_start,
+                plan.window_end,
+                progress_cb=_progress,
+            )
+        )
+
+        async def _watchdog() -> None:
+            while True:
+                try:
+                    await asyncio.wait_for(asyncio.shield(fetch_task), timeout=30.0)
+                    return
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "routes fetch_heartbeat pending=%d total=%d",
+                        remaining_symbols,
+                        len(plan.need_fetch),
+                    )
+
+        watchdog = asyncio.create_task(_watchdog())
         try:
-            rows, skipped, metrics = _perform_scan(
-                tickers,
-                params,
-                sort_key,
-                progress_cb=prog,
-            )
-            duration = time.monotonic() - start_ts
-            csv_headers, csv_rows = _rows_to_csv_table(rows)
-            ctx = {
-                "rows": rows,
-                "ran_at": now_et().strftime("%I:%M:%S %p").lstrip("0"),
-                "note": f"{scan_type} • {params.get('interval')} • {params.get('direction')} • window {params.get('window_value')} {params.get('window_unit')}",
-                "skipped_missing_data": skipped,
-                "metrics": metrics,
-                "summary": {
-                    "successes": len(rows),
-                    "empties": skipped,
-                    "errors": 0,
-                    "duration": duration,
-                },
-                "errors": [],
-                "csv_headers": csv_headers,
-                "csv_rows": csv_rows,
-            }
-            interim_percent = 100.0 if total == 0 else 99.9
-            _task_update(
-                task_id,
-                state="running",
-                percent=interim_percent,
-                done=total,
-                ctx=ctx,
-                message="",
-            )
-            time.sleep(0.1)
-            _task_update(
-                task_id,
-                state="succeeded",
-                percent=100.0,
-                done=total,
-                ctx=ctx,
-                message="",
-            )
-            logger.info(
-                "scan_done id=%s duration=%.2fs successes=%d empties=%d errors=%d no_gap=%d avg_ms=%.1f p95_ms=%.1f",
-                task_id,
-                duration,
-                len(rows),
-                skipped,
-                0,
-                metrics.get("symbols_no_gap", 0),
-                metrics.get("avg_per_symbol_ms", 0.0),
-                metrics.get("p95_per_symbol_ms", 0.0),
-            )
-            result["data"] = (rows, skipped, metrics)
-        except Exception as exc:  # pragma: no cover - error path exercised in tests
-            result["error"] = exc
-            result["traceback"] = traceback.format_exc()
+            fetch_result = await fetch_task
         finally:
-            try:
-                loop.call_soon_threadsafe(event.set)
-            except RuntimeError:
-                pass
+            watchdog.cancel()
+            with suppress(asyncio.CancelledError):
+                await watchdog
 
-    Thread(target=_worker, daemon=True).start()
+        elapsed = _perf_counter() - fetch_started
+        fetch_elapsed_ms = elapsed * 1000.0
+        ok = getattr(fetch_result, "ok", len(plan.need_fetch))
+        err = getattr(fetch_result, "err", 0)
+        elapsed_seconds = getattr(fetch_result, "elapsed", elapsed)
+        logger.info(
+            "routes fetch_done ok=%d err=%d elapsed=%.2fs",
+            ok,
+            err,
+            elapsed_seconds,
+        )
 
     try:
-        try:
-            await asyncio.sleep(0.1)
-        except asyncio.CancelledError:
-            task = asyncio.current_task()
-            if task is not None:
-                while task.uncancel():
-                    pass
-            logger.warning("scan_cancelled id=%s", task_id)
-        while True:
-            try:
-                await event.wait()
-                break
-            except asyncio.CancelledError:
-                task = asyncio.current_task()
-                if task is not None:
-                    while task.uncancel():
-                        pass
-                logger.warning("scan_cancelled id=%s", task_id)
-        if "error" in result:
-            raise result["error"]
+        rows, skipped, metrics = await asyncio.to_thread(
+            _perform_scan,
+            tickers,
+            params,
+            sort_key,
+            prog,
+            plan=plan,
+            fetch_missing=False,
+            fetch_elapsed_ms=fetch_elapsed_ms,
+        )
+        duration = time.monotonic() - start_ts
+        csv_headers, csv_rows = _rows_to_csv_table(rows)
+        ctx = {
+            "rows": rows,
+            "ran_at": now_et().strftime("%I:%M:%S %p").lstrip("0"),
+            "note": f"{scan_type} • {params.get('interval')} • {params.get('direction')} • window {params.get('window_value')} {params.get('window_unit')}",
+            "skipped_missing_data": skipped,
+            "metrics": metrics,
+            "summary": {
+                "successes": len(rows),
+                "empties": skipped,
+                "errors": 0,
+                "duration": duration,
+            },
+            "errors": [],
+            "csv_headers": csv_headers,
+            "csv_rows": csv_rows,
+        }
+        interim_percent = 100.0 if total == 0 else 99.9
+        _task_update(
+            task_id,
+            state="running",
+            percent=interim_percent,
+            done=total,
+            ctx=ctx,
+            message="",
+        )
+        await asyncio.sleep(0.1)
+        _task_update(
+            task_id,
+            state="succeeded",
+            percent=100.0,
+            done=total,
+            ctx=ctx,
+            message="",
+        )
+        logger.info(
+            "scan_done id=%s duration=%.2fs successes=%d empties=%d errors=%d no_gap=%d avg_ms=%.1f p95_ms=%.1f",
+            task_id,
+            duration,
+            len(rows),
+            skipped,
+            0,
+            metrics.get("symbols_no_gap", 0),
+            metrics.get("avg_per_symbol_ms", 0.0),
+            metrics.get("p95_per_symbol_ms", 0.0),
+        )
         success = True
     except asyncio.CancelledError:
         logger.warning("scan_cancelled id=%s", task_id)
         if not success:
             _task_update(task_id, message="cancelled")
     except Exception as exc:
-        tb = result.get("traceback") or traceback.format_exc()
+        tb = traceback.format_exc()
         logger.exception("scan_error id=%s", task_id)
         _task_update(
             task_id,

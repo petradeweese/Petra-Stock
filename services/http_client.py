@@ -330,9 +330,10 @@ async def request(method: str, url: str, **kwargs) -> httpx.Response:
         try:
             return await task
         finally:
-            loop_inflight.pop(key, None)
-            if not loop_inflight:
-                _INFLIGHT.pop(loop_id, None)
+            if task.done():
+                loop_inflight.pop(key, None)
+                if not loop_inflight:
+                    _INFLIGHT.pop(loop_id, None)
     else:
         return await _do_request()
 
