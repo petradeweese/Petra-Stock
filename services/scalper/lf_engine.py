@@ -9,6 +9,7 @@ import asyncio
 import csv
 import io
 import logging
+import sqlite3
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -26,6 +27,18 @@ from .shared import (
 logger = logging.getLogger(__name__)
 
 _DEFAULT_TICKERS = "SPY,QQQ,TSLA,NVDA"
+
+
+def _ensure_row_factory(db) -> None:
+    conn = getattr(db, "connection", None)
+    if conn is None:
+        return
+    try:
+        if getattr(conn, "row_factory", None) is not sqlite3.Row:
+            conn.row_factory = sqlite3.Row
+    except Exception:
+        # Some third-party cursors may not allow reassignment; ignore quietly.
+        pass
 
 
 def _row_value(row: Any, key: str, index: int | None = None, default: Any = None) -> Any:
@@ -164,6 +177,7 @@ class EquityPoint:
 
 
 def _ensure_schema(db) -> None:
+    _ensure_row_factory(db)
     db.execute(
         """
         CREATE TABLE IF NOT EXISTS scalper_lf_settings (

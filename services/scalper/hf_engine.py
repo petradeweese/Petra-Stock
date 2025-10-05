@@ -4,6 +4,7 @@ from __future__ import annotations
 import csv
 import io
 import logging
+import sqlite3
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Mapping, Optional, Sequence
@@ -22,6 +23,18 @@ from .shared import (
 logger = logging.getLogger(__name__)
 
 _DEFAULT_TICKERS = "SPY,QQQ,NVDA,TSLA,META,AMD"
+
+
+def _ensure_row_factory(db) -> None:
+    conn = getattr(db, "connection", None)
+    if conn is None:
+        return
+    try:
+        if getattr(conn, "row_factory", None) is not sqlite3.Row:
+            conn.row_factory = sqlite3.Row
+    except Exception:
+        # Best-effort: fallback to whatever the connection supports.
+        pass
 
 
 @dataclass(slots=True)
@@ -77,7 +90,55 @@ class EquityPoint:
     balance: float
 
 
+def _default_settings() -> HFSettings:
+    return HFSettings(
+        starting_balance=100000.0,
+        pct_per_trade=1.0,
+        daily_trade_cap=50,
+        tickers=_DEFAULT_TICKERS,
+        profit_target_pct=4.0,
+        max_adverse_pct=-2.0,
+        time_cap_minutes=5,
+        cooldown_minutes=2,
+        max_open_positions=2,
+        daily_max_drawdown_pct=-6.0,
+        per_contract_fee=0.65,
+        per_order_fee=0.0,
+        volatility_gate=3.0,
+    )
+
+
+def _coerce_float(value: Any, *, default: float, key: str) -> float:
+    try:
+        if value is None:
+            raise ValueError("missing")
+        return float(value)
+    except (TypeError, ValueError):
+        logger.warning("hf_settings_invalid_float key=%s value=%r", key, value)
+        return float(default)
+
+
+def _coerce_int(value: Any, *, default: int, key: str) -> int:
+    try:
+        if value is None:
+            raise ValueError("missing")
+        return int(value)
+    except (TypeError, ValueError):
+        logger.warning("hf_settings_invalid_int key=%s value=%r", key, value)
+        return int(default)
+
+
+def _row_value(row: Any, key: str) -> Any:
+    if row is None:
+        return None
+    try:
+        return row[key]  # type: ignore[index]
+    except (KeyError, IndexError, TypeError):
+        return None
+
+
 def _ensure_schema(db) -> None:
+    _ensure_row_factory(db)
     db.execute(
         """
         CREATE TABLE IF NOT EXISTS scalper_hf_settings (
@@ -175,21 +236,76 @@ def load_settings(db) -> HFSettings:
           FROM scalper_hf_settings WHERE id = 1
         """
     ).fetchone()
-    assert row is not None
+    defaults = _default_settings()
+    if row is None:
+        logger.warning("hf_settings_missing_row using defaults")
+        return defaults
+    tickers_value = _row_value(row, "tickers")
+    tickers = str(tickers_value).strip() if tickers_value is not None else ""
+    if not tickers:
+        tickers = defaults.tickers
     return HFSettings(
-        starting_balance=float(row["starting_balance"]),
-        pct_per_trade=float(row["pct_per_trade"]),
-        daily_trade_cap=int(row["daily_trade_cap"]),
-        tickers=str(row["tickers"] or _DEFAULT_TICKERS),
-        profit_target_pct=float(row["profit_target_pct"]),
-        max_adverse_pct=float(row["max_adverse_pct"]),
-        time_cap_minutes=int(row["time_cap_minutes"]),
-        cooldown_minutes=int(row["cooldown_minutes"]),
-        max_open_positions=int(row["max_open_positions"]),
-        daily_max_drawdown_pct=float(row["daily_max_drawdown_pct"]),
-        per_contract_fee=float(row["per_contract_fee"]),
-        per_order_fee=float(row["per_order_fee"]),
-        volatility_gate=float(row["volatility_gate"]),
+        starting_balance=_coerce_float(
+            _row_value(row, "starting_balance"),
+            default=defaults.starting_balance,
+            key="starting_balance",
+        ),
+        pct_per_trade=_coerce_float(
+            _row_value(row, "pct_per_trade"),
+            default=defaults.pct_per_trade,
+            key="pct_per_trade",
+        ),
+        daily_trade_cap=_coerce_int(
+            _row_value(row, "daily_trade_cap"),
+            default=defaults.daily_trade_cap,
+            key="daily_trade_cap",
+        ),
+        tickers=tickers or defaults.tickers,
+        profit_target_pct=_coerce_float(
+            _row_value(row, "profit_target_pct"),
+            default=defaults.profit_target_pct,
+            key="profit_target_pct",
+        ),
+        max_adverse_pct=_coerce_float(
+            _row_value(row, "max_adverse_pct"),
+            default=defaults.max_adverse_pct,
+            key="max_adverse_pct",
+        ),
+        time_cap_minutes=_coerce_int(
+            _row_value(row, "time_cap_minutes"),
+            default=defaults.time_cap_minutes,
+            key="time_cap_minutes",
+        ),
+        cooldown_minutes=_coerce_int(
+            _row_value(row, "cooldown_minutes"),
+            default=defaults.cooldown_minutes,
+            key="cooldown_minutes",
+        ),
+        max_open_positions=_coerce_int(
+            _row_value(row, "max_open_positions"),
+            default=defaults.max_open_positions,
+            key="max_open_positions",
+        ),
+        daily_max_drawdown_pct=_coerce_float(
+            _row_value(row, "daily_max_drawdown_pct"),
+            default=defaults.daily_max_drawdown_pct,
+            key="daily_max_drawdown_pct",
+        ),
+        per_contract_fee=_coerce_float(
+            _row_value(row, "per_contract_fee"),
+            default=defaults.per_contract_fee,
+            key="per_contract_fee",
+        ),
+        per_order_fee=_coerce_float(
+            _row_value(row, "per_order_fee"),
+            default=defaults.per_order_fee,
+            key="per_order_fee",
+        ),
+        volatility_gate=_coerce_float(
+            _row_value(row, "volatility_gate"),
+            default=defaults.volatility_gate,
+            key="volatility_gate",
+        ),
     )
 
 
@@ -297,9 +413,13 @@ def get_status(db) -> HFStatus:
     state = db.execute(
         "SELECT status, started_at, halted_at FROM scalper_hf_state WHERE id=1"
     ).fetchone()
-    status = str(state["status"]) if state else "inactive"
-    started_at = state["started_at"] if state else None
-    halted = bool(state["halted_at"]) if state else False
+    if state is None:
+        logger.warning("hf_state_missing defaulting to inactive")
+    status_value = _row_value(state, "status")
+    status = str(status_value or "inactive")
+    started_raw = _row_value(state, "started_at")
+    started_at = str(started_raw) if started_raw else None
+    halted = bool(_row_value(state, "halted_at"))
     equity = _latest_equity(db)
     open_positions = _count_open_positions(db)
     realized_today = _realized_today(db)

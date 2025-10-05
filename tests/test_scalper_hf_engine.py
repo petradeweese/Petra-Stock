@@ -3,11 +3,78 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Iterator
 
+import sqlite3
+
 import pytest
 
 import db
 from db import get_db
 from services.scalper import hf_engine
+
+
+def _cursor_with_row_factory(row_factory) -> sqlite3.Cursor:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = row_factory
+    conn.execute("PRAGMA foreign_keys=ON")
+    return conn.cursor()
+
+
+def _close_cursor(cursor: sqlite3.Cursor) -> None:
+    try:
+        cursor.connection.close()
+    except Exception:
+        pass
+
+
+def test_hf_load_settings_tuple_rows():
+    cursor = _cursor_with_row_factory(None)
+    try:
+        settings = hf_engine.load_settings(cursor)
+        assert isinstance(settings, hf_engine.HFSettings)
+        assert settings.tickers
+    finally:
+        _close_cursor(cursor)
+
+
+def test_hf_get_status_tuple_rows():
+    cursor = _cursor_with_row_factory(None)
+    try:
+        status = hf_engine.get_status(cursor)
+        assert isinstance(status, hf_engine.HFStatus)
+        assert status.status in {"inactive", "active", "halted"}
+    finally:
+        _close_cursor(cursor)
+
+
+def test_hf_load_settings_missing_row(monkeypatch):
+    cursor = _cursor_with_row_factory(sqlite3.Row)
+    try:
+        hf_engine._ensure_schema(cursor)
+        cursor.execute("DELETE FROM scalper_hf_settings")
+        cursor.connection.commit()
+
+        monkeypatch.setattr(hf_engine, "_ensure_schema", lambda db: None)
+        settings = hf_engine.load_settings(cursor)
+        assert settings.starting_balance == pytest.approx(100000.0)
+        assert settings.tickers
+    finally:
+        _close_cursor(cursor)
+
+
+def test_hf_get_status_missing_row(monkeypatch):
+    cursor = _cursor_with_row_factory(sqlite3.Row)
+    try:
+        hf_engine._ensure_schema(cursor)
+        cursor.execute("DELETE FROM scalper_hf_state")
+        cursor.connection.commit()
+
+        monkeypatch.setattr(hf_engine, "_ensure_schema", lambda db: None)
+        status = hf_engine.get_status(cursor)
+        assert status.status == "inactive"
+        assert status.started_at is None
+        assert status.account_equity == pytest.approx(0.0)
+    finally:
+        _close_cursor(cursor)
 
 
 @pytest.fixture
