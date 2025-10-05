@@ -1553,7 +1553,12 @@ def _perform_scan(
     if need_fetch:
 
         async def _fetch_all(symbols: list[str]) -> None:
-            sem = asyncio.Semaphore(settings.scan_fetch_concurrency)
+            fetch_concurrency = int(settings.scan_fetch_concurrency or 0)
+            if fetch_concurrency <= 0:
+                logger.warning(
+                    "scan fetch concurrency clamped", extra={"requested": fetch_concurrency}
+                )
+            sem = asyncio.Semaphore(max(1, fetch_concurrency))
 
             async def _worker(sym: str) -> None:
                 async with sem:
