@@ -1,0 +1,143 @@
+{% extends 'base.html' %}
+{% block title %}Paper ▸ Favorites (Sim) — Petra Stock{% endblock %}
+{% block head_extra %}
+  <script src="{{ url_for('static', path='js/paper_favorites.js') }}" defer></script>
+{% endblock %}
+{% block content %}
+  {% set has_universe = favorites_universe_count and favorites_universe_count > 0 %}
+  <div class="paper-container favorites-sim">
+    <nav class="paper-subtabs" aria-label="Paper trading modes">
+      <a class="paper-subtab is-active" href="/paper/favorites">Favorites (Sim)</a>
+      <a class="paper-subtab" href="/paper#lf-section">Scalper (LF)</a>
+      <a class="paper-subtab" href="/paper#hf-section">Scalper (HF)</a>
+    </nav>
+
+    <section class="paper-section" aria-labelledby="favorites-sim-heading" data-has-universe="{{ 'true' if has_universe else 'false' }}">
+      <div class="card paper-header-card">
+        <header class="paper-lf-header">
+          <div class="paper-metrics" id="favorites-metrics" data-status="{{ favorites_status['status'] }}" data-started="{{ favorites_status['started_at'] or '' }}">
+            <h2 id="favorites-sim-heading" class="visually-hidden">Favorites Simulator</h2>
+            <div class="paper-metric">
+              <p class="paper-label">Account Equity</p>
+              <strong data-metric="equity">${{ '%.2f'|format(favorites_summary['balance']) }}</strong>
+            </div>
+            <div class="paper-metric">
+              <p class="paper-label">P&amp;L</p>
+              <strong data-metric="pnl">${{ '%.2f'|format(favorites_summary['pnl']) }}</strong>
+            </div>
+            <div class="paper-metric">
+              <p class="paper-label">P&amp;L %</p>
+              <strong data-metric="pnl_pct">{{ '%.2f'|format(favorites_summary['pnl_pct']) }}%</strong>
+            </div>
+            <div class="paper-metric">
+              <p class="paper-label">Win Rate</p>
+              <strong data-metric="win_rate">{{ '%.1f'|format(favorites_summary['win_rate']) }}%</strong>
+            </div>
+            <div class="paper-metric">
+              <p class="paper-label">Trades</p>
+              <strong data-metric="trades">{{ favorites_summary['total_trades'] }}</strong>
+            </div>
+          </div>
+          <div class="paper-range-toggle" role="group" aria-label="Favorites equity range">
+            {% set default_range = '1m' %}
+            {% for key,label in {'1d':'1D','1w':'1W','1m':'1M','3m':'3M','all':'All'}.items() %}
+              <button type="button" class="paper-range-btn {% if key == default_range %}is-active{% endif %}" data-range="{{ key }}">{{ label }}</button>
+            {% endfor %}
+          </div>
+        </header>
+        <div class="favorites-status-bar">
+          <span id="favorites-status-pill" class="paper-status-pill {% if favorites_status['status'] == 'active' %}active{% endif %}">
+            {% if favorites_status['status'] == 'active' %}Active{% else %}Inactive{% endif %}
+          </span>
+          <div class="paper-settings-actions">
+            <button type="button" class="btn btn-secondary" data-favorites-action="start" {% if not has_universe %}disabled{% endif %}>Start</button>
+            <button type="button" class="btn btn-secondary" data-favorites-action="stop" {% if not has_universe %}disabled{% endif %}>Stop</button>
+            <button type="button" class="btn btn-secondary" data-favorites-action="restart" {% if not has_universe %}disabled{% endif %}>Restart</button>
+          </div>
+        </div>
+        <p id="favorites-status-line" class="paper-status-line">
+          {% if has_universe %}
+            {% if favorites_status['status'] == 'active' and favorites_status['started_at'] %}
+              Active since {{ favorites_status['started_at'] }}
+            {% elif favorites_status['status'] == 'active' %}
+              Active and monitoring favorites hits.
+            {% else %}
+              Simulator is currently inactive.
+            {% endif %}
+          {% else %}
+            No favorites available. Add favorites from the scanner to begin simulating.
+          {% endif %}
+        </p>
+        <div class="paper-chart-wrapper">
+          <canvas id="favorites-equity-chart" height="260" aria-label="Favorites simulator equity chart"></canvas>
+        </div>
+        <div class="paper-secondary-metrics" id="favorites-secondary-metrics">
+          <div class="paper-metric">
+            <p class="paper-label">Avg Win</p>
+            <strong data-metric="avg_win">${{ '%.2f'|format(favorites_summary['avg_win']) }}</strong>
+          </div>
+          <div class="paper-metric">
+            <p class="paper-label">Avg Loss</p>
+            <strong data-metric="avg_loss">${{ '%.2f'|format(favorites_summary['avg_loss']) }}</strong>
+          </div>
+          <div class="paper-metric">
+            <p class="paper-label">Max Drawdown</p>
+            <strong data-metric="max_drawdown">{{ '%.2f'|format(favorites_summary['max_drawdown']) }}%</strong>
+          </div>
+          <div class="paper-metric">
+            <p class="paper-label">Universe</p>
+            <strong data-metric="universe">{{ favorites_universe_count }}</strong>
+          </div>
+        </div>
+      </div>
+
+      <div class="card paper-table-card">
+        <div class="paper-table-toolbar">
+          <h3 class="paper-table-title">Recent Favorites Activity</h3>
+        </div>
+        <div class="paper-table-scroll">
+          <table id="favorites-activity-table" class="table paper-table" aria-describedby="favorites-status-line">
+            <thead>
+              <tr>
+                <th scope="col">Time</th>
+                <th scope="col">Symbol</th>
+                <th scope="col">Side</th>
+                <th scope="col">Qty</th>
+                <th scope="col">Entry</th>
+                <th scope="col">Exit</th>
+                <th scope="col">P&amp;L</th>
+                <th scope="col">ROI%</th>
+              </tr>
+            </thead>
+            <tbody id="favorites-activity-body"></tbody>
+          </table>
+        </div>
+      </div>
+
+      {% if not has_universe %}
+      <div class="card" id="favorites-empty-state">
+        <p>No favorites yet. Add symbols to your Favorites list to enable the simulator.</p>
+      </div>
+      {% endif %}
+    </section>
+  </div>
+  <script type="application/json" id="favorites-status-seed">{{ favorites_status|tojson|safe }}</script>
+  <script type="application/json" id="favorites-summary-seed">{{ favorites_summary|tojson|safe }}</script>
+  <script type="application/json" id="favorites-equity-seed">{{ favorites_equity|tojson|safe }}</script>
+  <script type="application/json" id="favorites-activity-seed">{{ favorites_activity|tojson|safe }}</script>
+  <script type="application/json" id="favorites-settings-seed">{{ {
+    'starting_balance': favorites_settings.starting_balance,
+    'allocation_mode': favorites_settings.allocation_mode,
+    'allocation_value': favorites_settings.allocation_value,
+    'per_contract_fee': favorites_settings.per_contract_fee,
+    'per_order_fee': favorites_settings.per_order_fee,
+    'slippage_bps': favorites_settings.slippage_bps,
+    'daily_trade_cap': favorites_settings.daily_trade_cap,
+    'allow_premarket': favorites_settings.allow_premarket,
+    'allow_postmarket': favorites_settings.allow_postmarket,
+    'entry_rule': favorites_settings.entry_rule,
+    'exit_time_cap_minutes': favorites_settings.exit_time_cap_minutes,
+    'exit_profit_target_pct': favorites_settings.exit_profit_target_pct,
+    'exit_max_adverse_pct': favorites_settings.exit_max_adverse_pct
+  }|tojson|safe }}</script>
+{% endblock %}
