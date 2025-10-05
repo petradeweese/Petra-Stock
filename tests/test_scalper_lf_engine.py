@@ -45,6 +45,36 @@ def _close_cursor(cursor: sqlite3.Cursor) -> None:
         pass
 
 
+def test_load_settings_missing_row(monkeypatch):
+    cursor = _cursor_with_row_factory(sqlite3.Row)
+    try:
+        lf_engine._ensure_schema(cursor)
+        cursor.execute("DELETE FROM scalper_lf_settings")
+        cursor.connection.commit()
+
+        monkeypatch.setattr(lf_engine, "_ensure_schema", lambda db: None)
+        settings = lf_engine.load_settings(cursor)
+        assert isinstance(settings, lf_engine.LFSettings)
+        assert settings.starting_balance == pytest.approx(100000.0)
+    finally:
+        _close_cursor(cursor)
+
+
+def test_get_status_missing_row(monkeypatch):
+    cursor = _cursor_with_row_factory(sqlite3.Row)
+    try:
+        lf_engine._ensure_schema(cursor)
+        cursor.execute("DELETE FROM scalper_lf_state")
+        cursor.connection.commit()
+
+        monkeypatch.setattr(lf_engine, "_ensure_schema", lambda db: None)
+        status = lf_engine.get_status(cursor)
+        assert status.status == "inactive"
+        assert status.started_at is None
+    finally:
+        _close_cursor(cursor)
+
+
 @pytest.fixture
 def anyio_backend():
     return "asyncio"
