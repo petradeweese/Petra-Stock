@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Iterator
 
+import sqlite3
+
 import pytest
 
 import db
@@ -27,6 +29,65 @@ def db_cursor(tmp_path) -> Iterator:
             gen.close()
         except Exception:
             pass
+
+
+def _cursor_with_row_factory(row_factory) -> sqlite3.Cursor:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = row_factory
+    conn.execute("PRAGMA foreign_keys=ON")
+    return conn.cursor()
+
+
+def _close_cursor(cursor: sqlite3.Cursor) -> None:
+    try:
+        cursor.connection.close()
+    except Exception:
+        pass
+
+
+@pytest.fixture
+def anyio_backend():
+    return "asyncio"
+
+
+def test_load_settings_tuple_rows():
+    cursor = _cursor_with_row_factory(None)
+    try:
+        settings = lf_engine.load_settings(cursor)
+        assert isinstance(settings, lf_engine.LFSettings)
+        assert settings.starting_balance == pytest.approx(100000.0)
+    finally:
+        _close_cursor(cursor)
+
+
+def test_load_settings_mapping_rows():
+    cursor = _cursor_with_row_factory(sqlite3.Row)
+    try:
+        settings = lf_engine.load_settings(cursor)
+        assert isinstance(settings, lf_engine.LFSettings)
+        assert settings.tickers
+    finally:
+        _close_cursor(cursor)
+
+
+def test_get_status_tuple_rows():
+    cursor = _cursor_with_row_factory(None)
+    try:
+        status = lf_engine.get_status(cursor)
+        assert isinstance(status, lf_engine.LFStatus)
+        assert status.status in {"inactive", "active"}
+    finally:
+        _close_cursor(cursor)
+
+
+def test_get_status_mapping_rows():
+    cursor = _cursor_with_row_factory(sqlite3.Row)
+    try:
+        status = lf_engine.get_status(cursor)
+        assert isinstance(status, lf_engine.LFStatus)
+        assert status.status in {"inactive", "active"}
+    finally:
+        _close_cursor(cursor)
 
 
 def test_position_sizing_formula():
@@ -158,7 +219,7 @@ def test_status_lifecycle(db_cursor):
     assert restarted.started_at.endswith("03T00:00:00+00:00")
 
 
-@pytest.mark.asyncio
+@pytest.mark.anyio
 async def test_adapter_fallback(monkeypatch):
     calls: list[str] = []
 
