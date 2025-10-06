@@ -111,6 +111,102 @@ def test_add_favorite_persists_lookback(tmp_path):
     settings_data = json.loads(settings_snapshot)
     assert settings_data["lookback_years"] == "2.0"
 
+
+def test_add_favorite_skips_optional_roi_snapshot_column(tmp_path):
+    db_path = tmp_path / "legacy.db"
+    db.DB_PATH = str(db_path)
+
+    conn = sqlite3.connect(db.DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE favorites (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticker TEXT NOT NULL,
+            direction TEXT NOT NULL,
+            interval TEXT NOT NULL,
+            rule TEXT NOT NULL,
+            target_pct REAL,
+            stop_pct REAL,
+            window_value REAL,
+            window_unit TEXT,
+            ref_avg_dd REAL,
+            lookback_years REAL,
+            min_support INTEGER,
+            support_snapshot TEXT,
+            hit_pct_snapshot REAL,
+            dd_pct_snapshot REAL,
+            rule_snapshot TEXT,
+            settings_json_snapshot TEXT,
+            snapshot_at TEXT
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    app = FastAPI()
+    app.include_router(routes.router)
+    client = TestClient(app)
+
+    res = client.post(
+        "/favorites/add",
+        json={
+            "ticker": "LEG",
+            "direction": "UP",
+            "rule": "r1",
+            "roi_snapshot": 1.25,
+        },
+    )
+
+    assert res.status_code == 200
+    assert res.json()["ok"] is True
+
+    conn = sqlite3.connect(db.DB_PATH)
+    cur = conn.cursor()
+    cur.execute("SELECT ticker, rule FROM favorites")
+    row = cur.fetchone()
+    conn.close()
+
+    assert row == ("LEG", "r1")
+
+
+def test_add_favorite_reports_schema_out_of_date(tmp_path):
+    db_path = tmp_path / "legacy_missing_col.db"
+    db.DB_PATH = str(db_path)
+
+    conn = sqlite3.connect(db.DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE favorites (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticker TEXT NOT NULL,
+            interval TEXT NOT NULL,
+            rule TEXT NOT NULL
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    app = FastAPI()
+    app.include_router(routes.router)
+    client = TestClient(app)
+
+    res = client.post(
+        "/favorites/add",
+        json={
+            "ticker": "BAD",
+            "direction": "UP",
+            "rule": "r1",
+        },
+    )
+
+    assert res.status_code == 400
+    body = res.json()
+    assert body == {"ok": False, "error": "Favorites schema out of date"}
+
 def test_favorites_snapshot_values(tmp_path, monkeypatch):
     db.DB_PATH = str(tmp_path / "test.db")
     db.init_db()

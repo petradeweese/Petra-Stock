@@ -134,6 +134,9 @@ _FAVORITE_INSERT_COLUMNS: tuple[str, ...] = (
     "snapshot_at",
 )
 
+_FAVORITE_OPTIONAL_COLUMNS = frozenset({"roi_snapshot"})
+_FAVORITE_COLUMN_CACHE: dict[int, tuple[str, ...]] = {}
+
 
 @dataclass
 class ScanPlan:
@@ -664,6 +667,21 @@ def _coerce_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _favorite_roi_value(value: Any) -> float | None:
+    numeric = _coerce_float(value)
+    if numeric is not None:
+        return numeric
+
+    if isinstance(value, (bytes, str)):
+        try:
+            parsed = json.loads(value)
+        except (TypeError, ValueError):
+            return None
+        return _coerce_float(parsed)
+
+    return None
 
 
 def _interval_minutes(interval: Any) -> int:
@@ -2004,7 +2022,7 @@ def favorites_page(request: Request, db=Depends(get_db)):
     favs = [_normalize_favorite(row_to_dict(r, db)) for r in db.fetchall()]
     for f in favs:
         f["direction"] = canonical_direction(f.get("direction")) or "UP"
-        f["avg_roi_pct"] = f.get("roi_snapshot")
+        f["avg_roi_pct"] = _favorite_roi_value(f.get("roi_snapshot"))
         f["hit_pct"] = f.get("hit_pct_snapshot")
         f["avg_dd_pct"] = f.get("dd_pct_snapshot")
         if f.get("rule_snapshot"):
@@ -2434,7 +2452,7 @@ def _serialize_forward_favorite(
         "lookback_display": fav.get("lookback_display"),
         "support_count": fav.get("support_count"),
         "support_display": fav.get("support_display"),
-        "roi_snapshot": _coerce_float(fav.get("roi_snapshot")),
+        "roi_snapshot": _favorite_roi_value(fav.get("roi_snapshot")),
         "hit_pct_snapshot": _coerce_float(fav.get("hit_pct_snapshot")),
         "dd_pct_snapshot": _coerce_float(fav.get("dd_pct_snapshot")),
         "snapshot_at": fav.get("snapshot_at"),
@@ -3184,7 +3202,14 @@ def _favorite_record_from_payload(payload: Mapping[str, Any]) -> tuple[dict[str,
     window_value = _coerce_float(payload.get("window_value"))
     window_unit = str(payload.get("window_unit") or "").strip()
 
-    roi_snapshot = _coerce_float(payload.get("roi_snapshot"))
+    roi_snapshot_raw = payload.get("roi_snapshot")
+    if isinstance(roi_snapshot_raw, (dict, list)):
+        try:
+            roi_snapshot = json.dumps(roi_snapshot_raw)
+        except (TypeError, ValueError):
+            roi_snapshot = None
+    else:
+        roi_snapshot = _coerce_float(roi_snapshot_raw)
     hit_snapshot = _coerce_float(payload.get("hit_pct_snapshot"))
     dd_snapshot = _coerce_float(payload.get("dd_pct_snapshot"))
 
@@ -3323,12 +3348,49 @@ def _favorite_record_from_payload(payload: Mapping[str, Any]) -> tuple[dict[str,
     return record, None
 
 
+def _favorite_insert_columns(db: sqlite3.Cursor) -> tuple[str, ...]:
+    conn = getattr(db, "connection", None)
+    if conn is None:
+        return tuple(
+            column
+            for column in _FAVORITE_INSERT_COLUMNS
+            if column not in _FAVORITE_OPTIONAL_COLUMNS
+        )
+
+    cache_key = id(conn)
+    cached = _FAVORITE_COLUMN_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    available: set[str] = set()
+    try:
+        db.execute("PRAGMA table_info(favorites)")
+        available = {row[1] for row in db.fetchall()}
+    except sqlite3.Error:
+        columns = tuple(
+            column
+            for column in _FAVORITE_INSERT_COLUMNS
+            if column not in _FAVORITE_OPTIONAL_COLUMNS
+        )
+        _FAVORITE_COLUMN_CACHE[cache_key] = columns
+        return columns
+
+    columns = tuple(
+        column
+        for column in _FAVORITE_INSERT_COLUMNS
+        if column not in _FAVORITE_OPTIONAL_COLUMNS or column in available
+    )
+    _FAVORITE_COLUMN_CACHE[cache_key] = columns
+    return columns
+
+
 def _insert_favorite_record(db: sqlite3.Cursor, record: Mapping[str, Any]) -> None:
-    columns = ", ".join(_FAVORITE_INSERT_COLUMNS)
-    placeholders = ", ".join("?" for _ in _FAVORITE_INSERT_COLUMNS)
-    values = tuple(record.get(column) for column in _FAVORITE_INSERT_COLUMNS)
+    columns = _favorite_insert_columns(db)
+    columns_sql = ", ".join(columns)
+    placeholders = ", ".join("?" for _ in columns)
+    values = tuple(record.get(column) for column in columns)
     db.execute(
-        f"INSERT INTO favorites({columns}) VALUES ({placeholders})",
+        f"INSERT INTO favorites({columns_sql}) VALUES ({placeholders})",
         values,
     )
 
@@ -3356,6 +3418,12 @@ async def favorites_add(request: Request, db=Depends(get_db)):
         _insert_favorite_record(db, record)
         fav_id = db.lastrowid
         db.connection.commit()
+    except sqlite3.OperationalError:
+        logger.exception("favorite_insert_failed_schema")
+        return JSONResponse(
+            {"ok": False, "error": "Favorites schema out of date"},
+            status_code=400,
+        )
     except Exception:
         logger.exception("favorite_insert_failed")
         return JSONResponse({"ok": False, "error": "Failed to add favorite"}, status_code=500)

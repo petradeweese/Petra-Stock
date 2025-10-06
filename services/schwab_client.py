@@ -4,6 +4,7 @@ import datetime as dt
 import logging
 import os
 import time
+import urllib.parse
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
@@ -84,6 +85,15 @@ class SchwabClient:
         ):
             raise SchwabAuthError("Missing Schwab OAuth configuration")
 
+        redirect_uri = settings.schwab_redirect_uri or self._redirect_uri
+        if redirect_uri != self._redirect_uri and redirect_uri:
+            logger.info(
+                "schwab_refresh_redirect_uri_updated old=%s new=%s",
+                self._redirect_uri,
+                redirect_uri,
+            )
+            self._redirect_uri = redirect_uri
+
         payload = {
             "grant_type": "refresh_token",
             "refresh_token": refresh_token,
@@ -98,15 +108,23 @@ class SchwabClient:
             "Authorization": f"Basic {basic_token}",
         }
 
+        form_body = urllib.parse.urlencode(payload)
+        logger.debug("schwab_token_refresh_request body=%s", form_body)
+
         t0 = time.monotonic()
         resp = await http_client.request(
-            "POST", TOKEN_URL, data=payload, headers=headers
+            "POST", TOKEN_URL, content=form_body, headers=headers
         )
         duration = time.monotonic() - t0
         if resp.status_code >= 400:
+            response_text = getattr(resp, "text", "")
             logger.warning(
-                "schwab_token_error status=%s duration=%.2f", resp.status_code, duration
+                "schwab_token_error status=%s duration=%.2f body=%s",
+                resp.status_code,
+                duration,
+                response_text,
             )
+            self._handle_refresh_failure(resp)
             raise SchwabAuthError(
                 f"Token refresh failed ({resp.status_code})",
                 status_code=resp.status_code,
@@ -127,6 +145,26 @@ class SchwabClient:
             "schwab_token_refreshed expires_in=%s duration=%.2f", expires_in, duration
         )
         return _Token(access_token=token, expires_at=expires_at)
+
+    def _handle_refresh_failure(self, resp: Any) -> None:
+        try:
+            data = resp.json() if resp.content else {}
+        except ValueError:
+            data = {}
+
+        error_code = str(data.get("error") or "").lower()
+        error_description = str(data.get("error_description") or "").lower()
+        combined = f"{error_code} {error_description}".strip()
+        if resp.status_code == 400 and (
+            "invalid_grant" in combined or "invalid_refresh_token" in combined
+        ):
+            logger.warning("schwab_refresh_token_invalid; clearing cached token")
+            self._invalidate_refresh_token()
+
+    def _invalidate_refresh_token(self) -> None:
+        self.set_refresh_token("")
+        settings.schwab_refresh_token = ""
+        setattr(settings, "SCHWAB_REFRESH_TOKEN", "")
 
     def _current_refresh_token(self) -> str:
         if self._refresh_token:
