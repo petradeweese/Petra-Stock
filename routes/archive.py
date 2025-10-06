@@ -2,7 +2,7 @@
 
 import json
 from datetime import datetime
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Mapping, Tuple
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -15,6 +15,96 @@ from .template_helpers import register_template_helpers
 router = APIRouter()
 templates = Jinja2Templates(directory="templates")
 register_template_helpers(templates)
+
+
+def _json_default(value: Any) -> str:
+    try:
+        if hasattr(value, "isoformat"):
+            return value.isoformat()
+    except Exception:
+        pass
+    return str(value)
+
+
+def _serialize_json_blob(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, (bytes, bytearray)):
+        try:
+            value = value.decode("utf-8", "ignore")
+        except Exception:
+            value = value.decode("latin-1", "ignore")
+    if isinstance(value, str):
+        text = value.strip()
+        return text or None
+    try:
+        return json.dumps(value, default=_json_default)
+    except TypeError:
+        try:
+            return json.dumps(value, default=str)
+        except TypeError:
+            return json.dumps(str(value))
+
+
+def _ensure_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, (bytes, bytearray)):
+        try:
+            value = value.decode("utf-8", "ignore")
+        except Exception:
+            value = value.decode("latin-1", "ignore")
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return {}
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            return {}
+        if isinstance(parsed, dict):
+            return parsed
+    return {}
+
+
+def _normalize_archive_payload(
+    payload: Mapping[str, Any]
+) -> tuple[dict[str, Any], str, str]:
+    params_dict = _ensure_dict(payload.get("params"))
+
+    settings_source: Any | None = None
+    for key in ("settings_json", "settings", "params"):
+        if key not in payload:
+            continue
+        candidate = payload.get(key)
+        if candidate is None:
+            continue
+        if isinstance(candidate, dict):
+            settings_source = candidate
+            break
+        if isinstance(candidate, (bytes, bytearray)):
+            try:
+                candidate = candidate.decode("utf-8", "ignore")
+            except Exception:
+                candidate = candidate.decode("latin-1", "ignore")
+        if isinstance(candidate, str):
+            if not candidate.strip():
+                continue
+            settings_source = candidate
+            break
+        settings_source = candidate
+        break
+
+    if settings_source is None:
+        settings_source = params_dict or {}
+
+    if not params_dict:
+        params_dict = _ensure_dict(settings_source)
+
+    params_json_text = _serialize_json_blob(params_dict) or "{}"
+    settings_json_text = _serialize_json_blob(settings_source) or params_json_text
+
+    return params_dict, params_json_text, settings_json_text
 
 
 def _format_rule_summary(params: Dict[str, Any]) -> str:
@@ -93,16 +183,27 @@ async def archive_save(request: Request, db=Depends(get_db)):
     """Save a completed scan run and its results to the archive."""
     try:
         payload = await request.json()
-        params = payload.get("params", {}) or {}
+        if not isinstance(payload, Mapping):
+            return JSONResponse({"ok": False, "error": "invalid payload"}, status_code=400)
+
         rows = payload.get("rows", []) or []
-        if not rows:
+        if not isinstance(rows, list) or not rows:
             return JSONResponse({"ok": False, "error": "no rows"}, status_code=400)
+
+        params_dict, params_json_text, settings_json_text = _normalize_archive_payload(
+            payload
+        )
 
         started = now_et().isoformat()
         finished = started
-        scan_type = str(params.get("scan_type") or "scan150")
-        universe = ",".join({r.get("ticker", "") for r in rows if r.get("ticker")})
-        settings_json = json.dumps(params)
+        scan_type = str(
+            params_dict.get("scan_type")
+            or payload.get("scan_type")
+            or "scan150"
+        )
+        universe = ",".join(
+            {r.get("ticker", "") for r in rows if isinstance(r, Mapping) and r.get("ticker")}
+        )
 
         db.execute(
             """
@@ -115,16 +216,18 @@ async def archive_save(request: Request, db=Depends(get_db)):
             (
                 started,
                 scan_type,
-                settings_json,
+                params_json_text,
                 universe,
                 finished,
                 len(rows),
-                settings_json,
+                settings_json_text,
             ),
         )
         run_id = db.lastrowid
 
         for r in rows:
+            if not isinstance(r, Mapping):
+                continue
             db.execute(
                 """
                 INSERT INTO run_results(
@@ -156,13 +259,17 @@ async def archive_save(request: Request, db=Depends(get_db)):
 async def archive_run(request: Request, db=Depends(get_db)):
     """Compatibility endpoint for archiving runs."""
     payload = await request.json()
+    if not isinstance(payload, Mapping):
+        return JSONResponse({"ok": False, "error": "invalid payload"}, status_code=400)
+
     scan_type = payload.get("scan_type", "")
-    params = payload.get("params", {})
+    params_dict, params_json_text, settings_json_text = _normalize_archive_payload(
+        payload
+    )
     rows = payload.get("rows", [])
     universe = payload.get("universe", [])
 
     started_at = now_et().isoformat()
-    settings_json = json.dumps(params)
     db.execute(
         """
         INSERT INTO runs(
@@ -174,16 +281,18 @@ async def archive_run(request: Request, db=Depends(get_db)):
         (
             started_at,
             scan_type,
-            settings_json,
+            params_json_text,
             ",".join(universe),
             now_et().isoformat(),
             len(rows),
-            settings_json,
+            settings_json_text,
         ),
     )
     run_id = db.lastrowid
 
     for r in rows:
+        if not isinstance(r, Mapping):
+            continue
         db.execute(
             """
             INSERT INTO run_results(
@@ -265,7 +374,7 @@ def results_from_archive(request: Request, run_id: int, db=Depends(get_db)):
     settings_dict: Dict[str, Any] | None = None
     raw_settings_text: str | None = None
     fallback_parsed: Any = None
-    for source in (run.get("params_json"), run.get("settings_json")):
+    for source in (run.get("settings_json"), run.get("params_json")):
         if not source:
             continue
         if isinstance(source, str):
