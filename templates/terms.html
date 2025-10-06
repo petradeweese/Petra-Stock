@@ -16,7 +16,7 @@
     <h1>Terms of Service</h1>
     <p><strong>Effective:</strong> {{ current_year() }}</p>
     <h2>Service overview</h2>
-    <p>Petra Stock provides automated alerts about chart patterns and related market signals to subscribers who opt in. Message frequency varies by market activity and your settings, typically up to 10 msgs/day. Msg &amp; data rates may apply.</p>
+    <p>Petra Stock provides automated alerts about chart patterns and related market signals to subscribers who opt in. {{ sms_frequency_copy() }}</p>
     <h2>Opt-in and opt-out</h2>
     <p>To receive SMS alerts you must verify your phone number and agree to the SMS Consent. Reply <strong>STOP</strong> to cancel at any time. Reply <strong>START</strong> to re-enable alerts (verification may be required). Reply <strong>HELP</strong> for assistance.</p>
     <h2>Disclaimers</h2>
@@ -30,6 +30,12 @@
     <h2>Changes</h2>
     <p>We may update these Terms as our service evolves. When material changes occur we will update this page and notify active subscribers.</p>
     <h2>Contact</h2>
+    {% set contact = business_contact() %}
     <p>Email <a href="mailto:support@petrastock.com">support@petrastock.com</a> or <a href="mailto:alerts@petrastock.com">alerts@petrastock.com</a> for assistance.</p>
+    <p><strong>{{ contact.name }}</strong><br />
+      {{ contact.address_1 }}{% if contact.address_2 %}, {{ contact.address_2 }}{% endif %}<br />
+      {{ contact.city }}, {{ contact.region }} {{ contact.postal }}<br />
+      <a href="tel:{{ contact.phone_href }}">{{ contact.phone }}</a>
+    </p>
   </article>
 {% endblock %}

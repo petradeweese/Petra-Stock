@@ -1,6 +1,6 @@
 {% extends 'base.html' %}
 {% block title %}Petra Stock — Real-Time Pattern Alerts{% endblock %}
-{% block meta_description %}Petra Stock surfaces live pattern scans and automated SMS alerts so you can act on opportunities fast. Message frequency varies by market activity and your settings, typically up to 10 msgs/day.{% endblock %}
+{% block meta_description %}Petra Stock surfaces live pattern scans and automated SMS alerts so you can act on opportunities fast. {{ sms_frequency_copy() }}{% endblock %}
 {% block og_title %}Stay ahead with Petra Stock pattern alerts{% endblock %}
 {% block og_description %}Live scanner, custom SMS alerts, and compliance-ready messaging with Petra Stock. Alerts are informational only and not financial advice.{% endblock %}
 {% block body_class %}marketing{% endblock %}
@@ -20,7 +20,7 @@
       <h1>Real-time pattern alerts for active traders</h1>
       <p class="value-prop">Petra Stock continuously scans equities, highlights actionable setups, and keeps you notified with compliant SMS and email alerts.</p>
       <a class="cta-button" href="/scanner">Enter Scanner</a>
-      <p class="compliance-note">Message frequency varies by market activity and your settings, typically up to 10 msgs/day. Msg &amp; data rates may apply. Alerts are informational only and not financial advice.</p>
+      <p class="compliance-note">{{ sms_frequency_copy() }} Alerts are informational only and not financial advice.</p>
     </div>
   </section>
   <section class="features">
