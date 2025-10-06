@@ -14,8 +14,12 @@
 {% block content %}
   <article class="marketing-page">
     <h1>Contact Us</h1>
+    {% set contact = business_contact() %}
     <p>We’re here to help with questions about Petra Stock, SMS alerts, consent records, and compliance.</p>
     <ul class="contact-list">
+      <li><strong>Company:</strong> {{ contact.name }}</li>
+      <li><strong>Address:</strong> {{ contact.address_1 }}{% if contact.address_2 %}, {{ contact.address_2 }}{% endif %}, {{ contact.city }}, {{ contact.region }} {{ contact.postal }}</li>
+      <li><strong>Phone:</strong> <a href="tel:{{ contact.phone_href }}">{{ contact.phone }}</a></li>
       <li><strong>Support:</strong> <a href="mailto:support@petrastock.com">support@petrastock.com</a></li>
       <li><strong>Privacy:</strong> <a href="mailto:privacy@petrastock.com">privacy@petrastock.com</a></li>
     </ul>

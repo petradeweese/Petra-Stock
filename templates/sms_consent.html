@@ -12,21 +12,36 @@
   <a class="nav-link" href="/terms">Terms of Service</a>
 {% endblock %}
 {% block content %}
+  {% set contact = business_contact() %}
   <article class="marketing-page">
     <h1>SMS Alerts Opt-In</h1>
     <p>Use this form to request SMS alerts from Petra Stock if you do not have access to the in-app Settings page. We’ll send a verification code to confirm your number before enabling messages.</p>
-    <p>Message frequency varies by market activity and your settings, typically up to 10 msgs/day. Msg &amp; data rates may apply. Alerts are informational only and not financial advice.</p>
+    <p>{{ sms_frequency_copy() }} Alerts are informational only and not financial advice.</p>
+    <p>We do not sell or share your phone number or personal information with third parties for their marketing purposes.</p>
     <form class="consent-form" method="post" action="/api/sms/verify/start">
       <label for="consent-phone">Phone number (E.164, e.g., +15551234567)</label>
       <input id="consent-phone" required name="phone" type="tel" placeholder="+15551234567" />
       <label class="checkbox">
         <input required type="checkbox" name="consent" value="1" />
         <span>
-          I agree to receive automated Petra Stock SMS alerts. Msg &amp; data rates may apply. Message frequency varies by market activity and your settings, typically up to 10 msgs/day. Alerts are informational only and not financial advice. By checking this box, I agree to the <a href="/terms" target="_blank" rel="noopener">Terms</a> and <a href="/privacy" target="_blank" rel="noopener">Privacy Policy</a>.
+          I agree to receive automated Petra Stock SMS alerts about pattern signals and performance updates.<br />
+          {{ sms_frequency_copy() }}<br />
+          Text STOP to opt out, HELP for help.<br />
+          By checking this box, I agree to the <a href="/terms" target="_blank" rel="noopener">Terms</a> and <a href="/privacy" target="_blank" rel="noopener">Privacy Policy</a>.
         </span>
       </label>
-      <p class="keyword-note">Reply <strong>STOP</strong> to opt out, <strong>HELP</strong> for help. Contact <a href="mailto:support@petrastock.com">support@petrastock.com</a> with questions.</p>
+      <p class="keyword-note">Reply <strong>STOP</strong> to opt out, <strong>HELP</strong> for help.</p>
+      <p class="keyword-note">We do not sell or share your phone number or personal information with third parties for their marketing purposes.</p>
+      <p class="keyword-note">Contact <a href="mailto:support@petrastock.com">support@petrastock.com</a> or call <a href="tel:{{ contact.phone_href }}">{{ contact.phone }}</a> with questions.</p>
       <button type="submit">Send Verification Code</button>
     </form>
+    <section class="contact-block" aria-labelledby="sms-contact-heading">
+      <h2 id="sms-contact-heading">Business Contact</h2>
+      <p><strong>{{ contact.name }}</strong><br />
+        {{ contact.address_1 }}{% if contact.address_2 %}, {{ contact.address_2 }}{% endif %}<br />
+        {{ contact.city }}, {{ contact.region }} {{ contact.postal }}<br />
+        <a href="tel:{{ contact.phone_href }}">{{ contact.phone }}</a> · <a href="mailto:support@petrastock.com">support@petrastock.com</a>
+      </p>
+    </section>
   </article>
 {% endblock %}

@@ -64,7 +64,7 @@ from services.favorites import canonical_direction, ensure_favorite_directions
 from services.notify import send_email_smtp
 from services.scanner_params import coerce_scan_params
 from services.telemetry import log as log_telemetry
-from services.config import DEBUG_SIMULATION
+from services.config import DEBUG_SIMULATION, SMS_MAX_PER_MONTH
 from services.favorites_alerts import deliver_preview_alert
 from services.simulator import SimEvent, build_sim_hit, build_sim_stop
 from services.scheduler import _align_to_bar, _dedupe_key, was_sent_key
@@ -171,10 +171,11 @@ def _build_scan_plan(tickers: list[str], params: dict) -> ScanPlan:
     )
 
 _SMS_CONSENT_TEXT = (
-    "I agree to receive automated Petra Stock SMS alerts. Msg & data rates may apply. "
-    "Message frequency varies by market activity and your settings, typically up to 10 msgs/day. "
-    "Alerts are informational only and not financial advice. By checking this box, I agree to the "
-    "Terms and Privacy Policy."
+    "I agree to receive automated Petra Stock SMS alerts about pattern signals and "
+    "performance updates. "
+    f"No more than {SMS_MAX_PER_MONTH} texts/month. Msg & data rates may apply. "
+    "Text STOP to opt out, HELP for help. "
+    "By checking this box, I agree to the Terms and Privacy Policy."
 )
 
 

@@ -22,13 +22,19 @@
       <li>Log consent details so we can honor STOP/START/HELP keywords.</li>
       <li>Analyze aggregate usage trends to improve alert quality.</li>
     </ul>
-    <p>Message frequency varies by market activity and your settings, typically up to 10 msgs/day. Msg &amp; data rates may apply. Alerts are informational only and not financial advice.</p>
+    <p>We do not sell or share your phone number or personal information with third parties for their marketing purposes.</p>
+    <p>{{ sms_frequency_copy() }} Alerts are informational only and not financial advice.</p>
     <h2>Opt-out and deletion</h2>
     <p>Reply <strong>STOP</strong> to any Petra Stock SMS to opt out immediately. Reply <strong>HELP</strong> for assistance. You may email <a href="mailto:privacy@petrastock.com">privacy@petrastock.com</a> to request deletion of consent logs where permitted by law.</p>
     <h2>Data retention</h2>
     <p>We retain consent records for audit purposes while you are subscribed and as required to demonstrate compliance. Delivery metadata is kept for a limited period to troubleshoot issues and satisfy carrier requests.</p>
     <h2>Contact</h2>
-    <p>Questions about this policy? Email <a href="mailto:privacy@petrastock.com">privacy@petrastock.com</a> or <a href="mailto:support@petrastock.com">support@petrastock.com</a>.</p>
+    {% set contact = business_contact() %}
+    <p>Questions about this policy? Email <a href="mailto:privacy@petrastock.com">privacy@petrastock.com</a> or <a href="mailto:support@petrastock.com">support@petrastock.com</a>, or call <a href="tel:{{ contact.phone_href }}">{{ contact.phone }}</a>.</p>
+    <p><strong>{{ contact.name }}</strong><br />
+      {{ contact.address_1 }}{% if contact.address_2 %}, {{ contact.address_2 }}{% endif %}<br />
+      {{ contact.city }}, {{ contact.region }} {{ contact.postal }}
+    </p>
     <p class="footnote">Petra Stock will update this page if practices change and notify subscribers as required.</p>
   </article>
 {% endblock %}

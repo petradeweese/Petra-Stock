@@ -462,6 +462,7 @@
   </div>
   <div class="card sms-card">
     <div class="card-body">
+      {% set contact = business_contact() %}
       <h2>SMS Alerts (Opt-in)</h2>
       <p id="sms-status-text" class="note sms-status {{ 'status-success' if sms_state.active else 'status-error' }}">
         {% if sms_state.active and sms_state.phone %}
@@ -473,13 +474,17 @@
       <label class="checkbox" style="gap:0.5rem; align-items:flex-start;">
         <input type="checkbox" id="sms-consent-checkbox" />
         <span id="sms-consent-copy" data-consent="{{ sms_consent_text }}">
-          I agree to receive automated Petra Stock SMS alerts. Msg &amp; data rates may apply.
-          Message frequency varies by market activity and my settings, typically up to 10 msgs/day.
-          Alerts are informational only and not financial advice. By checking this box, I agree to the
+          I agree to receive automated Petra Stock SMS alerts about pattern signals and performance updates.<br />
+          {{ sms_frequency_copy() }}<br />
+          Text STOP to opt out, HELP for help.<br />
+          By checking this box, I agree to the
           <a href="/terms" target="_blank" rel="noopener">Terms</a>
           and <a href="/privacy" target="_blank" rel="noopener">Privacy Policy</a>.
         </span>
       </label>
+      <p class="note">We do not sell or share your phone number or personal information with third parties for their marketing purposes.</p>
+      <p class="note">Alerts are informational only and not financial advice.</p>
+      <p class="note">Contact <a href="mailto:support@petrastock.com">support@petrastock.com</a> or call <a href="tel:{{ contact.phone_href }}">{{ contact.phone }}</a> with questions.</p>
       <p class="note" id="sms-unavailable-note" {% if twilio_verify_enabled %}hidden{% endif %}>
         Verification is unavailable. SMS alerts cannot be activated until Twilio verification is enabled.
       </p>

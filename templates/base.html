@@ -7,7 +7,7 @@
   {% set canonical_path = canonical_path or (request.url.path if request else '/') %}
   {% set canonical_href = 'https://petrastock.com' + canonical_path %}
   <link rel="canonical" href="{{ canonical_href }}" />
-  <meta name="description" content="{% block meta_description %}Live pattern scanning, automated alerts, and compliance-ready SMS from Petra Stock. Message frequency varies by market activity and your settings, typically up to 10 msgs/day.{% endblock %}" />
+  <meta name="description" content="{% block meta_description %}Live pattern scanning, automated alerts, and compliance-ready SMS from Petra Stock. {{ sms_frequency_copy() }}{% endblock %}" />
   <meta property="og:type" content="website" />
   <meta property="og:site_name" content="Petra Stock" />
   <meta property="og:url" content="{{ canonical_href }}" />
@@ -36,6 +36,7 @@
   <div class="wrap">
     {% block content %}{% endblock %}
   </div>
+  {% set contact = business_contact() %}
   <footer class="site-footer">
     <div class="footer-links">
       <a href="/sms-consent">SMS Consent</a>
@@ -45,7 +46,10 @@
       <a href="/terms">Terms of Service</a>
     </div>
     <div class="footer-meta">
-      © {{ current_year() }} Petra Stock · <a href="mailto:support@petrastock.com">support@petrastock.com</a> · <a href="https://petrastock.com">https://petrastock.com</a>
+      © {{ current_year() }} Petra Stock · <a href="mailto:support@petrastock.com">support@petrastock.com</a> · <a href="tel:{{ contact.phone_href }}">{{ contact.phone }}</a>
+    </div>
+    <div class="footer-meta">
+      {{ contact.name }} · {{ contact.address_1 }}{% if contact.address_2 %}, {{ contact.address_2 }}{% endif %}, {{ contact.city }}, {{ contact.region }} {{ contact.postal }}
     </div>
   </footer>
   {% block extra_body %}{% endblock %}
