@@ -483,7 +483,7 @@ def get_status(db) -> LFStatus:
     status = str(status_value or "inactive")
     started_raw = _row_value(state, "started_at", 1)
     started_at = str(started_raw) if started_raw else None
-    equity = _latest_equity(db)
+    equity = float(_latest_equity(db) or 0.0)
     open_positions = _count_open_positions(db)
     realized_today = _realized_today(db)
     unrealized = _unrealized_pl(db)
@@ -505,7 +505,7 @@ def status_payload(db) -> Dict[str, Any]:
     return {
         "status": st.status,
         "started_at": st.started_at,
-        "account_equity": st.account_equity,
+        "account_equity": float(st.account_equity or 0.0),
         "open_positions": st.open_positions,
         "realized_pl_day": st.realized_pl_day,
         "unrealized_pl": st.unrealized_pl,
@@ -546,13 +546,24 @@ def metrics_snapshot(db) -> Dict[str, float]:
 
 
 def _latest_equity(db) -> float:
-    row = db.execute(
-        "SELECT balance FROM scalper_lf_equity ORDER BY ts DESC LIMIT 1"
-    ).fetchone()
-    if row:
-        balance = _row_value(row, "balance", 0)
-        if balance is not None:
-            return float(balance)
+    result = db.execute("SELECT balance FROM scalper_lf_equity ORDER BY ts DESC LIMIT 1")
+    scalar = getattr(result, "scalar_one_or_none", None)
+    val: Any = None
+    if callable(scalar):
+        val = scalar()
+    else:
+        row = getattr(result, "fetchone", lambda: None)()
+        if isinstance(row, Mapping):
+            val = row.get("balance")
+        elif row is not None:
+            try:
+                val = row[0]
+            except (IndexError, TypeError):
+                val = None
+        else:
+            val = None
+    if val is not None:
+        return float(val)
     settings = load_settings(db)
     return float(settings.starting_balance)
 

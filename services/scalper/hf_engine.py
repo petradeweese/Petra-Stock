@@ -420,7 +420,7 @@ def get_status(db) -> HFStatus:
     started_raw = _row_value(state, "started_at")
     started_at = str(started_raw) if started_raw else None
     halted = bool(_row_value(state, "halted_at"))
-    equity = _latest_equity(db)
+    equity = float(_latest_equity(db) or 0.0)
     open_positions = _count_open_positions(db)
     realized_today = _realized_today(db)
     win_rate = _win_rate(db)
@@ -442,7 +442,7 @@ def status_payload(db) -> Dict[str, Any]:
     return {
         "status": st.status,
         "started_at": st.started_at,
-        "account_equity": st.account_equity,
+        "account_equity": float(st.account_equity or 0.0),
         "open_positions": st.open_positions,
         "realized_pl_day": st.realized_pl_day,
         "unrealized_pl": st.unrealized_pl,
@@ -463,10 +463,23 @@ def calculate_position_size(balance: float, pct_per_trade: float, mid_price: flo
 
 
 def _latest_equity(db) -> float:
-    row = db.execute(
-        "SELECT balance FROM scalper_hf_equity ORDER BY ts DESC LIMIT 1"
-    ).fetchone()
-    return float(row["balance"]) if row else 0.0
+    result = db.execute("SELECT balance FROM scalper_hf_equity ORDER BY ts DESC LIMIT 1")
+    scalar = getattr(result, "scalar_one_or_none", None)
+    val: Any = None
+    if callable(scalar):
+        val = scalar()
+    else:
+        row = getattr(result, "fetchone", lambda: None)()
+        if isinstance(row, Mapping):
+            val = row.get("balance")
+        elif row is not None:
+            try:
+                val = row[0]
+            except (IndexError, TypeError):
+                val = None
+        else:
+            val = None
+    return float(val) if val is not None else 0.0
 
 
 def _count_open_positions(db) -> int:
