@@ -1,0 +1,19 @@
+{% set active = is_favorite if is_favorite is not none else False %}
+{% set label = 'Remove from favorites' if active else 'Add to favorites' %}
+<button
+  type="button"
+  class="btn-fav{% if active %} is-active{% endif %}"
+  hx-post="/favorites/toggle"
+  hx-target="this"
+  hx-swap="outerHTML"
+  data-ticker="{{ ticker }}"
+  data-direction="{{ direction }}"
+  data-interval="{{ interval }}"
+  data-rule="{{ rule }}"
+  {% if favorite_id is not none %}data-favorite-id="{{ favorite_id }}"{% endif %}
+  aria-pressed="{{ 'true' if active else 'false' }}"
+  aria-label="{{ label }}"
+  title="{{ label }}"
+>
+  {% if active %}⭐{% else %}☆{% endif %}
+</button>

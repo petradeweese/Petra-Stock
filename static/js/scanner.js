@@ -115,11 +115,22 @@
         headers:{'Content-Type':'application/json'},
         body: JSON.stringify(payload)
       });
-      const data = await res.json();
-      if (data?.ok) showToast(`Added ${payload.ticker} to Favorites`);
-      else showToast(data?.error || 'Failed to add favorite', false);
+      const text = await res.text();
+      let data = null;
+      if(text){
+        try{ data = JSON.parse(text); }
+        catch(err){ data = null; }
+      }
+      if(!res.ok){
+        const message = (data && data.error) || (text && text.trim()) || res.statusText || 'Failed to add favorite';
+        showToast(message, false);
+        return;
+      }
+      if(data?.ok) showToast(`Added ${payload.ticker} to Favorites`);
+      else showToast((data && data.error) || 'Failed to add favorite', false);
     }catch(e){
-      showToast('Network error adding favorite', false);
+      const message = (e && e.message) ? e.message : 'Network error adding favorite';
+      showToast(message, false);
     }
   }
 
@@ -277,6 +288,16 @@
   window.addEventListener('blur', hideMenu);
   window.addEventListener('resize', hideMenu);
   window.addEventListener('scroll', hideMenu);
+
+  if(document.body){
+    document.body.addEventListener('htmx:responseError', function(evt){
+      const xhr = evt?.detail?.xhr;
+      const responseText = typeof xhr?.responseText === 'string' ? xhr.responseText.trim() : '';
+      const statusLabel = xhr?.status ? `${xhr.status}${xhr.statusText ? ' ' + xhr.statusText : ''}`.trim() : '';
+      const message = responseText || statusLabel || 'Request failed';
+      showToast(message, false);
+    });
+  }
 
   document.getElementById('ctx-add-fav').addEventListener('click', async function(ev){
     ev.stopPropagation();

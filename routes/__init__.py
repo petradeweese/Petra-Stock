@@ -113,6 +113,28 @@ _HEATMAP_CACHE: Dict[str, Any] = {"data": None, "expires": 0.0}
 _SCAN_TASKS: dict[str, asyncio.Task] = {}
 
 
+_FAVORITE_INSERT_COLUMNS: tuple[str, ...] = (
+    "ticker",
+    "direction",
+    "interval",
+    "rule",
+    "target_pct",
+    "stop_pct",
+    "window_value",
+    "window_unit",
+    "ref_avg_dd",
+    "lookback_years",
+    "min_support",
+    "support_snapshot",
+    "roi_snapshot",
+    "hit_pct_snapshot",
+    "dd_pct_snapshot",
+    "rule_snapshot",
+    "settings_json_snapshot",
+    "snapshot_at",
+)
+
+
 @dataclass
 class ScanPlan:
     tickers: list[str]
@@ -3143,55 +3165,98 @@ def favorites_delete_duplicates(db=Depends(get_db)):
     return RedirectResponse(url="/favorites", status_code=302)
 
 
-@router.post("/favorites/add")
-async def favorites_add(request: Request, db=Depends(get_db)):
-    payload = await request.json()
-    t = (payload.get("ticker") or "").strip().upper()
-    rule = payload.get("rule") or ""
+def _favorite_record_from_payload(payload: Mapping[str, Any]) -> tuple[dict[str, Any], str | None]:
+    ticker = str(payload.get("ticker") or "").strip().upper()
+    rule = str(payload.get("rule") or "").strip()
+    if not ticker or not rule:
+        return {}, "missing ticker or rule"
+
     direction_raw = payload.get("direction")
     direction = canonical_direction(direction_raw) or "UP"
+
     interval_raw = payload.get("interval")
-    interval = (interval_raw or "15m").strip()
-    ref_dd = payload.get("ref_avg_dd")
-    roi = payload.get("roi_snapshot")
-    hit = payload.get("hit_pct_snapshot")
-    dd = payload.get("dd_pct_snapshot")
-    support_raw = payload.get("support_snapshot")
-    rule_snap = payload.get("rule_snapshot") or rule
-    settings_raw = payload.get("settings_json_snapshot")
+    interval = str(interval_raw or "").strip()
+    if not interval:
+        interval = "15m"
+
     target_pct = _coerce_float(payload.get("target_pct"))
     stop_pct = _coerce_float(payload.get("stop_pct"))
     window_value = _coerce_float(payload.get("window_value"))
-    window_unit = (payload.get("window_unit") or "").strip()
+    window_unit = str(payload.get("window_unit") or "").strip()
+
+    roi_snapshot = _coerce_float(payload.get("roi_snapshot"))
+    hit_snapshot = _coerce_float(payload.get("hit_pct_snapshot"))
+    dd_snapshot = _coerce_float(payload.get("dd_pct_snapshot"))
+
+    support_raw = payload.get("support_snapshot")
+    support = _coerce_int(support_raw)
+
+    ref_dd = payload.get("ref_avg_dd")
     try:
-        ref_dd = float(ref_dd)
-        if ref_dd > 1:
-            ref_dd /= 100.0
+        if ref_dd in (None, ""):
+            ref_dd_value = None
+        else:
+            ref_dd_value = float(ref_dd)
+            if ref_dd_value > 1:
+                ref_dd_value /= 100.0
     except (TypeError, ValueError):
-        ref_dd = None
+        ref_dd_value = None
 
-    if not t or not rule:
-        return JSONResponse(
-            {"ok": False, "error": "missing ticker or rule"}, status_code=400
-        )
-
+    settings_candidates = (
+        payload.get("settings_json_snapshot"),
+        payload.get("settings"),
+    )
     settings_dict: dict[str, Any] = {}
     settings_json: str | None = None
-    if isinstance(settings_raw, dict):
-        settings_dict = settings_raw
-        settings_json = json.dumps(settings_raw)
-    elif isinstance(settings_raw, str) and settings_raw:
+    for candidate in settings_candidates:
+        if candidate in (None, ""):
+            continue
+        if isinstance(candidate, dict):
+            settings_dict = dict(candidate)
+            try:
+                settings_json = json.dumps(settings_dict, default=str)
+            except TypeError:
+                settings_json = json.dumps(settings_dict, default=str)
+            break
+        if isinstance(candidate, (bytes, bytearray)):
+            try:
+                candidate = candidate.decode("utf-8", "ignore")
+            except Exception:
+                candidate = candidate.decode("latin-1", "ignore")
+        if isinstance(candidate, str):
+            text = candidate.strip()
+            if not text:
+                continue
+            try:
+                parsed = json.loads(text)
+            except Exception:
+                settings_json = text
+                break
+            if isinstance(parsed, dict):
+                settings_dict = parsed
+                settings_json = json.dumps(parsed, default=str)
+            else:
+                settings_json = text
+            break
+        else:
+            try:
+                settings_json = json.dumps(candidate, default=str)
+            except TypeError:
+                settings_json = json.dumps(str(candidate))
+            break
+
+    if settings_json is None:
         try:
-            settings_dict = json.loads(settings_raw)
-            settings_json = json.dumps(settings_dict)
-        except Exception:
-            settings_json = settings_raw
-    elif settings_raw not in (None, ""):
-        settings_json = json.dumps(settings_raw)
+            settings_json = json.dumps(settings_dict or {}, default=str)
+        except TypeError:
+            settings_json = json.dumps(str(settings_dict))
 
     params: dict[str, Any] = {}
     if settings_dict:
-        params = coerce_scan_params(settings_dict)
+        try:
+            params = coerce_scan_params(settings_dict) or {}
+        except Exception:
+            params = {}
 
     lookback = _coerce_float(payload.get("lookback_years"))
     min_support = _coerce_int(payload.get("min_support"))
@@ -3210,9 +3275,7 @@ async def favorites_add(request: Request, db=Depends(get_db)):
             unit = params.get("window_unit")
             if isinstance(unit, str):
                 window_unit = unit.strip()
-        if (interval_raw in (None, "")) and isinstance(
-            params.get("interval"), str
-        ):
+        if not interval_raw and isinstance(params.get("interval"), str):
             interval = params.get("interval") or interval
         if direction_raw in (None, ""):
             snapshot_dir = canonical_direction(params.get("direction"))
@@ -3225,11 +3288,8 @@ async def favorites_add(request: Request, db=Depends(get_db)):
         stop_pct = 0.5
     if window_value is None:
         window_value = 4.0
-    window_unit = window_unit or "Hours"
-
-    lookback = _coerce_float(lookback)
-    min_support = _coerce_int(min_support)
-    support = _coerce_int(support_raw)
+    if not window_unit:
+        window_unit = "Hours"
 
     support_payload: dict[str, Any] = {}
     if support is not None:
@@ -3238,48 +3298,164 @@ async def favorites_add(request: Request, db=Depends(get_db)):
         support_payload["min_support"] = min_support
     if lookback is not None:
         support_payload["lookback_years"] = lookback
-
     support_snapshot = json.dumps(support_payload) if support_payload else None
 
+    record = {
+        "ticker": ticker,
+        "direction": direction,
+        "interval": interval,
+        "rule": rule,
+        "target_pct": target_pct,
+        "stop_pct": stop_pct,
+        "window_value": window_value,
+        "window_unit": window_unit,
+        "ref_avg_dd": ref_dd_value,
+        "lookback_years": lookback,
+        "min_support": min_support,
+        "support_snapshot": support_snapshot,
+        "roi_snapshot": roi_snapshot,
+        "hit_pct_snapshot": hit_snapshot,
+        "dd_pct_snapshot": dd_snapshot,
+        "rule_snapshot": payload.get("rule_snapshot") or rule,
+        "settings_json_snapshot": settings_json,
+    }
+
+    return record, None
+
+
+def _insert_favorite_record(db: sqlite3.Cursor, record: Mapping[str, Any]) -> None:
+    columns = ", ".join(_FAVORITE_INSERT_COLUMNS)
+    placeholders = ", ".join("?" for _ in _FAVORITE_INSERT_COLUMNS)
+    values = tuple(record.get(column) for column in _FAVORITE_INSERT_COLUMNS)
     db.execute(
-        """INSERT INTO favorites(
-                ticker, direction, interval, rule,
-                target_pct, stop_pct, window_value, window_unit,
-                ref_avg_dd,
-                lookback_years, min_support, support_snapshot,
-                roi_snapshot, hit_pct_snapshot, dd_pct_snapshot,
-                rule_snapshot, settings_json_snapshot, snapshot_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (
-            t,
-            direction,
-            interval,
-            rule,
-            target_pct,
-            stop_pct,
-            window_value,
-            window_unit,
-            ref_dd,
-            lookback,
-            min_support,
-            support_snapshot,
-            roi,
-            hit,
-            dd,
-            rule_snap,
-            settings_json,
-            now_et().isoformat(),
-        ),
+        f"INSERT INTO favorites({columns}) VALUES ({placeholders})",
+        values,
     )
-    db.connection.commit()
+
+
+def _render_toggle_error(message: str) -> str:
+    safe = html.escape(message or "Unable to update favorite", quote=False)
+    return f"<div class='toast error'>{safe}</div>"
+
+
+@router.post("/favorites/add")
+async def favorites_add(request: Request, db=Depends(get_db)):
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = None
+    if not isinstance(payload, Mapping):
+        return JSONResponse({"ok": False, "error": "invalid payload"}, status_code=400)
+
+    record, error = _favorite_record_from_payload(payload)
+    if error:
+        return JSONResponse({"ok": False, "error": error}, status_code=400)
+
+    record["snapshot_at"] = now_et().isoformat()
+    try:
+        _insert_favorite_record(db, record)
+        fav_id = db.lastrowid
+        db.connection.commit()
+    except Exception:
+        logger.exception("favorite_insert_failed")
+        return JSONResponse({"ok": False, "error": "Failed to add favorite"}, status_code=500)
+
     log_telemetry(
         {
             "type": "favorite_saved",
-            "symbol": t,
-            "lookback_years": lookback,
+            "symbol": record.get("ticker"),
+            "lookback_years": record.get("lookback_years"),
         }
     )
-    return {"ok": True}
+
+    response: dict[str, Any] = {"ok": True}
+    if fav_id is not None:
+        response["favorite_id"] = fav_id
+    return response
+
+
+@router.post("/favorites/toggle")
+async def favorites_toggle(request: Request, db=Depends(get_db)):
+    content_type = request.headers.get("content-type", "")
+    payload: dict[str, Any] = {}
+    if "application/json" in content_type:
+        try:
+            parsed = await request.json()
+        except Exception:
+            parsed = None
+        if isinstance(parsed, Mapping):
+            payload = dict(parsed)
+    else:
+        try:
+            form = await request.form()
+            payload = {k: v for k, v in form.multi_items()}
+        except Exception:
+            payload = {}
+
+    record, error = _favorite_record_from_payload(payload)
+    if error:
+        return HTMLResponse(_render_toggle_error(error), status_code=400)
+
+    ticker = record["ticker"]
+    direction = record["direction"]
+    interval = record["interval"]
+    rule = record["rule"]
+
+    try:
+        db.execute(
+            """
+            SELECT 1 FROM favorites
+            WHERE ticker=? AND direction=? AND interval=? AND rule=?
+            LIMIT 1
+            """,
+            (ticker, direction, interval, rule),
+        )
+        existing = db.fetchone()
+    except Exception:
+        logger.exception("favorite_toggle_lookup_failed")
+        return HTMLResponse(
+            _render_toggle_error("Failed to toggle favorite"), status_code=400
+        )
+
+    if existing:
+        try:
+            db.execute(
+                """
+                DELETE FROM favorites
+                WHERE ticker=? AND direction=? AND interval=? AND rule=?
+                """,
+                (ticker, direction, interval, rule),
+            )
+            db.connection.commit()
+        except Exception:
+            logger.exception("favorite_toggle_delete_failed")
+            return HTMLResponse(
+                _render_toggle_error("Failed to remove favorite"), status_code=400
+            )
+        return HTMLResponse("", status_code=204)
+
+    record["snapshot_at"] = now_et().isoformat()
+    try:
+        _insert_favorite_record(db, record)
+        fav_id = db.lastrowid
+        db.connection.commit()
+    except Exception:
+        logger.exception("favorite_toggle_insert_failed")
+        return HTMLResponse(
+            _render_toggle_error("Failed to add favorite"), status_code=400
+        )
+
+    fragment = templates.get_template("partials/fav_star.html").render(
+        {
+            "ticker": ticker,
+            "direction": direction,
+            "interval": interval,
+            "rule": rule,
+            "favorite_id": fav_id,
+            "is_favorite": True,
+        }
+    )
+    return HTMLResponse(fragment, status_code=201)
 
 
 @router.post("/favorites/test_alert")
