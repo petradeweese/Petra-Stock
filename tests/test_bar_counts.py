@@ -55,6 +55,8 @@ def test_full_day_bar_count(monkeypatch, tmp_path):
             get_price_history=fake_history,
             get_quote=lambda *a, **k: {},
             last_status=lambda: 200,
+            disabled_state=lambda: (False, None, None, None),
+            disable=lambda **_: None,
         ),
     )
     monkeypatch.setattr(
@@ -98,6 +100,8 @@ def test_half_day_bar_count(monkeypatch, tmp_path):
             get_price_history=fake_history,
             get_quote=lambda *a, **k: {},
             last_status=lambda: 200,
+            disabled_state=lambda: (False, None, None, None),
+            disable=lambda **_: None,
         ),
     )
     monkeypatch.setattr(

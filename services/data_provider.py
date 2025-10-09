@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 import yfinance as yf
+from prometheus_client import Counter, Histogram  # type: ignore
 
 from config import settings
 import db
@@ -35,6 +36,39 @@ EXPECTED_COLUMNS = ["Open", "High", "Low", "Close", "Adj Close", "Volume"]
 
 INTRADAY_INTERVALS = {"1m", "2m", "5m", "15m", "30m", "60m"}
 INTRADAY_LOOKBACK = dt.timedelta(days=59)
+
+
+def _normalize_reason_label(value: Optional[str]) -> str:
+    if not value:
+        return "schwab_unavailable"
+    cleaned = value.strip().lower()
+    cleaned = cleaned.replace(" ", "_")
+    safe = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in cleaned)
+    safe = safe.strip("_")
+    return safe or "schwab_unavailable"
+
+
+schwab_fallback_total = Counter(
+    "schwab_fallback_total",
+    "Times Schwab data fetches fell back to alternate providers",
+)
+_schwab_fallback_reason_counters: Dict[str, Counter] = {}
+
+
+def _increment_fallback_reason(reason: str) -> None:
+    key = _normalize_reason_label(reason)
+    counter = _schwab_fallback_reason_counters.get(key)
+    if counter is None:
+        counter = Counter(
+            f"schwab_fallback_{key}_total",
+            "Times Schwab data fetches fell back grouped by reason",
+        )
+        _schwab_fallback_reason_counters[key] = counter
+    counter.inc()
+schwab_retry_seconds = Histogram(
+    "schwab_retry_time_seconds",
+    "Time spent attempting Schwab before falling back",
+)
 
 
 def _ensure_utc(ts: dt.datetime) -> dt.datetime:
@@ -285,8 +319,16 @@ async def _fetch_intraday_range(
 
     initial_rows = _fetch_from_db(symbol_norm, interval, start, end)
     if end <= cutoff:
+        if initial_rows:
+            logger.info(
+                "db_only_intraday symbol=%s interval=%s rows=%d",
+                symbol_norm,
+                interval,
+                len(initial_rows),
+            )
+            return initial_rows, "db"
         logger.info(
-            "db_only_intraday symbol=%s interval=%s rows=%d",
+            "db_only_intraday symbol=%s interval=%s rows=%d reason=out_of_lookback",
             symbol_norm,
             interval,
             len(initial_rows),
@@ -595,7 +637,9 @@ def _align_to_session(df: pd.DataFrame) -> pd.DataFrame:
         df.index = df.index.tz_convert(dt.timezone.utc)
     df = df.tz_convert(ny)
     if not _include_prepost():
-        df = df.between_time("09:30", "16:00")
+        trimmed = df.between_time("09:30", "16:00")
+        if not trimmed.empty:
+            df = trimmed
     return df.tz_convert("UTC")
 
 
@@ -611,6 +655,63 @@ async def _fetch_single(
     t0 = time.monotonic()
     attempts = 0
     errors: List[str] = []
+    error_labels: List[str] = []
+
+    async def _finish_with_fallback(reason_hint: Optional[str] = None) -> Tuple[pd.DataFrame, str]:
+        lost = time.monotonic() - t0
+        reason_label = reason_hint or (error_labels[-1] if error_labels else "")
+        fallback_reason = _normalize_reason_label(reason_label)
+        skip_network = fallback_reason in {
+            "auth_error",
+            "schwab_disabled",
+        }
+        if skip_network:
+            df = pd.DataFrame(columns=EXPECTED_COLUMNS)
+            df.index = pd.DatetimeIndex([], tz="UTC")
+        else:
+            df = await _fetch_yfinance(symbol, start, end, interval)
+            df = _align_to_session(df)
+        duration = time.monotonic() - t0
+        rows = len(df)
+        reason_text = ";".join(errors) or "schwab_unavailable"
+        logger.info(
+            "yfinance_fetch symbol=%s interval=%s rows=%d duration=%.2f reason=%s",
+            symbol,
+            interval,
+            rows,
+            duration,
+            reason_text,
+        )
+        logger.info(
+            "yfinance_window symbol=%s ny_start=%s ny_end=%s "
+            "utc_start_ms=%d utc_end_ms=%d bars_returned=%d",
+            symbol,
+            ny_start.isoformat(),
+            ny_end.isoformat(),
+            start_ms,
+            end_ms,
+            rows,
+        )
+        provider = "yfinance" if rows and not skip_network else "none"
+        df.attrs["provider"] = provider
+        schwab_fallback_total.inc()
+        _increment_fallback_reason(fallback_reason)
+        schwab_retry_seconds.observe(lost)
+        return df, provider
+
+    disabled, disabled_reason, disabled_status, _ = schwab_client.disabled_state()
+    if disabled:
+        reason = disabled_reason or "schwab_disabled"
+        errors.append(reason)
+        error_labels.append(reason)
+        logger.info(
+            "schwab_disabled_skip symbol=%s interval=%s reason=%s status=%s",
+            symbol,
+            interval,
+            reason,
+            disabled_status if disabled_status is not None else "unknown",
+        )
+        return await _finish_with_fallback(reason)
 
     while attempts < max(1, settings.fetch_retry_max):
         attempts += 1
@@ -656,6 +757,7 @@ async def _fetch_single(
                 duration,
             )
             errors.append("empty")
+            error_labels.append("empty")
             break
         except (SchwabAPIError, SchwabAuthError) as exc:
             errors.append(str(exc))
@@ -669,6 +771,20 @@ async def _fetch_single(
                 duration,
                 exc,
             )
+            if isinstance(exc, SchwabAuthError):
+                error_labels.append("auth_error")
+                schwab_client.disable(
+                    reason="auth_error", status_code=status, error=exc
+                )
+                break
+            if status == 400:
+                error_labels.append("http_400")
+                schwab_client.disable(reason="http_400", status_code=status)
+                break
+            if status is not None and 400 <= status < 500:
+                error_labels.append(f"http_{status}")
+                break
+            error_labels.append("error")
             if attempts >= settings.fetch_retry_max:
                 logger.warning(
                     "schwab_fetch_failed symbol=%s attempts=%d", symbol, attempts
@@ -685,6 +801,7 @@ async def _fetch_single(
             await asyncio.sleep(wait / 1000)
         except Exception as exc:  # pragma: no cover - defensive
             errors.append(str(exc))
+            error_labels.append("exception")
             duration = time.monotonic() - t0
             logger.exception(
                 "schwab_fetch_exception symbol=%s interval=%s duration=%.2f",
@@ -704,31 +821,7 @@ async def _fetch_single(
             )
             await asyncio.sleep(wait / 1000)
 
-    df = await _fetch_yfinance(symbol, start, end, interval)
-    df = _align_to_session(df)
-    duration = time.monotonic() - t0
-    rows = len(df)
-    logger.info(
-        "yfinance_fetch symbol=%s interval=%s rows=%d duration=%.2f reason=%s",
-        symbol,
-        interval,
-        rows,
-        duration,
-        ";".join(errors) or "schwab_unavailable",
-    )
-    logger.info(
-        "yfinance_window symbol=%s ny_start=%s ny_end=%s "
-        "utc_start_ms=%d utc_end_ms=%d bars_returned=%d",
-        symbol,
-        ny_start.isoformat(),
-        ny_end.isoformat(),
-        start_ms,
-        end_ms,
-        rows,
-    )
-    provider = "yfinance" if rows else "none"
-    df.attrs["provider"] = provider
-    return df, provider
+    return await _finish_with_fallback()
 
 
 async def _fetch_yfinance(

@@ -15,7 +15,12 @@ def test_get_quote_falls_back_to_yfinance(monkeypatch):
     monkeypatch.setattr(
         data_provider,
         "schwab_client",
-        SimpleNamespace(get_quote=fake_quote, get_price_history=lambda *a, **k: None),
+        SimpleNamespace(
+            get_quote=fake_quote,
+            get_price_history=lambda *a, **k: None,
+            disabled_state=lambda: (False, None, None, None),
+            disable=lambda **_: None,
+        ),
     )
     monkeypatch.setattr(data_provider, "_fetch_yfinance_quote", fake_yf)
 

@@ -1,4 +1,5 @@
 import asyncio
+import asyncio
 import datetime as dt
 import json
 import urllib.parse
@@ -55,6 +56,38 @@ def test_refresh_invalid_grant_triggers_reauth(monkeypatch):
             asyncio.run(client._refresh_access_token())
 
         assert settings.schwab_refresh_token == ""
+    finally:
+        settings.schwab_refresh_token = original_token
+        client.set_refresh_token(original_token)
+
+
+def test_refresh_failure_cached(monkeypatch):
+    calls = 0
+
+    async def fake_request(method, url, **kwargs):
+        nonlocal calls
+        calls += 1
+        return DummyResponse(
+            400, {"error": "invalid_client", "error_description": "bad credentials"}
+        )
+
+    monkeypatch.setattr(schwab_client.http_client, "request", fake_request)
+    client = schwab_client.SchwabClient()
+    original_token = settings.schwab_refresh_token
+
+    try:
+        client.set_refresh_token("stale-token")
+        settings.schwab_refresh_token = "stale-token"
+
+        with pytest.raises(schwab_client.SchwabAuthError):
+            asyncio.run(client._refresh_access_token())
+
+        assert calls == 1
+
+        with pytest.raises(schwab_client.SchwabAuthError):
+            asyncio.run(client._refresh_access_token())
+
+        assert calls == 1
     finally:
         settings.schwab_refresh_token = original_token
         client.set_refresh_token(original_token)

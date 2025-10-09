@@ -55,6 +55,8 @@ def test_fetch_bars_filters_session(monkeypatch):
             get_price_history=fake_history,
             get_quote=lambda *a, **k: {},
             last_status=lambda: 200,
+            disabled_state=lambda: (False, None, None, None),
+            disable=lambda **_: None,
         ),
     )
     start = pre.to_pydatetime()
@@ -94,6 +96,8 @@ def test_fetch_bars_include_prepost(monkeypatch):
             get_price_history=fake_history,
             get_quote=lambda *a, **k: {},
             last_status=lambda: 200,
+            disabled_state=lambda: (False, None, None, None),
+            disable=lambda **_: None,
         ),
     )
     start = timestamps[0].to_pydatetime()

@@ -133,6 +133,9 @@ class Settings:
     schwab_redirect_uri: str = os.getenv("SCHWAB_REDIRECT_URI", "")
     schwab_account_id: str = os.getenv("SCHWAB_ACCOUNT_ID", "")
     schwab_refresh_token: str = os.getenv("SCHWAB_REFRESH_TOKEN", "")
+    schwab_refresh_backoff_seconds: int = int(
+        os.getenv("SCHWAB_REFRESH_BACKOFF_SECONDS", "180")
+    )
 
     # Scanner feature flags; all additive and safe to tweak at runtime.
     scan_max_concurrency: int = int(os.getenv("SCAN_MAX_CONCURRENCY", "8"))
