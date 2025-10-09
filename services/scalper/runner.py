@@ -232,17 +232,24 @@ async def _run_hf_iteration(now: datetime, startup_logged: bool, iteration: int)
         if status.halted:
             logger.warning("hf_loop_halted reason=drawdown")
             return
-        if not tickers:
+        open_rows = db.execute(
+            "SELECT id, ticker, entry_time, entry_price FROM scalper_hf_activity WHERE status='open'"
+        ).fetchall()
+        open_tickers = {str(row["ticker"]).upper() for row in open_rows if row["ticker"]}
+        symbols_to_fetch = sorted({*tickers, *open_tickers})
+        if not symbols_to_fetch:
             logger.warning("hf_loop_skip reason=no_tickers")
             return
+        if not tickers and open_tickers:
+            logger.info(
+                "hf_loop_manage_open_only open_positions=%d", len(open_rows)
+            )
         bars_by_symbol, providers = await _fetch_recent_bars(
-            tickers, lookback_minutes=HF_LOOKBACK_MINUTES, now=now
+            symbols_to_fetch, lookback_minutes=HF_LOOKBACK_MINUTES, now=now
         )
         closed = 0
         opened = 0
-        for row in db.execute(
-            "SELECT id, ticker, entry_time, entry_price FROM scalper_hf_activity WHERE status='open'"
-        ).fetchall():
+        for row in open_rows:
             ticker = str(row["ticker"]).upper()
             bars = bars_by_symbol.get(ticker, [])
             entry_time = _parse_ts(row["entry_time"])
@@ -372,17 +379,24 @@ async def _run_lf_iteration(now: datetime, startup_logged: bool, iteration: int)
         if not _should_run_lf_session(now, settings):
             logger.info("lf_loop_skip reason=session_window")
             return
-        if not tickers:
+        open_rows = db.execute(
+            "SELECT id, ticker, entry_time, entry_price FROM scalper_lf_activity WHERE status='open'"
+        ).fetchall()
+        open_tickers = {str(row["ticker"]).upper() for row in open_rows if row["ticker"]}
+        symbols_to_fetch = sorted({*tickers, *open_tickers})
+        if not symbols_to_fetch:
             logger.warning("lf_loop_skip reason=no_tickers")
             return
+        if not tickers and open_tickers:
+            logger.info(
+                "lf_loop_manage_open_only open_positions=%d", len(open_rows)
+            )
         bars_by_symbol, providers = await _fetch_recent_bars(
-            tickers, lookback_minutes=LF_LOOKBACK_MINUTES, now=now
+            symbols_to_fetch, lookback_minutes=LF_LOOKBACK_MINUTES, now=now
         )
         closed = 0
         mark_updates: List[Tuple[float, int]] = []
-        for row in db.execute(
-            "SELECT id, ticker, entry_time, entry_price FROM scalper_lf_activity WHERE status='open'"
-        ).fetchall():
+        for row in open_rows:
             ticker = str(row["ticker"]).upper()
             bars = bars_by_symbol.get(ticker, [])
             entry_time = _parse_ts(row["entry_time"])
