@@ -249,6 +249,27 @@ def test_status_lifecycle(db_cursor):
     assert restarted.started_at.endswith("03T00:00:00+00:00")
 
 
+def test_lf_status_case_insensitive(db_cursor):
+    start = datetime(2024, 1, 2, 14, 30, tzinfo=timezone.utc)
+    lf_engine.restart_engine(db_cursor, now=start)
+    db_cursor.execute("UPDATE scalper_lf_state SET status='ACTIVE' WHERE id=1")
+    db_cursor.connection.commit()
+
+    status = lf_engine.get_status(db_cursor)
+    assert status.status == "active"
+
+    trade_id = lf_engine.open_trade(
+        db_cursor,
+        ticker="SPY",
+        option_type="CALL",
+        strike=None,
+        expiry=None,
+        mid_price=2.0,
+        entry_time=start,
+    )
+    assert trade_id is not None
+
+
 @pytest.mark.anyio
 async def test_adapter_fallback(monkeypatch):
     calls: list[str] = []
