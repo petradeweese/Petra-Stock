@@ -327,20 +327,13 @@ async def _fetch_intraday_range(
                 len(initial_rows),
             )
             return initial_rows, "db"
-        bars, provider = await _fetch_from_provider(
+        logger.info(
+            "db_only_intraday symbol=%s interval=%s rows=%d reason=out_of_lookback",
             symbol_norm,
             interval,
-            start,
-            end,
-            timeout_ctx=_clone_timeout_ctx(timeout_ctx),
+            len(initial_rows),
         )
-        filtered = [
-            bar
-            for bar in bars
-            if start <= _ensure_utc(bar["ts"]) < end  # type: ignore[arg-type]
-        ]
-        provider_value = provider or ("none" if not filtered else "schwab")
-        return filtered, provider_value
+        return initial_rows, "db"
 
     recent_start = max(start, cutoff)
     recent_rows = [row for row in initial_rows if row["ts"] >= recent_start]
