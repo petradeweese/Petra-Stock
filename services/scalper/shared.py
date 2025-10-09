@@ -8,6 +8,21 @@ from typing import Mapping, MutableMapping, Sequence
 TICK_SIZE = 0.01
 
 
+def normalize_status(value: object, default: str = "inactive") -> str:
+    """Return a canonical lower-case status value."""
+
+    if value is None:
+        return default
+    text = str(value).strip().lower()
+    return text or default
+
+
+def is_active_status(value: object) -> bool:
+    """Return ``True`` when ``value`` represents an active status."""
+
+    return normalize_status(value) == "active"
+
+
 @dataclass(slots=True)
 class FeeModel:
     """Simple fee model with per-contract and per-order charges."""

@@ -17,6 +17,8 @@ from .shared import (
     apply_slippage,
     calculate_position_size as _shared_position_size,
     compute_trade_metrics,
+    is_active_status,
+    normalize_status,
     summarize_backtest,
 )
 
@@ -416,7 +418,8 @@ def get_status(db) -> HFStatus:
     if state is None:
         logger.warning("hf_state_missing defaulting to inactive")
     status_value = _row_value(state, "status")
-    status = str(status_value or "inactive")
+    status_raw = str(status_value or "inactive")
+    status = normalize_status(status_raw)
     started_raw = _row_value(state, "started_at")
     started_at = str(started_raw) if started_raw else None
     halted = bool(_row_value(state, "halted_at"))
@@ -618,7 +621,7 @@ def open_trade(
     _ensure_schema(db)
     settings = settings or load_settings(db)
     state = get_status(db)
-    if state.status != "active":
+    if not is_active_status(state.status):
         logger.info("hf_trade_skipped status=%s", state.status)
         return None
 

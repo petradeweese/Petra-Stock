@@ -197,7 +197,6 @@ def test_hf_signal_controls(db_cursor):
         settings=settings,
     )
     assert closed_one is not None
-
     # Cool-down should block immediate re-entry.
     cooldown_block = hf_engine.open_trade(
         db_cursor,
@@ -325,6 +324,32 @@ def test_hf_slippage_widening(db_cursor):
     ).fetchone()
     assert row_liquid and row_thin
     assert float(row_thin["entry_price"]) > float(row_liquid["entry_price"])
+
+
+def test_hf_status_case_insensitive(db_cursor):
+    start = datetime(2024, 1, 2, 15, 0, tzinfo=timezone.utc)
+    hf_engine.restart_engine(db_cursor, now=start)
+    db_cursor.execute("UPDATE scalper_hf_state SET status='Active' WHERE id=1")
+    db_cursor.connection.commit()
+
+    status = hf_engine.get_status(db_cursor)
+    assert status.status == "active"
+
+    trade_id = hf_engine.open_trade(
+        db_cursor,
+        ticker="SPY",
+        option_type="CALL",
+        strike=None,
+        expiry=None,
+        mid_price=2.0,
+        entry_time=start,
+        momentum_score=1.0,
+        vwap=2.0,
+        ema9=1.99,
+        volatility=1.0,
+        liquidity=1.0,
+    )
+    assert trade_id is not None
 
 
 def test_hf_metrics_snapshot(db_cursor):

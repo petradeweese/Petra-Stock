@@ -12,6 +12,7 @@ from typing import Callable, Dict, Iterator, List, Optional, Sequence, Tuple
 from db import DB_PATH
 from services.data_provider import fetch_bars_async
 from services.scalper import hf_engine, lf_engine
+from services.scalper.shared import is_active_status
 from utils import TZ
 
 logger = logging.getLogger(__name__)
@@ -200,17 +201,25 @@ async def hf_loop(
     iteration = 0
     while True:
         iteration += 1
-        loop_started = asyncio.get_event_loop().time()
+        loop = asyncio.get_running_loop()
+        loop_started = loop.time()
         try:
             ts = now_et()
-            if not market_is_open(ts):
+            market_open = market_is_open(ts)
+            logger.info(
+                "hf_loop_heartbeat iteration=%d ts=%s market_open=%s",
+                iteration,
+                ts.isoformat(),
+                market_open,
+            )
+            if not market_open:
                 logger.info("hf_loop_skip reason=market_closed now=%s", ts.isoformat())
             else:
                 await _run_hf_iteration(ts, startup_logged, iteration)
                 startup_logged = True
         except Exception:
             logger.exception("hf_loop_error iteration=%d", iteration)
-        elapsed = asyncio.get_event_loop().time() - loop_started
+        elapsed = loop.time() - loop_started
         await asyncio.sleep(max(5.0, HF_LOOP_INTERVAL - elapsed))
 
 
@@ -226,7 +235,7 @@ async def _run_hf_iteration(now: datetime, startup_logged: bool, iteration: int)
                 settings.daily_trade_cap,
                 settings.pct_per_trade,
             )
-        if status.status != "active":
+        if not is_active_status(status.status):
             logger.info("hf_loop_skip reason=status status=%s", status.status)
             return
         if status.halted:
@@ -329,11 +338,14 @@ async def _run_hf_iteration(now: datetime, startup_logged: bool, iteration: int)
                     momentum,
                     providers.get(ticker, "db"),
                 )
+        summary = hf_engine.get_status(db)
         logger.info(
-            "hf_loop_iteration iteration=%d opened=%d closed=%d provider_map=%s",
+            "hf_loop_iteration iteration=%d opened=%d closed=%d open_positions=%d equity=%.2f provider_map=%s",
             iteration,
             opened,
             closed,
+            summary.open_positions,
+            float(summary.account_equity),
             providers,
         )
 
@@ -347,17 +359,25 @@ async def lf_loop(
     iteration = 0
     while True:
         iteration += 1
-        loop_started = asyncio.get_event_loop().time()
+        loop = asyncio.get_running_loop()
+        loop_started = loop.time()
         try:
             ts = now_et()
-            if not market_is_open(ts):
+            market_open = market_is_open(ts)
+            logger.info(
+                "lf_loop_heartbeat iteration=%d ts=%s market_open=%s",
+                iteration,
+                ts.isoformat(),
+                market_open,
+            )
+            if not market_open:
                 logger.info("lf_loop_skip reason=market_closed now=%s", ts.isoformat())
             else:
                 await _run_lf_iteration(ts, startup_logged, iteration)
                 startup_logged = True
         except Exception:
             logger.exception("lf_loop_error iteration=%d", iteration)
-        elapsed = asyncio.get_event_loop().time() - loop_started
+        elapsed = loop.time() - loop_started
         await asyncio.sleep(max(5.0, LF_LOOP_INTERVAL - elapsed))
 
 
@@ -373,7 +393,7 @@ async def _run_lf_iteration(now: datetime, startup_logged: bool, iteration: int)
                 settings.daily_trade_cap,
                 settings.pct_per_trade,
             )
-        if status.status != "active":
+        if not is_active_status(status.status):
             logger.info("lf_loop_skip reason=status status=%s", status.status)
             return
         if not _should_run_lf_session(now, settings):
@@ -483,12 +503,15 @@ async def _run_lf_iteration(now: datetime, startup_logged: bool, iteration: int)
                     price,
                     providers.get(ticker, "db"),
                 )
+        summary = lf_engine.get_status(db)
         logger.info(
-            "lf_loop_iteration iteration=%d opened=%d closed=%d marked=%d providers=%s",
+            "lf_loop_iteration iteration=%d opened=%d closed=%d marked=%d open_positions=%d equity=%.2f providers=%s",
             iteration,
             opened,
             closed,
             len(mark_updates),
+            summary.open_positions,
+            float(summary.account_equity),
             providers,
         )
 
