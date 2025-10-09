@@ -3350,7 +3350,7 @@ def _favorite_record_from_payload(payload: Mapping[str, Any]) -> tuple[dict[str,
 
 def _favorite_insert_columns(db: sqlite3.Cursor) -> tuple[str, ...]:
     conn = getattr(db, "connection", None)
-    if conn is None:
+    if conn is None or not isinstance(conn, sqlite3.Connection):
         return tuple(
             column
             for column in _FAVORITE_INSERT_COLUMNS
