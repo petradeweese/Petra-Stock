@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timezone
 
 import pytest
@@ -158,3 +159,58 @@ def test_deliver_preview_fallback_to_email(monkeypatch):
     assert response["channel"] == "email"
     assert response["reason"] == "sent"
     assert email_calls and "[Sent via Email" in email_calls[0][1]
+
+
+def test_enrich_handles_structured_roi_snapshot(monkeypatch):
+    email_calls = []
+    format_calls = []
+
+    def fake_email(host, port, user, password, mail_from, to, subject, body, *, context=None):
+        email_calls.append((subject, body, tuple(to), context))
+        return {"ok": True, "provider": "smtp", "message_id": "<structured>"}
+
+    class _Sel:
+        def __init__(self):
+            self.contract = object()
+
+    def fake_format(ticker, direction, contract, checks, targets, *, compact=False, channel="mms", pattern="", include_symbols=True):
+        format_calls.append(dict(targets))
+        return "body"
+
+    monkeypatch.setattr(favorites_alerts, "send_email_smtp", fake_email)
+    monkeypatch.setattr(favorites_alerts, "select_contract", lambda *args, **kwargs: _Sel())
+    monkeypatch.setattr(favorites_alerts, "evaluate_contract", lambda *args, **kwargs: [])
+    monkeypatch.setattr(favorites_alerts, "format_favorites_alert", fake_format)
+    monkeypatch.setattr(favorites_alerts, "load_profile", lambda *args, **kwargs: {"direction_profiles": {"UP": {}}})
+    monkeypatch.setattr(favorites_alerts, "was_sent_key", lambda *args, **kwargs: False)
+    monkeypatch.setattr(favorites_alerts, "mark_sent_key", lambda *args, **kwargs: None)
+    monkeypatch.setattr(favorites_alerts, "log_telemetry", lambda *args, **kwargs: None)
+
+    fav = {
+        "ticker": "LEG",
+        "direction": "UP",
+        "rule": "Breakout",
+        "target_pct": 5.0,
+        "stop_pct": 2.5,
+        "hit_pct_snapshot": 55.0,
+        "roi_snapshot": json.dumps({"avg_roi_pct": 1.75}),
+        "dd_pct_snapshot": -0.4,
+        "greeks_profile_json": "{}",
+    }
+
+    row = {"bar_time": datetime(2024, 1, 2, 15, 30, tzinfo=timezone.utc).isoformat()}
+
+    response = favorites_alerts.enrich_and_send(
+        fav,
+        row=row,
+        channel="email",
+        recipients=["alerts@example.com"],
+        smtp_config={"host": "smtp.example.com", "port": 25, "mail_from": "alerts@example.com"},
+        simulated=True,
+    )
+
+    assert response["ok"] is True
+    assert email_calls, "email send expected"
+    assert format_calls, "formatting should have been invoked"
+    for call in format_calls:
+        assert call.get("roi") == pytest.approx(1.75)

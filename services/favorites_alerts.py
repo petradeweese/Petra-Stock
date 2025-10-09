@@ -420,6 +420,73 @@ def _coerce_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def _favorite_snapshot_numeric(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+
+    if isinstance(value, bool):
+        return float(value)
+
+    if isinstance(value, (int, float)):
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        if math.isnan(number):
+            return None
+        return number
+
+    if isinstance(value, (bytes, bytearray)):
+        try:
+            decoded = value.decode("utf-8")
+        except Exception:
+            return None
+        return _favorite_snapshot_numeric(decoded)
+
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            return float(text)
+        except ValueError:
+            try:
+                parsed = json.loads(text)
+            except (TypeError, ValueError):
+                return None
+            return _favorite_snapshot_numeric(parsed)
+
+    if isinstance(value, Mapping):
+        keys = (
+            "avg_roi_pct",
+            "avg_roi",
+            "roi_pct",
+            "roi",
+            "value",
+            "pct",
+            "percent",
+            "percentage",
+        )
+        for key in keys:
+            if key in value:
+                parsed = _favorite_snapshot_numeric(value.get(key))
+                if parsed is not None:
+                    return parsed
+        for nested in value.values():
+            parsed = _favorite_snapshot_numeric(nested)
+            if parsed is not None:
+                return parsed
+        return None
+
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        for item in value:
+            parsed = _favorite_snapshot_numeric(item)
+            if parsed is not None:
+                return parsed
+
+    return None
+
+
 def _coerce_int(value: Any, default: int = 0) -> int:
     try:
         if value is None:
@@ -1303,18 +1370,20 @@ def enrich_and_send(
                     fav.get("hit_pct_snapshot") if isinstance(fav, Mapping) else None,
                 ]
             ) or 0.0
-            avg_roi = _coalesce(
+            avg_roi_raw = _coalesce(
                 [
                     (row or {}).get("avg_roi_pct") if isinstance(row, Mapping) else None,
                     fav.get("roi_snapshot") if isinstance(fav, Mapping) else None,
                 ]
-            ) or 0.0
-            avg_dd = _coalesce(
+            )
+            avg_roi = _favorite_snapshot_numeric(avg_roi_raw) or 0.0
+            avg_dd_raw = _coalesce(
                 [
                     (row or {}).get("avg_dd_pct") if isinstance(row, Mapping) else None,
                     fav.get("dd_pct_snapshot") if isinstance(fav, Mapping) else None,
                 ]
-            ) or 0.0
+            )
+            avg_dd = _favorite_snapshot_numeric(avg_dd_raw) or 0.0
             hit = FavoriteHitStub(
                 ticker=str(ticker),
                 direction=str(direction),
