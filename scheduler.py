@@ -18,6 +18,7 @@ from services.http_client import RateLimitTimeoutSoon
 from services.data_provider import compute_request_window, fetch_bars_async
 from services.price_store import covers, get_coverage, missing_ranges, upsert_bars
 from services import favorites_alerts
+from services.scalper import runner as scalper_runner
 from utils import clamp_market_closed, market_is_open as util_market_is_open
 
 logger = logging.getLogger(__name__)
@@ -466,3 +467,5 @@ def setup_scheduler(app, market_is_open, now_et, compute_scan_for_ticker):
             favorites_loop(market_is_open, now_et, compute_scan_for_ticker)
         )
         asyncio.create_task(forward_tests_loop(market_is_open, now_et))
+        asyncio.create_task(scalper_runner.hf_loop(market_is_open, now_et))
+        asyncio.create_task(scalper_runner.lf_loop(market_is_open, now_et))
