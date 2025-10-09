@@ -59,6 +59,17 @@ These addresses are referenced across the public pages, consent copy, and SMS he
 Static assets such as `static/robots.txt` and `static/sitemap.xml` are also served directly by the
 app for SEO and compliance.
 
+### Database migrations
+
+Before applying Alembic migrations in production, back up the existing SQLite database:
+
+```
+cp patternfinder.db patternfinder.db.bak-$(date +%Y%m%d)
+```
+
+This protects historical consent logs while the contact-info cleanup migration removes
+the legacy street address and updates the shared business phone number.
+
 ## Scanning
 
 During a scan, the application verifies that price data covers at least 95% of the

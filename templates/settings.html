@@ -486,12 +486,14 @@
       <p class="note">Alerts are informational only and not financial advice.</p>
       <p class="note">Contact <a href="mailto:support@petrastock.com">support@petrastock.com</a> or call <a href="tel:{{ contact.phone_href }}">{{ contact.phone }}</a> with questions.</p>
       <p class="note" id="sms-unavailable-note" {% if twilio_verify_enabled %}hidden{% endif %}>
-        Verification is unavailable. SMS alerts cannot be activated until Twilio verification is enabled.
+        {% if not twilio_verify_enabled %}
+          Verification is unavailable. SMS alerts cannot be activated until Twilio verification is enabled.
+        {% endif %}
       </p>
       <div class="sms-grid">
         <div>
           <label for="sms-phone">Phone number</label>
-          <input id="sms-phone" type="tel" value="{{ sms_state.phone or '' }}" placeholder="+1 555 555 1212" />
+          <input id="sms-phone" type="tel" value="{{ sms_state.phone or '' }}" placeholder="+1 4705584503" />
         </div>
         <div>
           <button id="sms-verify-btn" type="button" {% if not twilio_verify_enabled %}disabled{% endif %}>Verify &amp; Opt-in</button>

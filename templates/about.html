@@ -21,8 +21,6 @@
     <section class="contact-block">
       <h2>Contact</h2>
       <p><strong>{{ contact.name }}</strong><br />
-        {{ contact.address_1 }}{% if contact.address_2 %}, {{ contact.address_2 }}{% endif %}<br />
-        {{ contact.city }}, {{ contact.region }} {{ contact.postal }}<br />
         <a href="tel:{{ contact.phone_href }}">{{ contact.phone }}</a> · <a href="mailto:support@petrastock.com">support@petrastock.com</a>
       </p>
     </section>

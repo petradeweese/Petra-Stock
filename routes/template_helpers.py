@@ -96,25 +96,14 @@ def sms_frequency_copy() -> str:
 def business_contact() -> Dict[str, str]:
     phone = str(getattr(services_config, "BUSINESS_PHONE", "")).strip()
     if not phone:
-        phone = "+1 (555) 555-1212"
+        phone = "+1 4705584503"
     tel_href = re.sub(r"[^0-9+]", "", phone)
     if tel_href and not tel_href.startswith("+"):
         tel_href = f"+{tel_href}"
-
-    address_1 = str(getattr(services_config, "BUSINESS_ADDRESS_1", "")).strip()
-    address_2 = str(getattr(services_config, "BUSINESS_ADDRESS_2", "")).strip()
-    city = str(getattr(services_config, "BUSINESS_CITY", "")).strip()
-    region = str(getattr(services_config, "BUSINESS_REGION", "")).strip()
-    postal = str(getattr(services_config, "BUSINESS_POSTAL", "")).strip()
 
     return {
         "name": "Petra Stock, LLC",
         "phone": phone,
         "phone_href": tel_href or phone,
-        "address_1": address_1 or "123 Example Street",
-        "address_2": address_2,
-        "city": city or "City",
-        "region": region or "ST",
-        "postal": postal or "00000",
     }
 

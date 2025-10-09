@@ -33,8 +33,6 @@
     {% set contact = business_contact() %}
     <p>Email <a href="mailto:support@petrastock.com">support@petrastock.com</a> or <a href="mailto:alerts@petrastock.com">alerts@petrastock.com</a> for assistance.</p>
     <p><strong>{{ contact.name }}</strong><br />
-      {{ contact.address_1 }}{% if contact.address_2 %}, {{ contact.address_2 }}{% endif %}<br />
-      {{ contact.city }}, {{ contact.region }} {{ contact.postal }}<br />
       <a href="tel:{{ contact.phone_href }}">{{ contact.phone }}</a>
     </p>
   </article>

@@ -34,12 +34,14 @@ def test_public_pages_render(tmp_path):
     assert "support@petrastock.com" in contact.text
     assert "privacy@petrastock.com" in contact.text
     assert "Petra Stock, LLC" in contact.text
-    assert "+1 (555) 555-1212" in contact.text
+    assert "+1 4705584503" in contact.text
+    assert "Address" not in contact.text
 
     privacy = client.get("/privacy")
     assert privacy.status_code == 200
     assert "Msg &amp; data rates may apply" in privacy.text or "Msg & data rates may apply" in privacy.text
     assert "We do not sell or share your phone number or personal information" in privacy.text
+    assert "Example Street" not in privacy.text
 
     terms = client.get("/terms")
     assert terms.status_code == 200
