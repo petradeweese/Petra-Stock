@@ -3350,12 +3350,10 @@ def _favorite_record_from_payload(payload: Mapping[str, Any]) -> tuple[dict[str,
 
 def _favorite_insert_columns(db: sqlite3.Cursor) -> tuple[str, ...]:
     conn = getattr(db, "connection", None)
-    if conn is None or not isinstance(conn, sqlite3.Connection):
-        return tuple(
-            column
-            for column in _FAVORITE_INSERT_COLUMNS
-            if column not in _FAVORITE_OPTIONAL_COLUMNS
-        )
+    if conn is None:
+        return _FAVORITE_INSERT_COLUMNS
+    if not isinstance(conn, sqlite3.Connection):
+        return _FAVORITE_INSERT_COLUMNS
 
     cache_key = id(conn)
     cached = _FAVORITE_COLUMN_CACHE.get(cache_key)

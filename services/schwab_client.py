@@ -109,7 +109,14 @@ class SchwabClient:
         }
 
         form_body = urllib.parse.urlencode(payload)
-        logger.debug("schwab_token_refresh_request body=%s", form_body)
+        safe_payload = {
+            key: ("***REDACTED***" if key in {"refresh_token", "client_id"} else value)
+            for key, value in payload.items()
+        }
+        logger.debug(
+            "schwab_token_refresh_request body=%s",
+            urllib.parse.urlencode(safe_payload),
+        )
 
         t0 = time.monotonic()
         resp = await http_client.request(
