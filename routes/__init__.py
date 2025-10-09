@@ -4365,17 +4365,20 @@ async def _run_scan_task(
     fetch_elapsed_ms = 0.0
 
     disabled_fetch, disabled_reason, _, _ = schwab_client.disabled_state()
-    if disabled_fetch:
-        logger.info(
-            "routes fetch_skipped_schwab_disabled reason=%s",
-            disabled_reason or "unknown",
-        )
-    if remaining_symbols and not disabled_fetch:
-        logger.info(
-            "routes fetch_start symbols=%d interval=%s",
-            remaining_symbols,
-            plan.interval,
-        )
+    if remaining_symbols:
+        if disabled_fetch:
+            logger.info(
+                "routes fetch_start_schwab_disabled fallback symbols=%d interval=%s reason=%s",
+                remaining_symbols,
+                plan.interval,
+                disabled_reason or "unknown",
+            )
+        else:
+            logger.info(
+                "routes fetch_start symbols=%d interval=%s",
+                remaining_symbols,
+                plan.interval,
+            )
 
         def _progress(symbol: str, pending: int, _total: int) -> None:
             nonlocal remaining_symbols
