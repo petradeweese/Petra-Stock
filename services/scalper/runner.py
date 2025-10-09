@@ -20,6 +20,9 @@ HF_LOOP_INTERVAL = 60.0  # seconds
 LF_LOOP_INTERVAL = 60.0  # seconds
 HF_LOOKBACK_MINUTES = 45
 LF_LOOKBACK_MINUTES = 120
+HF_MAX_LOOKBACK_MINUTES = 24 * 60
+LF_MAX_LOOKBACK_MINUTES = 72 * 60
+STALE_BAR_WINDOW = timedelta(minutes=5)
 
 
 @contextmanager
@@ -97,6 +100,36 @@ def _df_to_bars(df) -> List[Dict[str, float | str]]:
             }
         )
     return bars
+
+
+def _determine_lookback(
+    default_minutes: int,
+    *,
+    now: datetime,
+    open_rows: Sequence[sqlite3.Row],
+    max_minutes: Optional[int] = None,
+) -> int:
+    lookback = int(default_minutes)
+    now_utc = now.astimezone(timezone.utc)
+    earliest: Optional[datetime] = None
+    for row in open_rows:
+        try:
+            entry_time = row["entry_time"]
+        except (KeyError, IndexError, TypeError):
+            entry_time = None
+        parsed = _parse_ts(entry_time)
+        if parsed is None:
+            continue
+        if earliest is None or parsed < earliest:
+            earliest = parsed
+    if earliest is not None:
+        delta = now_utc - earliest
+        if delta.total_seconds() > 0:
+            dynamic = int(math.ceil(delta.total_seconds() / 60.0)) + 5
+            lookback = max(lookback, dynamic)
+    if max_minutes is not None:
+        lookback = min(lookback, int(max_minutes))
+    return lookback
 
 
 def _ema(values: Sequence[float], period: int) -> List[float]:
@@ -244,20 +277,42 @@ async def _run_hf_iteration(now: datetime, startup_logged: bool, iteration: int)
             logger.info(
                 "hf_loop_manage_open_only open_positions=%d", len(open_rows)
             )
-        bars_by_symbol, providers = await _fetch_recent_bars(
-            symbols_to_fetch, lookback_minutes=HF_LOOKBACK_MINUTES, now=now
+        lookback = _determine_lookback(
+            HF_LOOKBACK_MINUTES,
+            now=now,
+            open_rows=open_rows,
+            max_minutes=HF_MAX_LOOKBACK_MINUTES,
         )
+        now_utc = now.astimezone(timezone.utc)
+        starting_equity = hf_engine.current_equity(db)
+        bars_by_symbol, providers = await _fetch_recent_bars(
+            symbols_to_fetch, lookback_minutes=lookback, now=now
+        )
+        stale_symbols: Dict[str, str] = {}
+        missing_symbols: List[str] = []
         closed = 0
         opened = 0
         for row in open_rows:
             ticker = str(row["ticker"]).upper()
             bars = bars_by_symbol.get(ticker, [])
+            if not bars:
+                missing_symbols.append(ticker)
+                continue
+            last_ts = _parse_ts(bars[-1].get("ts"))
+            if last_ts and now_utc - last_ts > STALE_BAR_WINDOW:
+                stale_symbols.setdefault(ticker, last_ts.isoformat())
             entry_time = _parse_ts(row["entry_time"])
-            if not bars or entry_time is None:
+            if entry_time is None:
+                logger.warning("hf_loop_missing_entry id=%s ticker=%s", row["id"], ticker)
                 continue
-            recent = [bar for bar in bars if _parse_ts(bar["ts"]) and _parse_ts(bar["ts"]) >= entry_time]
-            if not recent:
+            recent_pairs = [
+                (bar, bar_ts)
+                for bar in bars
+                if (bar_ts := _parse_ts(bar.get("ts"))) is not None and bar_ts >= entry_time
+            ]
+            if not recent_pairs:
                 continue
+            recent = [bar for bar, _ in recent_pairs]
             exit_price, reason, exit_ts_raw = hf_engine.evaluate_exit(
                 entry_price=float(row["entry_price"]),
                 bars=recent,
@@ -266,8 +321,13 @@ async def _run_hf_iteration(now: datetime, startup_logged: bool, iteration: int)
                 time_cap_minutes=settings.time_cap_minutes,
             )
             if reason == "timeout" and not exit_ts_raw:
+                logger.debug(
+                    "hf_loop_timeout_pending id=%s ticker=%s", row["id"], ticker
+                )
                 continue
-            exit_dt = _parse_ts(exit_ts_raw) or _parse_ts(recent[-1]["ts"]) or now.astimezone(timezone.utc)
+            exit_dt = _parse_ts(exit_ts_raw)
+            if exit_dt is None:
+                exit_dt = recent_pairs[-1][1] if recent_pairs else now_utc
             liquidity = float(recent[-1].get("liquidity", 0.0))
             closed_trade = hf_engine.close_trade(
                 db,
@@ -280,17 +340,43 @@ async def _run_hf_iteration(now: datetime, startup_logged: bool, iteration: int)
             )
             if closed_trade:
                 closed += 1
+                net_row = db.execute(
+                    "SELECT net_pl FROM scalper_hf_activity WHERE id=?",
+                    (closed_trade.id,),
+                ).fetchone()
+                net_value = 0.0
+                if net_row is not None:
+                    try:
+                        net_value = float(net_row[0])
+                    except (TypeError, ValueError, IndexError):
+                        try:
+                            net_value = float(net_row["net_pl"])
+                        except (TypeError, ValueError, KeyError):
+                            net_value = 0.0
+                equity_after = hf_engine.current_equity(db)
                 logger.info(
-                    "hf_loop_closed id=%s ticker=%s reason=%s exit=%.2f",
+                    "hf_loop_closed id=%s ticker=%s reason=%s exit=%.2f net=%.2f equity=%.2f",
                     closed_trade.id,
                     ticker,
                     reason,
                     float(exit_price),
+                    net_value,
+                    equity_after,
                 )
+        signals_evaluated = 0
         for ticker in tickers:
             bars = bars_by_symbol.get(ticker, [])
             if len(bars) < 2:
+                missing_symbols.append(ticker)
                 continue
+            last_ts = _parse_ts(bars[-1].get("ts"))
+            if last_ts is None:
+                missing_symbols.append(ticker)
+                continue
+            if now_utc - last_ts > STALE_BAR_WINDOW:
+                stale_symbols.setdefault(ticker, last_ts.isoformat())
+                continue
+            signals_evaluated += 1
             closes = [float(bar["close"]) for bar in bars]
             ema9 = _ema(closes, 9)
             last_bar = bars[-1]
@@ -303,7 +389,7 @@ async def _run_hf_iteration(now: datetime, startup_logged: bool, iteration: int)
             ema_val = ema9[-1] if ema9 else price
             volatility = float(last_bar.get("volatility", 0.0))
             liquidity = float(last_bar.get("liquidity", 0.0))
-            entry_dt = _parse_ts(last_bar["ts"]) or now.astimezone(timezone.utc)
+            entry_dt = _parse_ts(last_bar.get("ts")) or now_utc
             trade_id = hf_engine.open_trade(
                 db,
                 ticker=ticker,
@@ -329,12 +415,34 @@ async def _run_hf_iteration(now: datetime, startup_logged: bool, iteration: int)
                     momentum,
                     providers.get(ticker, "db"),
                 )
+        if missing_symbols:
+            logger.warning(
+                "hf_loop_missing_bars iteration=%d symbols=%s",
+                iteration,
+                ",".join(sorted(set(missing_symbols))),
+            )
+        if stale_symbols:
+            logger.warning(
+                "hf_loop_stale_bars iteration=%d details=%s",
+                iteration,
+                stale_symbols,
+            )
+        ending_equity = hf_engine.current_equity(db)
+        provider_summary = {sym: providers.get(sym, "db") for sym in symbols_to_fetch}
         logger.info(
-            "hf_loop_iteration iteration=%d opened=%d closed=%d provider_map=%s",
+            "hf_loop_iteration iteration=%d symbols=%s signals=%d open_positions=%d opened=%d closed=%d lookback=%d equity_start=%.2f equity_end=%.2f stale=%d missing=%d providers=%s",
             iteration,
+            ",".join(symbols_to_fetch),
+            signals_evaluated,
+            len(open_rows),
             opened,
             closed,
-            providers,
+            lookback,
+            starting_equity,
+            ending_equity,
+            len(stale_symbols),
+            len(set(missing_symbols)),
+            provider_summary,
         )
 
 
@@ -391,20 +499,42 @@ async def _run_lf_iteration(now: datetime, startup_logged: bool, iteration: int)
             logger.info(
                 "lf_loop_manage_open_only open_positions=%d", len(open_rows)
             )
-        bars_by_symbol, providers = await _fetch_recent_bars(
-            symbols_to_fetch, lookback_minutes=LF_LOOKBACK_MINUTES, now=now
+        lookback = _determine_lookback(
+            LF_LOOKBACK_MINUTES,
+            now=now,
+            open_rows=open_rows,
+            max_minutes=LF_MAX_LOOKBACK_MINUTES,
         )
+        now_utc = now.astimezone(timezone.utc)
+        starting_equity = lf_engine.current_equity(db)
+        bars_by_symbol, providers = await _fetch_recent_bars(
+            symbols_to_fetch, lookback_minutes=lookback, now=now
+        )
+        stale_symbols: Dict[str, str] = {}
+        missing_symbols: List[str] = []
         closed = 0
         mark_updates: List[Tuple[float, int]] = []
         for row in open_rows:
             ticker = str(row["ticker"]).upper()
             bars = bars_by_symbol.get(ticker, [])
+            if not bars:
+                missing_symbols.append(ticker)
+                continue
+            last_ts = _parse_ts(bars[-1].get("ts"))
+            if last_ts and now_utc - last_ts > STALE_BAR_WINDOW:
+                stale_symbols.setdefault(ticker, last_ts.isoformat())
             entry_time = _parse_ts(row["entry_time"])
-            if not bars or entry_time is None:
+            if entry_time is None:
+                logger.warning("lf_loop_missing_entry id=%s ticker=%s", row["id"], ticker)
                 continue
-            recent = [bar for bar in bars if _parse_ts(bar["ts"]) and _parse_ts(bar["ts"]) >= entry_time]
-            if not recent:
+            recent_pairs = [
+                (bar, bar_ts)
+                for bar in bars
+                if (bar_ts := _parse_ts(bar.get("ts"))) is not None and bar_ts >= entry_time
+            ]
+            if not recent_pairs:
                 continue
+            recent = [bar for bar, _ in recent_pairs]
             exit_price, reason, exit_ts_raw = lf_engine.evaluate_exit(
                 entry_price=float(row["entry_price"]),
                 bars=recent,
@@ -414,11 +544,11 @@ async def _run_lf_iteration(now: datetime, startup_logged: bool, iteration: int)
             )
             exit_dt = _parse_ts(exit_ts_raw)
             if reason == "timeout" and exit_dt is None:
-                last_price = float(recent[-1]["close"])
+                last_price = float(recent[-1].get("close", row["entry_price"])) if recent else float(row["entry_price"])
                 mark_updates.append((last_price, int(row["id"])))
                 continue
             if exit_dt is None:
-                exit_dt = _parse_ts(recent[-1]["ts"]) or now.astimezone(timezone.utc)
+                exit_dt = recent_pairs[-1][1] if recent_pairs else now_utc
             closed_trade = lf_engine.close_trade(
                 db,
                 int(row["id"]),
@@ -429,12 +559,28 @@ async def _run_lf_iteration(now: datetime, startup_logged: bool, iteration: int)
             )
             if closed_trade:
                 closed += 1
+                net_row = db.execute(
+                    "SELECT net_pl FROM scalper_lf_activity WHERE id=?",
+                    (closed_trade.id,),
+                ).fetchone()
+                net_value = 0.0
+                if net_row is not None:
+                    try:
+                        net_value = float(net_row[0])
+                    except (TypeError, ValueError, IndexError):
+                        try:
+                            net_value = float(net_row["net_pl"])
+                        except (TypeError, ValueError, KeyError):
+                            net_value = 0.0
+                equity_after = lf_engine.current_equity(db)
                 logger.info(
-                    "lf_loop_closed id=%s ticker=%s reason=%s exit=%.2f",
+                    "lf_loop_closed id=%s ticker=%s reason=%s exit=%.2f net=%.2f equity=%.2f",
                     closed_trade.id,
                     ticker,
                     reason,
                     float(exit_price),
+                    net_value,
+                    equity_after,
                 )
         if mark_updates:
             db.executemany(
@@ -443,10 +589,20 @@ async def _run_lf_iteration(now: datetime, startup_logged: bool, iteration: int)
             )
             db.connection.commit()
         opened = 0
+        signals_evaluated = 0
         for ticker in tickers:
             bars = bars_by_symbol.get(ticker, [])
             if len(bars) < 6:
+                missing_symbols.append(ticker)
                 continue
+            last_ts = _parse_ts(bars[-1].get("ts"))
+            if last_ts is None:
+                missing_symbols.append(ticker)
+                continue
+            if now_utc - last_ts > STALE_BAR_WINDOW:
+                stale_symbols.setdefault(ticker, last_ts.isoformat())
+                continue
+            signals_evaluated += 1
             closes = [float(bar["close"]) for bar in bars]
             highs = [float(bar["high"]) for bar in bars]
             idx = len(bars) - 1
@@ -463,7 +619,7 @@ async def _run_lf_iteration(now: datetime, startup_logged: bool, iteration: int)
                 continue
             if not (price > window_high and price >= vwap):
                 continue
-            entry_dt = _parse_ts(bars[idx]["ts"]) or now.astimezone(timezone.utc)
+            entry_dt = _parse_ts(bars[idx].get("ts")) or now_utc
             trade_id = lf_engine.open_trade(
                 db,
                 ticker=ticker,
@@ -483,13 +639,35 @@ async def _run_lf_iteration(now: datetime, startup_logged: bool, iteration: int)
                     price,
                     providers.get(ticker, "db"),
                 )
+        if missing_symbols:
+            logger.warning(
+                "lf_loop_missing_bars iteration=%d symbols=%s",
+                iteration,
+                ",".join(sorted(set(missing_symbols))),
+            )
+        if stale_symbols:
+            logger.warning(
+                "lf_loop_stale_bars iteration=%d details=%s",
+                iteration,
+                stale_symbols,
+            )
+        ending_equity = lf_engine.current_equity(db)
+        provider_summary = {sym: providers.get(sym, "db") for sym in symbols_to_fetch}
         logger.info(
-            "lf_loop_iteration iteration=%d opened=%d closed=%d marked=%d providers=%s",
+            "lf_loop_iteration iteration=%d symbols=%s signals=%d open_positions=%d opened=%d closed=%d marked=%d lookback=%d equity_start=%.2f equity_end=%.2f stale=%d missing=%d providers=%s",
             iteration,
+            ",".join(symbols_to_fetch),
+            signals_evaluated,
+            len(open_rows),
             opened,
             closed,
             len(mark_updates),
-            providers,
+            lookback,
+            starting_equity,
+            ending_equity,
+            len(stale_symbols),
+            len(set(missing_symbols)),
+            provider_summary,
         )
 
 

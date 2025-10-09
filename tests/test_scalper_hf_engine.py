@@ -415,3 +415,60 @@ def test_hf_backtest_smoke(db_cursor):
     assert "summary" in results
     assert isinstance(results["equity_curve"], list)
     assert set(results["summary"].keys()) >= {"starting_balance", "ending_balance", "net_profit", "total_trades", "win_rate"}
+
+
+def test_hf_current_equity_updates_after_close(db_cursor):
+    start = datetime(2024, 1, 2, 14, 30, tzinfo=timezone.utc)
+    hf_engine.update_settings(
+        db_cursor,
+        starting_balance=50000,
+        pct_per_trade=1.5,
+        daily_trade_cap=10,
+        tickers=["SPY"],
+        profit_target_pct=4,
+        max_adverse_pct=-3,
+        time_cap_minutes=5,
+        cooldown_minutes=0,
+        max_open_positions=3,
+        daily_max_drawdown_pct=-10,
+        per_contract_fee=0.0,
+        per_order_fee=0.0,
+        volatility_gate=5.0,
+    )
+    hf_engine.restart_engine(db_cursor, now=start)
+    settings = hf_engine.load_settings(db_cursor)
+    initial_equity = hf_engine.current_equity(db_cursor)
+    assert initial_equity == pytest.approx(settings.starting_balance)
+
+    entry_time = start + timedelta(minutes=1)
+    trade_id = hf_engine.open_trade(
+        db_cursor,
+        ticker="SPY",
+        option_type="CALL",
+        strike=None,
+        expiry=None,
+        mid_price=1.0,
+        entry_time=entry_time,
+        momentum_score=1.0,
+        vwap=1.0,
+        ema9=1.0,
+        volatility=0.5,
+        liquidity=1.0,
+        settings=settings,
+    )
+    assert trade_id is not None
+
+    exit_time = entry_time + timedelta(minutes=1)
+    closed = hf_engine.close_trade(
+        db_cursor,
+        trade_id,
+        mid_price=1.2,
+        exit_time=exit_time,
+        reason="target",
+        liquidity=1.0,
+        settings=settings,
+    )
+    assert closed is not None
+
+    updated_equity = hf_engine.current_equity(db_cursor)
+    assert updated_equity > initial_equity

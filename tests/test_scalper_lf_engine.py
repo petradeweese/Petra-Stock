@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Iterator
 
 import sqlite3
@@ -327,3 +327,55 @@ def test_activity_csv_schema(db_cursor):
         "Fees",
     ]
     assert any("Fees" in header for header in rows[0])
+
+
+def test_lf_current_equity_updates_after_close(db_cursor):
+    start = datetime(2024, 1, 2, 9, 30, tzinfo=timezone.utc)
+    lf_engine.update_settings(
+        db_cursor,
+        starting_balance=75000,
+        pct_per_trade=2.0,
+        daily_trade_cap=10,
+        tickers=["SPY"],
+        profit_target_pct=6.0,
+        max_adverse_pct=-3.0,
+        time_cap_minutes=15,
+        session_start="09:30",
+        session_end="16:00",
+        allow_premarket=False,
+        allow_postmarket=False,
+        per_contract_fee=0.0,
+        per_order_fee=0.0,
+        rsi_filter=False,
+    )
+    lf_engine.restart_engine(db_cursor, now=start)
+    settings = lf_engine.load_settings(db_cursor)
+    initial_equity = lf_engine.current_equity(db_cursor)
+    assert initial_equity == pytest.approx(settings.starting_balance)
+
+    entry_time = start + timedelta(minutes=1)
+    trade_id = lf_engine.open_trade(
+        db_cursor,
+        ticker="SPY",
+        option_type="CALL",
+        strike=None,
+        expiry=None,
+        mid_price=5.0,
+        entry_time=entry_time,
+        settings=settings,
+    )
+    assert trade_id is not None
+
+    exit_time = entry_time + timedelta(minutes=5)
+    closed = lf_engine.close_trade(
+        db_cursor,
+        trade_id,
+        mid_price=5.5,
+        exit_time=exit_time,
+        reason="target",
+        settings=settings,
+    )
+    assert closed is not None
+
+    updated_equity = lf_engine.current_equity(db_cursor)
+    assert updated_equity > initial_equity
