@@ -320,6 +320,11 @@ async def _run_hf_iteration(now: datetime, startup_logged: bool, iteration: int)
                 stop_pct=settings.max_adverse_pct,
                 time_cap_minutes=settings.time_cap_minutes,
             )
+            if reason == "timeout" and not exit_ts_raw:
+                logger.debug(
+                    "hf_loop_timeout_pending id=%s ticker=%s", row["id"], ticker
+                )
+                continue
             exit_dt = _parse_ts(exit_ts_raw)
             if exit_dt is None:
                 exit_dt = recent_pairs[-1][1] if recent_pairs else now_utc
