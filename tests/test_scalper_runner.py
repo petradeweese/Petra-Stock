@@ -1,3 +1,5 @@
+"""Regression tests for scalper runner lookback logic."""
+
 from datetime import datetime, timedelta, timezone
 
 from services.scalper.runner import _determine_lookback
