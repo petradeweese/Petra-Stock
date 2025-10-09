@@ -48,9 +48,6 @@
     <div class="footer-meta">
       © {{ current_year() }} Petra Stock · <a href="mailto:support@petrastock.com">support@petrastock.com</a> · <a href="tel:{{ contact.phone_href }}">{{ contact.phone }}</a>
     </div>
-    <div class="footer-meta">
-      {{ contact.name }} · {{ contact.address_1 }}{% if contact.address_2 %}, {{ contact.address_2 }}{% endif %}, {{ contact.city }}, {{ contact.region }} {{ contact.postal }}
-    </div>
   </footer>
   {% block extra_body %}{% endblock %}
   <div id="ctx-menu" hidden>

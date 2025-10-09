@@ -32,6 +32,8 @@ def test_settings_shows_unavailable_when_twilio_disabled(tmp_path, monkeypatch):
     button_html = _find_verify_button(text)
     assert "disabled" in button_html
     assert "Reply <strong>STOP</strong> to opt out" in text or "Reply STOP" in text
+    assert "+1 4705584503" in text
+    assert "Example Street" not in text
 
 
 def test_settings_allows_opt_in_when_twilio_enabled(tmp_path, monkeypatch):
@@ -39,7 +41,9 @@ def test_settings_allows_opt_in_when_twilio_enabled(tmp_path, monkeypatch):
     res = client.get("/settings")
     assert res.status_code == 200
     text = res.text
-    assert "Verification is unavailable" not in text
+    match = re.search(r"<p class=\"note\" id=\"sms-unavailable-note\"[^>]*>(.*?)</p>", text, re.S)
+    assert match is not None
+    assert "Verification is unavailable" not in (match.group(1) or "")
     button_html = _find_verify_button(text)
     assert "disabled" not in button_html
-    assert "Message frequency varies" in text
+    assert "No more than" in text
