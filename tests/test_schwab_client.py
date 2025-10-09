@@ -1,6 +1,7 @@
 import asyncio
 import datetime as dt
 import json
+import urllib.parse
 
 import pytest
 
@@ -24,16 +25,39 @@ def test_refresh_flow(monkeypatch):
     captured: list[dict] = []
 
     async def fake_request(method, url, **kwargs):
-        captured.append(kwargs.get("data", {}))
+        captured.append(kwargs.get("content", ""))
         return DummyResponse(200, {"access_token": "abc", "expires_in": 600})
 
     monkeypatch.setattr(schwab_client.http_client, "request", fake_request)
     client = schwab_client.SchwabClient()
     token = asyncio.run(client._refresh_access_token())
-    assert captured and captured[0]["refresh_token"] == settings.schwab_refresh_token
+    assert captured
+    parsed = urllib.parse.parse_qs(captured[0])
+    assert parsed.get("refresh_token", [None])[0] == settings.schwab_refresh_token
     assert token.access_token == "abc"
     remaining = token.expires_at - dt.datetime.now(dt.timezone.utc)
     assert abs(remaining.total_seconds() - 540) < 5  # 60s skew applied
+
+
+def test_refresh_invalid_grant_triggers_reauth(monkeypatch):
+    async def fake_request(method, url, **kwargs):
+        return DummyResponse(400, {"error": "invalid_grant"})
+
+    monkeypatch.setattr(schwab_client.http_client, "request", fake_request)
+    client = schwab_client.SchwabClient()
+    original_token = settings.schwab_refresh_token
+
+    try:
+        client.set_refresh_token("stale-token")
+        settings.schwab_refresh_token = "stale-token"
+
+        with pytest.raises(schwab_client.SchwabAuthError):
+            asyncio.run(client._refresh_access_token())
+
+        assert settings.schwab_refresh_token == ""
+    finally:
+        settings.schwab_refresh_token = original_token
+        client.set_refresh_token(original_token)
 
 
 def test_price_history_happy_path(monkeypatch):

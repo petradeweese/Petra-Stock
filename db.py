@@ -126,7 +126,7 @@ SCHEMA = [
         slippage_bps REAL DEFAULT 7.0,
         vega_scale REAL DEFAULT 0.03,
         ref_avg_dd REAL,
-        roi_snapshot REAL,
+        roi_snapshot TEXT,
         hit_pct_snapshot REAL,
         dd_pct_snapshot REAL,
         support_snapshot TEXT,
