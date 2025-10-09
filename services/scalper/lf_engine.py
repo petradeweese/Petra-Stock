@@ -499,6 +499,11 @@ def get_status(db) -> LFStatus:
     )
 
 
+def current_equity(db) -> float:
+    _ensure_schema(db)
+    return _latest_equity(db)
+
+
 def status_payload(db) -> Dict[str, Any]:
     st = get_status(db)
     settings = load_settings(db)
