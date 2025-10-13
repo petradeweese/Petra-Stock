@@ -13,6 +13,7 @@ import pandas as pd
 from config import settings
 from services import http_client
 from services.oauth_tokens import latest_refresh_token
+from prometheus_client import Counter, Histogram  # type: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,57 @@ PRICE_HISTORY_URL = os.getenv(
     "SCHWAB_PRICE_HISTORY_URL",
     "https://api.schwabapi.com/marketdata/v1/pricehistory",
 )
+
+REFRESH_BACKOFF_SECONDS = max(1, int(settings.schwab_refresh_backoff_seconds or 0))
+
+token_refresh_duration = Histogram(
+    "schwab_token_refresh_duration_seconds",
+    "Duration of Schwab OAuth token refresh requests",
+)
+token_refresh_total = Counter(
+    "schwab_token_refresh_total",
+    "Total Schwab OAuth token refresh attempts",
+)
+token_refresh_success = Counter(
+    "schwab_token_refresh_success_total",
+    "Successful Schwab OAuth token refreshes",
+)
+_token_refresh_error_counters: Dict[str, Counter] = {}
+provider_disabled_total = Counter(
+    "schwab_provider_disabled_total",
+    "Times the Schwab provider was disabled due to authentication errors",
+)
+_provider_disabled_counters: Dict[str, Counter] = {}
+
+
+def _normalize_metric_key(value: str) -> str:
+    cleaned = (value or "unknown").strip().lower().replace(" ", "_")
+    safe = "".join(ch for ch in cleaned if ch.isalnum() or ch == "_")
+    return safe or "unknown"
+
+
+def _increment_refresh_error(status: Optional[int]) -> None:
+    key = _normalize_metric_key(str(status) if status is not None else "unknown")
+    counter = _token_refresh_error_counters.get(key)
+    if counter is None:
+        counter = Counter(
+            f"schwab_token_refresh_error_{key}_total",
+            "Failed Schwab OAuth token refreshes grouped by status code",
+        )
+        _token_refresh_error_counters[key] = counter
+    counter.inc()
+
+
+def _increment_provider_disabled(reason: str) -> None:
+    key = _normalize_metric_key(reason)
+    counter = _provider_disabled_counters.get(key)
+    if counter is None:
+        counter = Counter(
+            f"schwab_provider_disabled_{key}_total",
+            "Times the Schwab provider was disabled grouped by reason",
+        )
+        _provider_disabled_counters[key] = counter
+    counter.inc()
 
 
 class SchwabAuthError(RuntimeError):
@@ -70,10 +122,37 @@ class SchwabClient:
         self._token_lock = asyncio.Lock()
         self._lock_loop: Optional[asyncio.AbstractEventLoop] = None
         self._last_status: Optional[int] = None
+        self._disabled_until: float = 0.0
+        self._disabled_reason: str = ""
+        self._disabled_status: Optional[int] = None
+        self._disabled_error: Optional[SchwabAuthError] = None
+        if not all(
+            [
+                self._client_id,
+                self._client_secret,
+                self._redirect_uri,
+                self._refresh_token,
+            ]
+        ):
+            err = SchwabAuthError("Missing Schwab OAuth configuration")
+            self.disable(reason="missing_config", status_code=None, error=err)
 
     # ------------------------------------------------------------------
     # Token handling
     async def _refresh_access_token(self) -> _Token:
+        blocked, reason, status, error = self.disabled_state()
+        if blocked:
+            remaining = max(0.0, self._disabled_until - time.monotonic())
+            logger.warning(
+                "schwab_token_refresh_blocked reason=%s status=%s remaining=%.2f",
+                reason or "unknown",
+                status if status is not None else "unknown",
+                remaining,
+            )
+            raise error or SchwabAuthError(
+                "Token refresh currently disabled", status_code=status
+            )
+
         refresh_token = self._current_refresh_token()
         if not all(
             [
@@ -123,19 +202,15 @@ class SchwabClient:
             "POST", TOKEN_URL, content=form_body, headers=headers
         )
         duration = time.monotonic() - t0
+        token_refresh_total.inc()
         if resp.status_code >= 400:
-            response_text = getattr(resp, "text", "")
-            logger.warning(
-                "schwab_token_error status=%s duration=%.2f body=%s",
-                resp.status_code,
-                duration,
-                response_text,
-            )
-            self._handle_refresh_failure(resp)
-            raise SchwabAuthError(
-                f"Token refresh failed ({resp.status_code})",
-                status_code=resp.status_code,
-            )
+            err = self._handle_refresh_failure(resp, duration)
+            _increment_refresh_error(resp.status_code)
+            token_refresh_duration.observe(duration)
+            raise err
+
+        token_refresh_success.inc()
+        token_refresh_duration.observe(duration)
 
         try:
             data: Dict[str, Any] = resp.json() if resp.content else {}
@@ -148,12 +223,13 @@ class SchwabClient:
 
         skewed = max(0, expires_in - 60)
         expires_at = dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=skewed)
+        self._clear_disable()
         logger.info(
             "schwab_token_refreshed expires_in=%s duration=%.2f", expires_in, duration
         )
         return _Token(access_token=token, expires_at=expires_at)
 
-    def _handle_refresh_failure(self, resp: Any) -> None:
+    def _handle_refresh_failure(self, resp: Any, duration: float) -> SchwabAuthError:
         try:
             data = resp.json() if resp.content else {}
         except ValueError:
@@ -162,12 +238,73 @@ class SchwabClient:
         error_code = str(data.get("error") or "").lower()
         error_description = str(data.get("error_description") or "").lower()
         combined = f"{error_code} {error_description}".strip()
+        logger.warning(
+            "schwab_token_error status=%s duration=%.2f error=%s description=%s",
+            resp.status_code,
+            duration,
+            error_code or "unknown",
+            error_description or "unknown",
+        )
         if resp.status_code == 400 and (
             "invalid_grant" in combined or "invalid_refresh_token" in combined
         ):
             logger.warning("schwab_refresh_token_invalid; clearing cached token")
             self._invalidate_refresh_token()
+        reason = error_code or f"status_{resp.status_code}"
+        message = f"Token refresh failed ({resp.status_code})"
+        if error_code:
+            message = f"{message} {error_code}".strip()
+        if error_description and error_description not in message:
+            message = f"{message}: {error_description}".strip()
+        err = SchwabAuthError(message, status_code=resp.status_code)
+        if resp.status_code == 400:
+            self.disable(reason=reason or "http_400", status_code=resp.status_code, error=err)
+        else:
+            self._disabled_error = None
+        return err
 
+    def disable(
+        self,
+        *,
+        reason: str,
+        status_code: Optional[int] = None,
+        ttl: Optional[float] = None,
+        error: Optional[SchwabAuthError] = None,
+    ) -> None:
+        ttl_value = ttl if ttl is not None else float(REFRESH_BACKOFF_SECONDS)
+        ttl_value = max(0.0, ttl_value)
+        if ttl_value == 0:
+            self._clear_disable()
+            return
+        reason_value = _normalize_metric_key(reason)
+        provider_disabled_total.inc()
+        _increment_provider_disabled(reason_value)
+        self._disabled_until = time.monotonic() + ttl_value
+        self._disabled_reason = reason_value
+        self._disabled_status = status_code
+        self._disabled_error = error
+        self.clear_cached_token()
+        logger.info(
+            "schwab_provider_disabled reason=%s status=%s ttl=%.2f",
+            self._disabled_reason,
+            status_code if status_code is not None else "unknown",
+            ttl_value,
+        )
+
+    def _clear_disable(self) -> None:
+        self._disabled_until = 0.0
+        self._disabled_reason = ""
+        self._disabled_status = None
+        self._disabled_error = None
+
+    def disabled_state(
+        self,
+    ) -> Tuple[bool, Optional[str], Optional[int], Optional[SchwabAuthError]]:
+        if self._disabled_until and time.monotonic() < self._disabled_until:
+            return True, self._disabled_reason or None, self._disabled_status, self._disabled_error
+        if self._disabled_until and time.monotonic() >= self._disabled_until:
+            self._clear_disable()
+        return False, None, None, None
     def _invalidate_refresh_token(self) -> None:
         self.set_refresh_token("")
         settings.schwab_refresh_token = ""
@@ -204,6 +341,7 @@ class SchwabClient:
     def set_refresh_token(self, refresh_token: str) -> None:
         self._refresh_token = refresh_token or ""
         self.clear_cached_token()
+        self._clear_disable()
 
     # ------------------------------------------------------------------
     # Helpers
@@ -519,6 +657,20 @@ async def get_price_history(
     return await _client.get_price_history(
         symbol, start, end, interval, timeout_ctx=timeout_ctx
     )
+
+
+def disabled_state() -> Tuple[bool, Optional[str], Optional[int], Optional[SchwabAuthError]]:
+    return _client.disabled_state()
+
+
+def disable(
+    *,
+    reason: str,
+    status_code: Optional[int] = None,
+    ttl: Optional[float] = None,
+    error: Optional[SchwabAuthError] = None,
+) -> None:
+    _client.disable(reason=reason, status_code=status_code, ttl=ttl, error=error)
 
 
 async def get_quote(

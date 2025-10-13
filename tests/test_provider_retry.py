@@ -45,6 +45,8 @@ def test_retry_success(monkeypatch, caplog):
             get_price_history=fake_history,
             get_quote=lambda *a, **k: {},
             last_status=lambda: 200,
+            disabled_state=lambda: (False, None, None, None),
+            disable=lambda **_: None,
         ),
     )
     monkeypatch.setattr(data_provider.asyncio, "sleep", fake_sleep)
@@ -91,6 +93,8 @@ def test_retry_exhaust_falls_back(monkeypatch):
             get_price_history=fake_history,
             get_quote=lambda *a, **k: {},
             last_status=lambda: 200,
+            disabled_state=lambda: (False, None, None, None),
+            disable=lambda **_: None,
         ),
     )
     monkeypatch.setattr(data_provider.asyncio, "sleep", fake_sleep)
@@ -110,3 +114,48 @@ def test_retry_exhaust_falls_back(monkeypatch):
     assert fallback_called
     assert not df.empty
     assert provider == "yfinance"
+
+
+def test_http_400_no_retry(monkeypatch):
+    attempts = 0
+    disabled_calls: list[dict] = []
+
+    async def fake_history(symbol, start, end, interval, timeout_ctx=None):
+        nonlocal attempts
+        attempts += 1
+        raise SchwabAPIError("bad", status_code=400)
+
+    async def fake_yfinance(symbol, start, end, interval):
+        return _sample_frame(start)
+
+    def record_disable(**kwargs):
+        disabled_calls.append(kwargs)
+
+    monkeypatch.setattr(
+        data_provider,
+        "schwab_client",
+        SimpleNamespace(
+            get_price_history=fake_history,
+            get_quote=lambda *a, **k: {},
+            last_status=lambda: 400,
+            disabled_state=lambda: (False, None, None, None),
+            disable=record_disable,
+        ),
+    )
+    monkeypatch.setattr(data_provider, "_fetch_yfinance", fake_yfinance)
+    monkeypatch.setattr(
+        data_provider,
+        "settings",
+        SimpleNamespace(fetch_retry_max=3, fetch_retry_base_ms=1, fetch_retry_cap_ms=2),
+    )
+
+    start = dt.datetime(2023, 1, 1, tzinfo=dt.timezone.utc)
+    end = dt.datetime(2023, 1, 2, tzinfo=dt.timezone.utc)
+    df, provider = asyncio.run(
+        data_provider._fetch_single("SPY", start, end, interval="15m")
+    )
+
+    assert attempts == 1
+    assert provider == "yfinance"
+    assert disabled_calls
+    assert disabled_calls[0].get("reason") == "http_400"

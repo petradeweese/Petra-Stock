@@ -36,6 +36,8 @@ def test_fetch_bars_uses_schwab(monkeypatch):
         get_price_history=fake_history,
         get_quote=fake_quote,
         last_status=lambda: 200,
+        disabled_state=lambda: (False, None, None, None),
+        disable=lambda **_: None,
     )
 
     async def fail_yf(*args, **kwargs):
@@ -89,6 +91,8 @@ def test_fetch_bars_fallbacks_to_yfinance(monkeypatch, caplog):
         get_price_history=fake_history,
         get_quote=failing_quote,
         last_status=lambda: 429,
+        disabled_state=lambda: (False, None, None, None),
+        disable=lambda **_: None,
     )
 
     monkeypatch.setattr(data_provider, "schwab_client", fake_client)
@@ -127,6 +131,8 @@ def test_fetch_bars_returns_empty_when_all_fail(monkeypatch, caplog):
         get_price_history=fake_history,
         get_quote=failing_quote,
         last_status=lambda: 500,
+        disabled_state=lambda: (False, None, None, None),
+        disable=lambda **_: None,
     )
 
     async def fake_yf_quote(symbol):

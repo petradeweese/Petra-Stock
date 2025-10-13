@@ -1,5 +1,6 @@
 # ruff: noqa: E501
 import asyncio
+import inspect
 import atexit
 import base64
 import csv
@@ -56,6 +57,7 @@ from services import (
     http_client,
     paper_trading,
     price_store,
+    schwab_client,
     sms_consent,
     twilio_client,
 )
@@ -4362,12 +4364,21 @@ async def _run_scan_task(
     remaining_symbols = len(plan.need_fetch)
     fetch_elapsed_ms = 0.0
 
+    disabled_fetch, disabled_reason, _, _ = schwab_client.disabled_state()
     if remaining_symbols:
-        logger.info(
-            "routes fetch_start symbols=%d interval=%s",
-            remaining_symbols,
-            plan.interval,
-        )
+        if disabled_fetch:
+            logger.info(
+                "routes fetch_start_schwab_disabled fallback symbols=%d interval=%s reason=%s",
+                remaining_symbols,
+                plan.interval,
+                disabled_reason or "unknown",
+            )
+        else:
+            logger.info(
+                "routes fetch_start symbols=%d interval=%s",
+                remaining_symbols,
+                plan.interval,
+            )
 
         def _progress(symbol: str, pending: int, _total: int) -> None:
             nonlocal remaining_symbols
@@ -4417,15 +4428,22 @@ async def _run_scan_task(
         )
 
     try:
+        perform_scan = _perform_scan
+        sig = inspect.signature(perform_scan)
+        extra: dict[str, object] = {}
+        if "plan" in sig.parameters:
+            extra["plan"] = plan
+        if "fetch_missing" in sig.parameters:
+            extra["fetch_missing"] = False
+        if "fetch_elapsed_ms" in sig.parameters:
+            extra["fetch_elapsed_ms"] = fetch_elapsed_ms
         rows, skipped, metrics = await asyncio.to_thread(
-            _perform_scan,
+            perform_scan,
             tickers,
             params,
             sort_key,
             prog,
-            plan=plan,
-            fetch_missing=False,
-            fetch_elapsed_ms=fetch_elapsed_ms,
+            **extra,
         )
         duration = time.monotonic() - start_ts
         csv_headers, csv_rows = _rows_to_csv_table(rows)
