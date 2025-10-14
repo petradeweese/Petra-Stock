@@ -362,6 +362,8 @@ def run_migrations() -> None:
 
 def init_db():
     run_migrations()
+    if not _ENV_DATABASE_URL:
+        _run_sqlite_schema_fixes()
 
 
 def get_db():
@@ -438,6 +440,44 @@ def _ensure_scanner_column(db: sqlite3.Cursor) -> None:
             "ALTER TABLE settings ADD COLUMN forward_recency_halflife_days REAL DEFAULT 30"
         )
         db.connection.commit()
+
+
+def _ensure_favorites_hit_pct_column(db: sqlite3.Cursor) -> bool:
+    """Ensure the favorites table has the ``hit_pct_snapshot`` column."""
+
+    try:
+        db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='favorites'"
+        )
+        if db.fetchone() is None:
+            return False
+
+        db.execute("PRAGMA table_info(favorites)")
+        columns = [row[1] for row in db.fetchall()]
+        if "hit_pct_snapshot" in columns:
+            return False
+
+        db.execute(
+            "ALTER TABLE favorites ADD COLUMN hit_pct_snapshot REAL DEFAULT 0"
+        )
+        logger.info("Added hit_pct_snapshot column to favorites table")
+        return True
+    except sqlite3.Error:
+        logger.exception("ensure_favorites_hit_pct_column_failed")
+        return False
+
+
+def _run_sqlite_schema_fixes() -> None:
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        try:
+            cursor = conn.cursor()
+            if _ensure_favorites_hit_pct_column(cursor):
+                conn.commit()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        logger.exception("sqlite_schema_fixes_failed")
 
 
 def row_to_dict(
