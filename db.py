@@ -362,8 +362,9 @@ def run_migrations() -> None:
 
 def init_db():
     run_migrations()
-    if not _ENV_DATABASE_URL:
-        _run_sqlite_schema_fixes()
+    engine = get_engine()
+    if engine.dialect.name == "sqlite":
+        _run_sqlite_schema_fixes(engine)
 
 
 def get_db():
@@ -467,9 +468,12 @@ def _ensure_favorites_hit_pct_column(db: sqlite3.Cursor) -> bool:
         return False
 
 
-def _run_sqlite_schema_fixes() -> None:
+def _run_sqlite_schema_fixes(engine: Engine | None = None) -> None:
     try:
-        conn = sqlite3.connect(DB_PATH)
+        engine = engine or get_engine()
+        if engine.dialect.name != "sqlite":
+            return
+        conn = engine.raw_connection()
         try:
             cursor = conn.cursor()
             if _ensure_favorites_hit_pct_column(cursor):
