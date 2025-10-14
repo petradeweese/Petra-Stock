@@ -15,7 +15,11 @@ from config import settings
 import db
 from services import price_store
 from services import schwab_client
-from services.schwab_client import SchwabAPIError, SchwabAuthError
+from services.schwab_client import (
+    HTTP_400_DISABLE_SECONDS,
+    SchwabAPIError,
+    SchwabAuthError,
+)
 from utils import OPEN_TIME, TZ, last_trading_close, market_is_open
 
 RUN_ID = os.getenv("RUN_ID", "")
@@ -53,6 +57,61 @@ schwab_fallback_total = Counter(
     "Times Schwab data fetches fell back to alternate providers",
 )
 _schwab_fallback_reason_counters: Dict[str, Counter] = {}
+schwab_fallback_rate = Counter(
+    "schwab_fallback_rate_total",
+    "Counter of Schwab fallbacks for rate calculations",
+)
+
+
+_AUTH_COOLDOWN_UNTIL: float = 0.0
+_AUTH_COOLDOWN_REASON: str = ""
+_AUTH_WARN_KEY: str = ""
+
+
+def _auth_cooldown_state() -> Tuple[bool, Optional[str], float]:
+    remaining = max(0.0, _AUTH_COOLDOWN_UNTIL - time.monotonic())
+    if remaining > 0:
+        return True, _AUTH_COOLDOWN_REASON or None, remaining
+    return False, None, 0.0
+
+
+def _start_auth_cooldown(
+    reason: str,
+    *,
+    status: Optional[int],
+    detail: str,
+    ttl: float,
+) -> None:
+    global _AUTH_COOLDOWN_UNTIL, _AUTH_COOLDOWN_REASON, _AUTH_WARN_KEY
+    ttl = max(0.0, ttl)
+    now = time.monotonic()
+    _AUTH_COOLDOWN_UNTIL = max(_AUTH_COOLDOWN_UNTIL, now + ttl)
+    _AUTH_COOLDOWN_REASON = reason
+    warn_key = f"{reason}:{status if status is not None else 'unknown'}"
+    if _AUTH_WARN_KEY != warn_key:
+        logger.warning(
+            "schwab_auth_failure reason=%s status=%s detail=%s ttl=%.2f",
+            reason,
+            status if status is not None else "unknown",
+            detail or "unknown",
+            ttl,
+        )
+        _AUTH_WARN_KEY = warn_key
+
+
+def _clear_auth_cooldown() -> None:
+    global _AUTH_COOLDOWN_UNTIL, _AUTH_COOLDOWN_REASON, _AUTH_WARN_KEY
+    _AUTH_COOLDOWN_UNTIL = 0.0
+    _AUTH_COOLDOWN_REASON = ""
+    _AUTH_WARN_KEY = ""
+
+
+def _auth_backoff_seconds() -> float:
+    try:
+        value = float(settings.schwab_refresh_backoff_seconds or 0)
+    except (TypeError, ValueError):
+        value = 0.0
+    return max(1.0, value)
 
 
 def _increment_fallback_reason(reason: str) -> None:
@@ -675,29 +734,39 @@ async def _fetch_single(
         rows = len(df)
         reason_text = ";".join(errors) or "schwab_unavailable"
         logger.info(
-            "yfinance_fetch symbol=%s interval=%s rows=%d duration=%.2f reason=%s",
+            "yfinance_fetch symbol=%s interval=%s rows=%d duration=%.2f reason=%s "
+            "ny_start=%s ny_end=%s utc_start_ms=%d utc_end_ms=%d",
             symbol,
             interval,
             rows,
             duration,
             reason_text,
-        )
-        logger.info(
-            "yfinance_window symbol=%s ny_start=%s ny_end=%s "
-            "utc_start_ms=%d utc_end_ms=%d bars_returned=%d",
-            symbol,
             ny_start.isoformat(),
             ny_end.isoformat(),
             start_ms,
             end_ms,
-            rows,
         )
         provider = "yfinance" if rows and not skip_network else "none"
         df.attrs["provider"] = provider
         schwab_fallback_total.inc()
         _increment_fallback_reason(fallback_reason)
+        schwab_fallback_rate.inc()
         schwab_retry_seconds.observe(lost)
         return df, provider
+
+    cooldown_active, cooldown_reason, cooldown_remaining = _auth_cooldown_state()
+    if cooldown_active:
+        reason = cooldown_reason or "schwab_disabled"
+        errors.append(reason)
+        error_labels.append(reason)
+        logger.info(
+            "schwab_auth_cooldown_skip symbol=%s interval=%s reason=%s remaining=%.2f",
+            symbol,
+            interval,
+            reason,
+            cooldown_remaining,
+        )
+        return await _finish_with_fallback(reason)
 
     disabled, disabled_reason, disabled_status, _ = schwab_client.disabled_state()
     if disabled:
@@ -729,24 +798,20 @@ async def _fetch_single(
             rows = len(df)
             status = schwab_client.last_status()
             logger.info(
-                "schwab_fetch symbol=%s interval=%s rows=%d duration=%.2f status=%s",
+                "schwab_fetch symbol=%s interval=%s rows=%d duration=%.2f status=%s "
+                "ny_start=%s ny_end=%s utc_start_ms=%d utc_end_ms=%d",
                 symbol,
                 interval,
                 rows,
                 duration,
                 status if status is not None else "unknown",
-            )
-            logger.info(
-                "schwab_window symbol=%s ny_start=%s ny_end=%s "
-                "utc_start_ms=%d utc_end_ms=%d bars_returned=%d",
-                symbol,
                 ny_start.isoformat(),
                 ny_end.isoformat(),
                 start_ms,
                 end_ms,
-                rows,
             )
             if rows:
+                _clear_auth_cooldown()
                 df.attrs["provider"] = "schwab"
                 return df, "schwab"
             logger.warning(
@@ -772,14 +837,37 @@ async def _fetch_single(
                 exc,
             )
             if isinstance(exc, SchwabAuthError):
-                error_labels.append("auth_error")
+                reason_label = (exc.error_code or "auth_error").strip() or "auth_error"
+                if status == 400:
+                    reason_label = "http_400"
+                error_labels.append(reason_label)
+                base_ttl = _auth_backoff_seconds()
+                ttl = max(
+                    base_ttl,
+                    float(HTTP_400_DISABLE_SECONDS) if status == 400 else base_ttl,
+                )
+                _start_auth_cooldown(
+                    reason_label,
+                    status=status,
+                    detail=str(exc),
+                    ttl=ttl,
+                )
                 schwab_client.disable(
-                    reason="auth_error", status_code=status, error=exc
+                    reason=reason_label, status_code=status, ttl=ttl, error=exc
                 )
                 break
             if status == 400:
                 error_labels.append("http_400")
-                schwab_client.disable(reason="http_400", status_code=status)
+                ttl = max(_auth_backoff_seconds(), float(HTTP_400_DISABLE_SECONDS))
+                _start_auth_cooldown(
+                    "http_400",
+                    status=status,
+                    detail=str(exc),
+                    ttl=ttl,
+                )
+                schwab_client.disable(
+                    reason="http_400", status_code=status, ttl=ttl, error=None
+                )
                 break
             if status is not None and 400 <= status < 500:
                 error_labels.append(f"http_{status}")
