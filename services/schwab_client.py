@@ -28,6 +28,8 @@ PRICE_HISTORY_URL = os.getenv(
     "https://api.schwabapi.com/marketdata/v1/pricehistory",
 )
 
+HTTP_400_DISABLE_SECONDS = int(os.getenv("SCHWAB_HTTP_400_DISABLE_SECONDS", "600"))
+
 REFRESH_BACKOFF_SECONDS = max(1, int(settings.schwab_refresh_backoff_seconds or 0))
 
 token_refresh_duration = Histogram(
@@ -42,12 +44,20 @@ token_refresh_success = Counter(
     "schwab_token_refresh_success_total",
     "Successful Schwab OAuth token refreshes",
 )
-_token_refresh_error_counters: Dict[str, Counter] = {}
+token_refresh_failure_total = Counter(
+    "schwab_token_refresh_failure_total",
+    "Total failed Schwab OAuth token refresh attempts",
+)
+token_refresh_storm_prevented = Counter(
+    "schwab_token_refresh_storm_prevented_total",
+    "Refresh attempts that were coalesced by singleflight protection",
+)
 provider_disabled_total = Counter(
     "schwab_provider_disabled_total",
     "Times the Schwab provider was disabled due to authentication errors",
 )
 _provider_disabled_counters: Dict[str, Counter] = {}
+_token_refresh_failure_by_code: Dict[str, Counter] = {}
 
 
 def _normalize_metric_key(value: str) -> str:
@@ -57,14 +67,15 @@ def _normalize_metric_key(value: str) -> str:
 
 
 def _increment_refresh_error(status: Optional[int]) -> None:
+    token_refresh_failure_total.inc()
     key = _normalize_metric_key(str(status) if status is not None else "unknown")
-    counter = _token_refresh_error_counters.get(key)
+    counter = _token_refresh_failure_by_code.get(key)
     if counter is None:
         counter = Counter(
-            f"schwab_token_refresh_error_{key}_total",
+            f"schwab_token_refresh_failure_{key}_total",
             "Failed Schwab OAuth token refreshes grouped by status code",
         )
-        _token_refresh_error_counters[key] = counter
+        _token_refresh_failure_by_code[key] = counter
     counter.inc()
 
 
@@ -83,9 +94,18 @@ def _increment_provider_disabled(reason: str) -> None:
 class SchwabAuthError(RuntimeError):
     """Raised when authentication credentials are missing or invalid."""
 
-    def __init__(self, message: str, *, status_code: Optional[int] = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: Optional[int] = None,
+        error_code: Optional[str] = None,
+        error_description: Optional[str] = None,
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
+        self.error_code = error_code
+        self.error_description = error_description
 
 
 class SchwabAPIError(RuntimeError):
@@ -121,6 +141,8 @@ class SchwabClient:
         self._token: Optional[_Token] = None
         self._token_lock = asyncio.Lock()
         self._lock_loop: Optional[asyncio.AbstractEventLoop] = None
+        self._refresh_task: Optional[asyncio.Task[_Token]] = None
+        self._refresh_task_loop: Optional[asyncio.AbstractEventLoop] = None
         self._last_status: Optional[int] = None
         self._disabled_until: float = 0.0
         self._disabled_reason: str = ""
@@ -184,6 +206,7 @@ class SchwabClient:
         ).decode()
         headers = {
             "Content-Type": "application/x-www-form-urlencoded",
+            "Accept": "application/json",
             "Authorization": f"Basic {basic_token}",
         }
 
@@ -235,9 +258,11 @@ class SchwabClient:
         except ValueError:
             data = {}
 
-        error_code = str(data.get("error") or "").lower()
-        error_description = str(data.get("error_description") or "").lower()
-        combined = f"{error_code} {error_description}".strip()
+        error_code_raw = data.get("error")
+        error_description_raw = data.get("error_description")
+        error_code = str(error_code_raw or "").strip()
+        error_description = str(error_description_raw or "").strip()
+        combined = f"{error_code} {error_description}".strip().lower()
         logger.warning(
             "schwab_token_error status=%s duration=%.2f error=%s description=%s",
             resp.status_code,
@@ -250,15 +275,25 @@ class SchwabClient:
         ):
             logger.warning("schwab_refresh_token_invalid; clearing cached token")
             self._invalidate_refresh_token()
-        reason = error_code or f"status_{resp.status_code}"
+        reason = (error_code or f"status_{resp.status_code}").strip()
         message = f"Token refresh failed ({resp.status_code})"
         if error_code:
             message = f"{message} {error_code}".strip()
         if error_description and error_description not in message:
             message = f"{message}: {error_description}".strip()
-        err = SchwabAuthError(message, status_code=resp.status_code)
+        err = SchwabAuthError(
+            message,
+            status_code=resp.status_code,
+            error_code=error_code or None,
+            error_description=error_description or None,
+        )
         if resp.status_code == 400:
-            self.disable(reason=reason or "http_400", status_code=resp.status_code, error=err)
+            self.disable(
+                reason=reason or "http_400",
+                status_code=resp.status_code,
+                ttl=float(HTTP_400_DISABLE_SECONDS),
+                error=err,
+            )
         else:
             self._disabled_error = None
         return err
@@ -283,6 +318,8 @@ class SchwabClient:
         self._disabled_reason = reason_value
         self._disabled_status = status_code
         self._disabled_error = error
+        self._refresh_task = None
+        self._refresh_task_loop = None
         self.clear_cached_token()
         logger.info(
             "schwab_provider_disabled reason=%s status=%s ttl=%.2f",
@@ -326,11 +363,45 @@ class SchwabClient:
         if getattr(self, "_lock_loop", None) is not loop:
             self._token_lock = asyncio.Lock()
             self._lock_loop = loop
+        task: Optional[asyncio.Task[_Token]] = None
         async with self._token_lock:
-            if self._token and self._token.expires_at > dt.datetime.now(dt.timezone.utc):
+            now = dt.datetime.now(dt.timezone.utc)
+            if self._token and self._token.expires_at > now:
                 return self._token.access_token
-            self._token = await self._refresh_access_token()
-            return self._token.access_token
+
+            current = self._refresh_task
+            if current is not None:
+                if current.done():
+                    self._refresh_task = None
+                    self._refresh_task_loop = None
+                elif self._refresh_task_loop is loop:
+                    task = current
+                    token_refresh_storm_prevented.inc()
+                else:
+                    self._refresh_task = None
+                    self._refresh_task_loop = None
+
+            if task is None:
+                task = asyncio.create_task(self._refresh_access_token())
+                self._refresh_task = task
+                self._refresh_task_loop = loop
+
+        assert task is not None  # for type-checkers
+        try:
+            refreshed = await task
+        except Exception:
+            async with self._token_lock:
+                if self._refresh_task is task:
+                    self._refresh_task = None
+                    self._refresh_task_loop = None
+            raise
+
+        async with self._token_lock:
+            self._token = refreshed
+            if self._refresh_task is task:
+                self._refresh_task = None
+                self._refresh_task_loop = None
+            return refreshed.access_token
 
     def clear_cached_token(self) -> None:
         self._token = None
