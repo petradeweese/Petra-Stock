@@ -72,7 +72,7 @@ def test_hf_get_status_missing_row(monkeypatch):
         status = hf_engine.get_status(cursor)
         assert status.status == "inactive"
         assert status.started_at is None
-        assert status.account_equity == pytest.approx(0.0)
+        assert status.account_equity == pytest.approx(100000.0)
     finally:
         _close_cursor(cursor)
 

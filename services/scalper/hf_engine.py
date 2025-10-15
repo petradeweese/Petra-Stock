@@ -128,13 +128,24 @@ def _coerce_int(value: Any, *, default: int, key: str) -> int:
         return int(default)
 
 
-def _row_value(row: Any, key: str) -> Any:
+def _row_value(
+    row: Any, key: str, index: int | None = None, default: Any = None
+) -> Any:
     if row is None:
-        return None
-    try:
-        return row[key]  # type: ignore[index]
-    except (KeyError, IndexError, TypeError):
-        return None
+        return default
+    if isinstance(row, Mapping):
+        return row.get(key, default)
+    if key:
+        try:
+            return row[key]  # type: ignore[index]
+        except (KeyError, IndexError, TypeError):
+            pass
+    if index is not None:
+        try:
+            return row[index]  # type: ignore[index]
+        except (IndexError, TypeError):
+            pass
+    return default
 
 
 def _ensure_schema(db) -> None:
@@ -240,69 +251,69 @@ def load_settings(db) -> HFSettings:
     if row is None:
         logger.warning("hf_settings_missing_row using defaults")
         return defaults
-    tickers_value = _row_value(row, "tickers")
+    tickers_value = _row_value(row, "tickers", 3)
     tickers = str(tickers_value).strip() if tickers_value is not None else ""
     if not tickers:
         tickers = defaults.tickers
     return HFSettings(
         starting_balance=_coerce_float(
-            _row_value(row, "starting_balance"),
+            _row_value(row, "starting_balance", 0),
             default=defaults.starting_balance,
             key="starting_balance",
         ),
         pct_per_trade=_coerce_float(
-            _row_value(row, "pct_per_trade"),
+            _row_value(row, "pct_per_trade", 1),
             default=defaults.pct_per_trade,
             key="pct_per_trade",
         ),
         daily_trade_cap=_coerce_int(
-            _row_value(row, "daily_trade_cap"),
+            _row_value(row, "daily_trade_cap", 2),
             default=defaults.daily_trade_cap,
             key="daily_trade_cap",
         ),
         tickers=tickers or defaults.tickers,
         profit_target_pct=_coerce_float(
-            _row_value(row, "profit_target_pct"),
+            _row_value(row, "profit_target_pct", 4),
             default=defaults.profit_target_pct,
             key="profit_target_pct",
         ),
         max_adverse_pct=_coerce_float(
-            _row_value(row, "max_adverse_pct"),
+            _row_value(row, "max_adverse_pct", 5),
             default=defaults.max_adverse_pct,
             key="max_adverse_pct",
         ),
         time_cap_minutes=_coerce_int(
-            _row_value(row, "time_cap_minutes"),
+            _row_value(row, "time_cap_minutes", 6),
             default=defaults.time_cap_minutes,
             key="time_cap_minutes",
         ),
         cooldown_minutes=_coerce_int(
-            _row_value(row, "cooldown_minutes"),
+            _row_value(row, "cooldown_minutes", 7),
             default=defaults.cooldown_minutes,
             key="cooldown_minutes",
         ),
         max_open_positions=_coerce_int(
-            _row_value(row, "max_open_positions"),
+            _row_value(row, "max_open_positions", 8),
             default=defaults.max_open_positions,
             key="max_open_positions",
         ),
         daily_max_drawdown_pct=_coerce_float(
-            _row_value(row, "daily_max_drawdown_pct"),
+            _row_value(row, "daily_max_drawdown_pct", 9),
             default=defaults.daily_max_drawdown_pct,
             key="daily_max_drawdown_pct",
         ),
         per_contract_fee=_coerce_float(
-            _row_value(row, "per_contract_fee"),
+            _row_value(row, "per_contract_fee", 10),
             default=defaults.per_contract_fee,
             key="per_contract_fee",
         ),
         per_order_fee=_coerce_float(
-            _row_value(row, "per_order_fee"),
+            _row_value(row, "per_order_fee", 11),
             default=defaults.per_order_fee,
             key="per_order_fee",
         ),
         volatility_gate=_coerce_float(
-            _row_value(row, "volatility_gate"),
+            _row_value(row, "volatility_gate", 12),
             default=defaults.volatility_gate,
             key="volatility_gate",
         ),
@@ -385,7 +396,7 @@ def start_engine(db, *, now: datetime | None = None) -> HFStatus:
     )
     db.connection.commit()
     _ensure_equity_seed(db, settings, now=now)
-    return get_status(db)
+    return get_status(db, settings=settings)
 
 
 def stop_engine(db, *, now: datetime | None = None) -> HFStatus:
@@ -405,22 +416,24 @@ def restart_engine(db, *, now: datetime | None = None) -> HFStatus:
     )
     db.connection.commit()
     _ensure_equity_seed(db, settings, now=now)
-    return get_status(db)
+    return get_status(db, settings=settings)
 
 
-def get_status(db) -> HFStatus:
+def get_status(db, *, settings: HFSettings | None = None) -> HFStatus:
     _ensure_schema(db)
+    settings = settings or load_settings(db)
+    _ensure_equity_seed(db, settings)
     state = db.execute(
         "SELECT status, started_at, halted_at FROM scalper_hf_state WHERE id=1"
     ).fetchone()
     if state is None:
         logger.warning("hf_state_missing defaulting to inactive")
-    status_value = _row_value(state, "status")
+    status_value = _row_value(state, "status", 0, "inactive")
     status = str(status_value or "inactive")
-    started_raw = _row_value(state, "started_at")
+    started_raw = _row_value(state, "started_at", 1)
     started_at = str(started_raw) if started_raw else None
-    halted = bool(_row_value(state, "halted_at"))
-    equity = float(_latest_equity(db) or 0.0)
+    halted = bool(_row_value(state, "halted_at", 2))
+    equity = float(_latest_equity(db) or settings.starting_balance)
     open_positions = _count_open_positions(db)
     realized_today = _realized_today(db)
     win_rate = _win_rate(db)
@@ -442,8 +455,8 @@ def current_equity(db) -> float:
 
 
 def status_payload(db) -> Dict[str, Any]:
-    st = get_status(db)
     settings = load_settings(db)
+    st = get_status(db, settings=settings)
     return {
         "status": st.status,
         "started_at": st.started_at,
@@ -514,7 +527,15 @@ def _win_rate(db) -> float:
     ).fetchall()
     if not rows:
         return 0.0
-    wins = sum(1 for row in rows if float(row["net_pl"] or 0.0) > 0.0)
+    wins = 0
+    for row in rows:
+        net_pl = _row_value(row, "net_pl", 0, 0.0)
+        try:
+            value = float(net_pl or 0.0)
+        except (TypeError, ValueError):
+            value = 0.0
+        if value > 0.0:
+            wins += 1
     return round(wins / len(rows) * 100.0, 2)
 
 

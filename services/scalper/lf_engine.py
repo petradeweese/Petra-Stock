@@ -449,7 +449,7 @@ def start_engine(db, *, now: datetime | None = None) -> LFStatus:
     )
     db.connection.commit()
     _ensure_equity_seed(db, settings, now=now)
-    return get_status(db)
+    return get_status(db, settings=settings)
 
 
 def stop_engine(db, *, now: datetime | None = None) -> LFStatus:
@@ -469,11 +469,13 @@ def restart_engine(db, *, now: datetime | None = None) -> LFStatus:
     )
     db.connection.commit()
     _ensure_equity_seed(db, settings, now=now)
-    return get_status(db)
+    return get_status(db, settings=settings)
 
 
-def get_status(db) -> LFStatus:
+def get_status(db, *, settings: LFSettings | None = None) -> LFStatus:
     _ensure_schema(db)
+    settings = settings or load_settings(db)
+    _ensure_equity_seed(db, settings)
     state = db.execute(
         "SELECT status, started_at FROM scalper_lf_state WHERE id=1"
     ).fetchone()
@@ -483,7 +485,7 @@ def get_status(db) -> LFStatus:
     status = str(status_value or "inactive")
     started_raw = _row_value(state, "started_at", 1)
     started_at = str(started_raw) if started_raw else None
-    equity = float(_latest_equity(db) or 0.0)
+    equity = float(_latest_equity(db) or settings.starting_balance)
     open_positions = _count_open_positions(db)
     realized_today = _realized_today(db)
     unrealized = _unrealized_pl(db)
@@ -505,8 +507,8 @@ def current_equity(db) -> float:
 
 
 def status_payload(db) -> Dict[str, Any]:
-    st = get_status(db)
     settings = load_settings(db)
+    st = get_status(db, settings=settings)
     return {
         "status": st.status,
         "started_at": st.started_at,
@@ -653,7 +655,7 @@ def open_trade(
 ) -> Optional[int]:
     _ensure_schema(db)
     settings = settings or load_settings(db)
-    state = get_status(db)
+    state = get_status(db, settings=settings)
     if state.status != "active":
         logger.info("lf_trade_skipped status=%s", state.status)
         return None
