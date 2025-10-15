@@ -141,3 +141,55 @@ def test_favorites_migration_adds_hit_pct_snapshot(tmp_path):
     conn.close()
 
     assert "hit_pct_snapshot" in columns
+
+
+def test_favorites_migration_adds_dd_pct_snapshot(tmp_path):
+    db.DB_PATH = str(tmp_path / "favorites_dd_legacy.db")
+    conn = sqlite3.connect(db.DB_PATH)
+    conn.executescript(
+        """
+        CREATE TABLE favorites (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticker TEXT NOT NULL,
+            direction TEXT NOT NULL,
+            interval TEXT NOT NULL DEFAULT '15m',
+            rule TEXT NOT NULL,
+            target_pct REAL DEFAULT 1.0,
+            stop_pct REAL DEFAULT 0.5,
+            window_value REAL DEFAULT 4.0,
+            window_unit TEXT DEFAULT 'Hours',
+            lookback_years REAL DEFAULT 0.2,
+            max_tt_bars INTEGER DEFAULT 12,
+            min_support INTEGER DEFAULT 20,
+            delta REAL DEFAULT 0.4,
+            theta_day REAL DEFAULT 0.2,
+            atrz REAL DEFAULT 0.10,
+            slope REAL DEFAULT 0.02,
+            use_regime INTEGER DEFAULT 0,
+            trend_only INTEGER DEFAULT 0,
+            vix_z_max REAL DEFAULT 3.0,
+            slippage_bps REAL DEFAULT 7.0,
+            vega_scale REAL DEFAULT 0.03,
+            ref_avg_dd REAL,
+            roi_snapshot TEXT,
+            hit_pct_snapshot REAL,
+            support_snapshot TEXT,
+            rule_snapshot TEXT,
+            settings_json_snapshot TEXT,
+            snapshot_at TEXT,
+            greeks_override_json TEXT
+        );
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    db.init_db()
+
+    conn = sqlite3.connect(db.DB_PATH)
+    cur = conn.cursor()
+    cur.execute("PRAGMA table_info(favorites)")
+    columns = {row[1] for row in cur.fetchall()}
+    conn.close()
+
+    assert "dd_pct_snapshot" in columns
