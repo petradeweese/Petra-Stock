@@ -468,6 +468,29 @@ def _ensure_favorites_hit_pct_column(db: sqlite3.Cursor) -> bool:
         return False
 
 
+def _ensure_favorites_dd_pct_column(db: sqlite3.Cursor) -> bool:
+    """Ensure the favorites table has the ``dd_pct_snapshot`` column."""
+
+    try:
+        db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='favorites'"
+        )
+        if db.fetchone() is None:
+            return False
+
+        db.execute("PRAGMA table_info(favorites)")
+        columns = [row[1] for row in db.fetchall()]
+        if "dd_pct_snapshot" in columns:
+            return False
+
+        db.execute("ALTER TABLE favorites ADD COLUMN dd_pct_snapshot REAL")
+        logger.info("Added dd_pct_snapshot column to favorites table")
+        return True
+    except sqlite3.Error:
+        logger.exception("ensure_favorites_dd_pct_column_failed")
+        return False
+
+
 def _run_sqlite_schema_fixes(engine: Engine | None = None) -> None:
     try:
         engine = engine or get_engine()
@@ -476,7 +499,12 @@ def _run_sqlite_schema_fixes(engine: Engine | None = None) -> None:
         conn = engine.raw_connection()
         try:
             cursor = conn.cursor()
+            changed = False
             if _ensure_favorites_hit_pct_column(cursor):
+                changed = True
+            if _ensure_favorites_dd_pct_column(cursor):
+                changed = True
+            if changed:
                 conn.commit()
         finally:
             conn.close()
