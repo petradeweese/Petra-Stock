@@ -250,7 +250,7 @@ async def hf_loop(
 async def _run_hf_iteration(now: datetime, startup_logged: bool, iteration: int) -> None:
     with _db_cursor() as db:
         settings = hf_engine.load_settings(db)
-        status = hf_engine.get_status(db)
+        status = hf_engine.get_status(db, settings=settings)
         tickers = _parse_tickers(settings.tickers)
         if not startup_logged:
             logger.info(
@@ -472,7 +472,7 @@ async def lf_loop(
 async def _run_lf_iteration(now: datetime, startup_logged: bool, iteration: int) -> None:
     with _db_cursor() as db:
         settings = lf_engine.load_settings(db)
-        status = lf_engine.get_status(db)
+        status = lf_engine.get_status(db, settings=settings)
         tickers = _parse_tickers(settings.tickers)
         if not startup_logged:
             logger.info(
