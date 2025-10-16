@@ -120,6 +120,43 @@ def test_get_status_mapping_rows():
         _close_cursor(cursor)
 
 
+def test_update_settings_resets_equity_seed_when_pristine(db_cursor):
+    lf_engine.get_status(db_cursor)
+    settings = lf_engine.load_settings(db_cursor)
+    row = db_cursor.execute(
+        "SELECT balance FROM scalper_lf_equity ORDER BY ts DESC LIMIT 1"
+    ).fetchone()
+    assert row is not None
+    assert row[0] == pytest.approx(settings.starting_balance)
+
+    updated = lf_engine.update_settings(
+        db_cursor,
+        starting_balance=25000,
+        pct_per_trade=settings.pct_per_trade,
+        daily_trade_cap=settings.daily_trade_cap,
+        tickers=settings.tickers,
+        profit_target_pct=settings.profit_target_pct,
+        max_adverse_pct=settings.max_adverse_pct,
+        time_cap_minutes=settings.time_cap_minutes,
+        session_start=settings.session_start,
+        session_end=settings.session_end,
+        allow_premarket=settings.allow_premarket,
+        allow_postmarket=settings.allow_postmarket,
+        per_contract_fee=settings.per_contract_fee,
+        per_order_fee=settings.per_order_fee,
+        rsi_filter=settings.rsi_filter,
+    )
+
+    assert updated.starting_balance == pytest.approx(25000)
+    row_after = db_cursor.execute(
+        "SELECT balance FROM scalper_lf_equity ORDER BY ts DESC LIMIT 1"
+    ).fetchone()
+    assert row_after is not None
+    assert row_after[0] == pytest.approx(25000)
+    status_after = lf_engine.get_status(db_cursor)
+    assert status_after.account_equity == pytest.approx(25000)
+
+
 def test_position_sizing_formula():
     qty = lf_engine.calculate_position_size(balance=100000, pct_per_trade=3, mid_price=2.5)
     assert qty == 12  # floor((100000 * 0.03) / (2.5 * 100))
