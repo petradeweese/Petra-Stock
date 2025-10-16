@@ -598,7 +598,19 @@ def metrics_snapshot(db) -> Dict[str, float]:
          ORDER BY exit_time ASC
         """
     ).fetchall()
-    return dict(compute_trade_metrics(rows, starting_balance=settings.starting_balance))
+    trade_rows = [
+        {
+            "entry_time": row["entry_time"],
+            "exit_time": row["exit_time"],
+            "roi_pct": row["roi_pct"],
+            "realized_pl": row["realized_pl"],
+            "net_pl": row["net_pl"],
+        }
+        for row in rows
+    ]
+    return dict(
+        compute_trade_metrics(trade_rows, starting_balance=settings.starting_balance)
+    )
 
 
 def _latest_equity(db) -> float:

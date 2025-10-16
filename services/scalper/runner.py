@@ -429,12 +429,13 @@ async def _run_hf_iteration(now: datetime, startup_logged: bool, iteration: int)
             )
         ending_equity = hf_engine.current_equity(db)
         provider_summary = {sym: providers.get(sym, "db") for sym in symbols_to_fetch}
+        open_positions_after = max(len(open_rows) - closed + opened, 0)
         logger.info(
             "hf_loop_iteration iteration=%d symbols=%s signals=%d open_positions=%d opened=%d closed=%d lookback=%d equity_start=%.2f equity_end=%.2f stale=%d missing=%d providers=%s",
             iteration,
             ",".join(symbols_to_fetch),
             signals_evaluated,
-            len(open_rows),
+            open_positions_after,
             opened,
             closed,
             lookback,
@@ -653,12 +654,13 @@ async def _run_lf_iteration(now: datetime, startup_logged: bool, iteration: int)
             )
         ending_equity = lf_engine.current_equity(db)
         provider_summary = {sym: providers.get(sym, "db") for sym in symbols_to_fetch}
+        open_positions_after = max(len(open_rows) - closed + opened, 0)
         logger.info(
             "lf_loop_iteration iteration=%d symbols=%s signals=%d open_positions=%d opened=%d closed=%d marked=%d lookback=%d equity_start=%.2f equity_end=%.2f stale=%d missing=%d providers=%s",
             iteration,
             ",".join(symbols_to_fetch),
             signals_evaluated,
-            len(open_rows),
+            open_positions_after,
             opened,
             closed,
             len(mark_updates),
