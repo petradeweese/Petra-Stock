@@ -77,6 +77,42 @@ def test_hf_get_status_missing_row(monkeypatch):
         _close_cursor(cursor)
 
 
+def test_hf_update_settings_resets_equity_seed_when_pristine(db_cursor):
+    hf_engine.get_status(db_cursor)
+    settings = hf_engine.load_settings(db_cursor)
+    row = db_cursor.execute(
+        "SELECT balance FROM scalper_hf_equity ORDER BY ts DESC LIMIT 1"
+    ).fetchone()
+    assert row is not None
+    assert row[0] == pytest.approx(settings.starting_balance)
+
+    updated = hf_engine.update_settings(
+        db_cursor,
+        starting_balance=50000,
+        pct_per_trade=settings.pct_per_trade,
+        daily_trade_cap=settings.daily_trade_cap,
+        tickers=settings.tickers,
+        profit_target_pct=settings.profit_target_pct,
+        max_adverse_pct=settings.max_adverse_pct,
+        time_cap_minutes=settings.time_cap_minutes,
+        cooldown_minutes=settings.cooldown_minutes,
+        max_open_positions=settings.max_open_positions,
+        daily_max_drawdown_pct=settings.daily_max_drawdown_pct,
+        per_contract_fee=settings.per_contract_fee,
+        per_order_fee=settings.per_order_fee,
+        volatility_gate=settings.volatility_gate,
+    )
+
+    assert updated.starting_balance == pytest.approx(50000)
+    row_after = db_cursor.execute(
+        "SELECT balance FROM scalper_hf_equity ORDER BY ts DESC LIMIT 1"
+    ).fetchone()
+    assert row_after is not None
+    assert row_after[0] == pytest.approx(50000)
+    status_after = hf_engine.get_status(db_cursor)
+    assert status_after.account_equity == pytest.approx(50000)
+
+
 @pytest.fixture
 def db_cursor(tmp_path) -> Iterator:
     db.DB_PATH = str(tmp_path / "scalper_hf.db")
@@ -237,7 +273,7 @@ def test_hf_signal_controls(db_cursor):
     hf_engine.close_trade(
         db_cursor,
         trade_two,
-        mid_price=1.4,
+        mid_price=1.2,
         exit_time=exit_two,
         liquidity=0.4,
         settings=aggressive_settings,
