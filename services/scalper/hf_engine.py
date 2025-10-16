@@ -338,6 +338,7 @@ def update_settings(
     volatility_gate: float,
 ) -> HFSettings:
     _ensure_schema(db)
+    current_settings = load_settings(db)
     tickers_text = ",".join(tickers) if isinstance(tickers, (list, tuple, set)) else str(tickers)
     db.execute(
         """
@@ -364,6 +365,11 @@ def update_settings(
             max(0.0, float(volatility_gate)),
         ),
     )
+    _maybe_reset_equity_seed(
+        db,
+        previous_balance=current_settings.starting_balance,
+        new_balance=float(starting_balance),
+    )
     db.connection.commit()
     return load_settings(db)
 
@@ -376,14 +382,58 @@ def _now_utc(ts: datetime | None = None) -> datetime:
 
 def _ensure_equity_seed(db, settings: HFSettings, *, now: datetime | None = None) -> None:
     row = db.execute("SELECT COUNT(1) FROM scalper_hf_equity").fetchone()
-    if row and int(row[0]) > 0:
+    count = int(row[0]) if row else 0
+    if count == 0:
+        current = _now_utc(now).isoformat()
+        db.execute(
+            "INSERT OR REPLACE INTO scalper_hf_equity(ts, balance) VALUES(?, ?)",
+            (current, float(settings.starting_balance)),
+        )
+        db.connection.commit()
+        return
+    if now is None:
+        return
+    activity_row = db.execute("SELECT COUNT(1) FROM scalper_hf_activity").fetchone()
+    activity_count = int(activity_row[0]) if activity_row else 0
+    if activity_count > 0:
         return
     current = _now_utc(now).isoformat()
     db.execute(
-        "INSERT OR REPLACE INTO scalper_hf_equity(ts, balance) VALUES(?, ?)",
+        "UPDATE scalper_hf_equity SET ts=?, balance=? WHERE ROWID = (SELECT ROWID FROM scalper_hf_equity LIMIT 1)",
         (current, float(settings.starting_balance)),
     )
     db.connection.commit()
+
+
+def _maybe_reset_equity_seed(
+    db,
+    *,
+    previous_balance: float,
+    new_balance: float,
+    now: datetime | None = None,
+) -> None:
+    if abs(new_balance - previous_balance) < 1e-6:
+        return
+    equity_row = db.execute("SELECT COUNT(1) FROM scalper_hf_equity").fetchone()
+    equity_count = int(equity_row[0]) if equity_row else 0
+    if equity_count > 1:
+        return
+    activity_row = db.execute("SELECT COUNT(1) FROM scalper_hf_activity").fetchone()
+    activity_count = int(activity_row[0]) if activity_row else 0
+    if activity_count > 0:
+        return
+    seed_ts: str | None = None
+    if equity_count == 1:
+        ts_row = db.execute("SELECT ts FROM scalper_hf_equity LIMIT 1").fetchone()
+        if ts_row and ts_row[0]:
+            seed_ts = str(ts_row[0])
+    if not seed_ts:
+        seed_ts = datetime(1970, 1, 1, tzinfo=timezone.utc).isoformat()
+    db.execute("DELETE FROM scalper_hf_equity")
+    db.execute(
+        "INSERT INTO scalper_hf_equity(ts, balance) VALUES(?, ?)",
+        (seed_ts, float(new_balance)),
+    )
 
 
 def start_engine(db, *, now: datetime | None = None) -> HFStatus:
