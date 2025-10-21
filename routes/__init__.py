@@ -136,7 +136,16 @@ _FAVORITE_INSERT_COLUMNS: tuple[str, ...] = (
     "snapshot_at",
 )
 
-_FAVORITE_OPTIONAL_COLUMNS = frozenset({"roi_snapshot", "dd_pct_snapshot"})
+_FAVORITE_OPTIONAL_COLUMNS = frozenset(
+    {
+        "roi_snapshot",
+        "dd_pct_snapshot",
+        "support_snapshot",
+        "rule_snapshot",
+        "settings_json_snapshot",
+        "snapshot_at",
+    }
+)
 _FAVORITE_COLUMN_CACHE: dict[int, tuple[str, ...]] = {}
 
 
