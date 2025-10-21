@@ -443,8 +443,10 @@ def _ensure_scanner_column(db: sqlite3.Cursor) -> None:
         db.connection.commit()
 
 
-def _ensure_favorites_hit_pct_column(db: sqlite3.Cursor) -> bool:
-    """Ensure the favorites table has the ``hit_pct_snapshot`` column."""
+def _ensure_favorites_column(
+    db: sqlite3.Cursor, column: str, definition: str
+) -> bool:
+    """Ensure the favorites table has a given column available."""
 
     try:
         db.execute(
@@ -455,39 +457,16 @@ def _ensure_favorites_hit_pct_column(db: sqlite3.Cursor) -> bool:
 
         db.execute("PRAGMA table_info(favorites)")
         columns = [row[1] for row in db.fetchall()]
-        if "hit_pct_snapshot" in columns:
+        if column in columns:
             return False
 
-        db.execute(
-            "ALTER TABLE favorites ADD COLUMN hit_pct_snapshot REAL DEFAULT 0"
-        )
-        logger.info("Added hit_pct_snapshot column to favorites table")
+        db.execute(f"ALTER TABLE favorites ADD COLUMN {column} {definition}")
+        logger.info("Added %s column to favorites table", column)
         return True
     except sqlite3.Error:
-        logger.exception("ensure_favorites_hit_pct_column_failed")
-        return False
-
-
-def _ensure_favorites_dd_pct_column(db: sqlite3.Cursor) -> bool:
-    """Ensure the favorites table has the ``dd_pct_snapshot`` column."""
-
-    try:
-        db.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='favorites'"
+        logger.exception(
+            "ensure_favorites_column_failed column=%s definition=%s", column, definition
         )
-        if db.fetchone() is None:
-            return False
-
-        db.execute("PRAGMA table_info(favorites)")
-        columns = [row[1] for row in db.fetchall()]
-        if "dd_pct_snapshot" in columns:
-            return False
-
-        db.execute("ALTER TABLE favorites ADD COLUMN dd_pct_snapshot REAL")
-        logger.info("Added dd_pct_snapshot column to favorites table")
-        return True
-    except sqlite3.Error:
-        logger.exception("ensure_favorites_dd_pct_column_failed")
         return False
 
 
@@ -500,9 +479,21 @@ def _run_sqlite_schema_fixes(engine: Engine | None = None) -> None:
         try:
             cursor = conn.cursor()
             changed = False
-            if _ensure_favorites_hit_pct_column(cursor):
+            if _ensure_favorites_column(cursor, "hit_pct_snapshot", "REAL DEFAULT 0"):
                 changed = True
-            if _ensure_favorites_dd_pct_column(cursor):
+            if _ensure_favorites_column(cursor, "dd_pct_snapshot", "REAL"):
+                changed = True
+            if _ensure_favorites_column(cursor, "roi_snapshot", "TEXT"):
+                changed = True
+            if _ensure_favorites_column(cursor, "support_snapshot", "TEXT"):
+                changed = True
+            if _ensure_favorites_column(cursor, "rule_snapshot", "TEXT"):
+                changed = True
+            if _ensure_favorites_column(
+                cursor, "settings_json_snapshot", "TEXT"
+            ):
+                changed = True
+            if _ensure_favorites_column(cursor, "snapshot_at", "TEXT"):
                 changed = True
             if changed:
                 conn.commit()

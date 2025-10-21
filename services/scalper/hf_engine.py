@@ -414,25 +414,21 @@ def _maybe_reset_equity_seed(
 ) -> None:
     if abs(new_balance - previous_balance) < 1e-6:
         return
-    equity_row = db.execute("SELECT COUNT(1) FROM scalper_hf_equity").fetchone()
-    equity_count = int(equity_row[0]) if equity_row else 0
-    if equity_count > 1:
-        return
-    activity_row = db.execute("SELECT COUNT(1) FROM scalper_hf_activity").fetchone()
-    activity_count = int(activity_row[0]) if activity_row else 0
-    if activity_count > 0:
-        return
-    seed_ts: str | None = None
-    if equity_count == 1:
-        ts_row = db.execute("SELECT ts FROM scalper_hf_equity LIMIT 1").fetchone()
-        if ts_row and ts_row[0]:
-            seed_ts = str(ts_row[0])
+    seed_ts = None
+    row = db.execute(
+        "SELECT ts FROM scalper_hf_equity ORDER BY ts DESC LIMIT 1"
+    ).fetchone()
+    if row and row[0]:
+        seed_ts = str(row[0])
     if not seed_ts:
-        seed_ts = datetime(1970, 1, 1, tzinfo=timezone.utc).isoformat()
+        seed_ts = _now_utc(now).isoformat()
     db.execute("DELETE FROM scalper_hf_equity")
     db.execute(
         "INSERT INTO scalper_hf_equity(ts, balance) VALUES(?, ?)",
         (seed_ts, float(new_balance)),
+    )
+    logger.info(
+        "hf_equity_seed_reset previous=%.2f new=%.2f", previous_balance, new_balance
     )
 
 
