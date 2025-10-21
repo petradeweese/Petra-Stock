@@ -466,12 +466,31 @@ def _maybe_reset_equity_seed(
 ) -> None:
     if abs(new_balance - previous_balance) < 1e-6:
         return
-    seed_ts = None
-    row = db.execute(
-        "SELECT ts FROM scalper_lf_equity ORDER BY ts DESC LIMIT 1"
-    ).fetchone()
-    if row and row[0]:
-        seed_ts = str(row[0])
+    equity_row = db.execute("SELECT COUNT(1) FROM scalper_lf_equity").fetchone()
+    equity_count = int(equity_row[0]) if equity_row else 0
+    if equity_count > 1:
+        logger.info(
+            "lf_equity_seed_reset_skipped reason=history previous=%.2f new=%.2f",
+            previous_balance,
+            new_balance,
+        )
+        return
+    activity_row = db.execute("SELECT COUNT(1) FROM scalper_lf_activity").fetchone()
+    activity_count = int(activity_row[0]) if activity_row else 0
+    if activity_count > 0:
+        logger.info(
+            "lf_equity_seed_reset_skipped reason=activity previous=%.2f new=%.2f",
+            previous_balance,
+            new_balance,
+        )
+        return
+    seed_ts: str | None = None
+    if equity_count == 1:
+        row = db.execute(
+            "SELECT ts FROM scalper_lf_equity ORDER BY ts DESC LIMIT 1"
+        ).fetchone()
+        if row and row[0]:
+            seed_ts = str(row[0])
     if not seed_ts:
         seed_ts = _now_utc(now).isoformat()
     db.execute("DELETE FROM scalper_lf_equity")
