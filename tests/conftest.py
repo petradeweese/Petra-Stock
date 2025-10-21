@@ -18,6 +18,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from services import http_client, schwab_client
+from services import data_provider
 from services.schwab_client import SchwabAuthError
 
 from db import DB_PATH, run_migrations
@@ -28,6 +29,12 @@ def pytest_sessionstart(session):
     if os.path.exists(DB_PATH):
         os.remove(DB_PATH)
     run_migrations()
+
+
+@pytest.fixture(autouse=True)
+def _disable_network_env(monkeypatch):
+    monkeypatch.setenv("PETRA_NET_DISABLE", "1")
+    yield
 
 
 @pytest.fixture(autouse=True)
@@ -50,6 +57,12 @@ def _disable_real_schwab_requests():
     finally:
         http_client.request = original_request
         schwab_client.disable(reason="tests_reset", ttl=0)
+
+
+@pytest.fixture(autouse=True)
+def _clear_data_provider_cache():
+    data_provider._clear_test_cache()
+    yield
 
 
 @pytest.fixture(autouse=True)

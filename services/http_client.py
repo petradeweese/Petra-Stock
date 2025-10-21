@@ -28,6 +28,16 @@ MAX_CONCURRENCY = settings.scan_max_concurrency or settings.http_max_concurrency
 # Waits are capped at 64s but a high retry count lets the backoff continue for
 # several minutes when needed.
 MAX_RETRIES = int(os.getenv("HTTP_MAX_RETRIES", "10"))
+NET_DISABLE_VALUES = {"1", "true", "yes"}
+
+
+SAFE_NET_HOSTS = {"example.com", "test", "load", "localhost", "127.0.0.1", "x", "query1.finance.yahoo.com", "query2.finance.yahoo.com"}
+
+
+def _network_disabled() -> bool:
+    return os.getenv("PETRA_NET_DISABLE", "").strip().lower() in NET_DISABLE_VALUES
+
+
 
 _client: Optional[httpx.AsyncClient] = None
 _semaphore = asyncio.Semaphore(MAX_CONCURRENCY)
@@ -148,6 +158,11 @@ def clear_cache() -> None:
 
 async def request(method: str, url: str, **kwargs) -> httpx.Response:
     """Robust HTTP request with retries, caching, coalescing and circuit breaker."""
+
+    if _network_disabled():
+        host = httpx.URL(url).host or ""
+        if host and host not in SAFE_NET_HOSTS and "." in host:
+            raise RuntimeError(f"Network disabled during test: attempted {method} {url}")
 
     loop = asyncio.get_running_loop()
     loop_id = id(loop)

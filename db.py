@@ -1,6 +1,7 @@
 import logging
 import os
 import sqlite3
+import time
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
@@ -27,6 +28,21 @@ DB_PATH = str(Path(__file__).resolve().with_name("patternfinder.db"))
 # agnostic between SQLite (tests) and Postgres (prod).
 
 _ENV_DATABASE_URL = os.getenv("DATABASE_URL", "")
+
+
+
+
+def _apply_pragmas(conn: sqlite3.Connection) -> None:
+    """Apply default SQLite pragmas for concurrency when available."""
+
+    try:
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA synchronous=NORMAL;")
+        conn.execute("PRAGMA busy_timeout=10000;")
+        conn.execute("PRAGMA foreign_keys=ON;")
+    except Exception:
+        logger.exception("apply_pragmas_failed")
+
 
 _ENGINE: Optional[Engine] = None
 
@@ -376,9 +392,13 @@ def get_db():
     if _ENV_DATABASE_URL:
         conn = get_engine().raw_connection()
     else:
-        conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+        conn = sqlite3.connect(
+            DB_PATH,
+            check_same_thread=False,
+            isolation_level=None,
+        )
+        _apply_pragmas(conn)
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys=ON")
     if hasattr(conn, "row_factory"):
         conn.row_factory = sqlite3.Row
 
@@ -526,6 +546,23 @@ def row_to_dict(
         return dict(row)
     except Exception:
         return {str(i): v for i, v in enumerate(row)}
+
+
+def retry_locked(fn, *args, **kwargs):
+    """Retry a SQLite operation when encountering database locked errors."""
+
+    backoff = 0.05
+    attempts = 8
+    for _ in range(attempts):
+        try:
+            return fn(*args, **kwargs)
+        except sqlite3.OperationalError as exc:
+            if "database is locked" not in str(exc).lower():
+                raise
+            time.sleep(backoff)
+            backoff = min(backoff * 2, 1.6)
+    return fn(*args, **kwargs)
+
 
 
 def get_settings(db: sqlite3.Cursor) -> dict:
