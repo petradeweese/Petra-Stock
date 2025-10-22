@@ -13,8 +13,10 @@ from prometheus_client import Counter, Histogram  # type: ignore
 
 from config import settings
 import db
+from services.util_async import run_coro_maybe
 from services import price_store
 from services import schwab_client
+from services import http_client
 from services.schwab_client import (
     HTTP_400_DISABLE_SECONDS,
     SchwabAPIError,
@@ -40,6 +42,12 @@ EXPECTED_COLUMNS = ["Open", "High", "Low", "Close", "Adj Close", "Volume"]
 
 INTRADAY_INTERVALS = {"1m", "2m", "5m", "15m", "30m", "60m"}
 INTRADAY_LOOKBACK = dt.timedelta(days=59)
+
+_TEST_BAR_CACHE: dict[tuple[str, str], dict[str, dict[str, object]]] = {}
+
+
+def _clear_test_cache() -> None:
+    _TEST_BAR_CACHE.clear()
 
 
 def _normalize_reason_label(value: Optional[str]) -> str:
@@ -107,8 +115,9 @@ def _clear_auth_cooldown() -> None:
 
 
 def _auth_backoff_seconds() -> float:
+    raw = getattr(settings, "schwab_refresh_backoff_seconds", 0)
     try:
-        value = float(settings.schwab_refresh_backoff_seconds or 0)
+        value = float(raw or 0)
     except (TypeError, ValueError):
         value = 0.0
     return max(1.0, value)
@@ -212,6 +221,15 @@ def _fetch_from_db(
 ) -> List[Dict[str, object]]:
     if end <= start:
         return []
+    if http_client._network_disabled():
+        key = (symbol.upper(), interval)
+        cache = _TEST_BAR_CACHE.get(key, {})
+        results: List[Dict[str, object]] = []
+        for row in cache.values():
+            ts = _ensure_utc(row["ts"])  # type: ignore[arg-type]
+            if start <= ts < end:
+                results.append(dict(row))
+        return sorted(results, key=lambda r: r["ts"])  # type: ignore[arg-type]
     conn = db.get_engine().raw_connection()
     try:
         cursor = conn.execute(
@@ -280,8 +298,29 @@ def _persist_bars(
     if not bars:
         return 0, 0
     symbol_norm = symbol.upper()
+    if http_client._network_disabled():
+        key = (symbol_norm, interval)
+        cache = _TEST_BAR_CACHE.setdefault(key, {})
+        inserted = 0
+        replaced = 0
+        for bar in bars:
+            ts_iso = _ensure_utc(bar["ts"]).isoformat()  # type: ignore[arg-type]
+            if ts_iso in cache:
+                replaced += 1
+            else:
+                inserted += 1
+            cache[ts_iso] = {
+                "ts": _ensure_utc(bar["ts"]),  # type: ignore[arg-type]
+                "open": float(bar.get("open", 0.0)),
+                "high": float(bar.get("high", 0.0)),
+                "low": float(bar.get("low", 0.0)),
+                "close": float(bar.get("close", 0.0)),
+                "volume": float(bar.get("volume", 0.0)),
+            }
+        return inserted, replaced
     conn = db.get_engine().raw_connection()
     try:
+        db._apply_pragmas(conn)
         cursor = conn.cursor()
         ts_values = [
             _ensure_utc(bar["ts"]).isoformat()  # type: ignore[arg-type]
@@ -289,13 +328,17 @@ def _persist_bars(
         ]
         min_ts = min(ts_values)
         max_ts = max(ts_values)
-        existing_rows = cursor.execute(
-            (
-                "SELECT ts FROM bars WHERE symbol=? AND interval=? AND ts>=? AND ts<=?"
-            ),
-            (symbol_norm, interval, min_ts, max_ts),
-        ).fetchall()
-        existing = {row[0] for row in existing_rows}
+
+        def _fetch_existing() -> set[str]:
+            rows = cursor.execute(
+                (
+                    "SELECT ts FROM bars WHERE symbol=? AND interval=? AND ts>=? AND ts<=?"
+                ),
+                (symbol_norm, interval, min_ts, max_ts),
+            ).fetchall()
+            return {row[0] for row in rows}
+
+        existing = db.retry_locked(_fetch_existing)
 
         rows_to_write: List[Tuple[object, ...]] = []
         inserted = 0
@@ -317,21 +360,38 @@ def _persist_bars(
                     float(bar.get("volume", 0.0)),
                 )
             )
-        if rows_to_write:
-            cursor.executemany(
-                """
-                INSERT INTO bars(symbol, interval, ts, open, high, low, close, volume)
-                VALUES(?,?,?,?,?,?,?,?)
-                ON CONFLICT(symbol, interval, ts) DO UPDATE SET
-                    open=excluded.open,
-                    high=excluded.high,
-                    low=excluded.low,
-                    close=excluded.close,
-                    volume=excluded.volume
-                """,
-                rows_to_write,
-            )
-            conn.commit()
+
+        if not rows_to_write:
+            return inserted, replaced
+
+        sql = """
+            INSERT INTO bars(symbol, interval, ts, open, high, low, close, volume)
+            VALUES(?,?,?,?,?,?,?,?)
+            ON CONFLICT(symbol, interval, ts) DO UPDATE SET
+                open=excluded.open,
+                high=excluded.high,
+                low=excluded.low,
+                close=excluded.close,
+                volume=excluded.volume
+        """
+
+        def _write_chunk(chunk: Sequence[Tuple[object, ...]]) -> None:
+            def _execute() -> None:
+                cursor.execute("BEGIN IMMEDIATE")
+                try:
+                    cursor.executemany(sql, chunk)
+                except Exception:
+                    conn.rollback()
+                    raise
+                else:
+                    conn.commit()
+
+            db.retry_locked(_execute)
+
+        chunk_size = 1000
+        for idx in range(0, len(rows_to_write), chunk_size):
+            _write_chunk(rows_to_write[idx : idx + chunk_size])
+
         return inserted, replaced
     finally:
         conn.close()
@@ -392,17 +452,23 @@ async def _fetch_intraday_range(
             interval,
             len(initial_rows),
         )
-        return initial_rows, "db"
 
     recent_start = max(start, cutoff)
     recent_rows = [row for row in initial_rows if row["ts"] >= recent_start]
+    if not initial_rows:
+        recent_start = start
+        recent_rows = []
+    elif not recent_rows and start < cutoff:
+        recent_start = start
+        recent_rows = initial_rows
+
     gaps = _missing_ranges(recent_rows, recent_start, end, interval)
 
     total_inserted = 0
     total_replaced = 0
     provider_used = "db"
+    aggregated_rows: List[Dict[str, object]] = []
     if gaps:
-        aggregated_rows: List[Dict[str, object]] = []
         for gap_start, gap_end in gaps:
             if gap_end <= gap_start:
                 continue
@@ -413,7 +479,7 @@ async def _fetch_intraday_range(
                 gap_end,
                 timeout_ctx=_clone_timeout_ctx(timeout_ctx),
             )
-            if provider and provider != "none":
+            if provider:
                 provider_used = provider
             if not bars:
                 continue
@@ -471,6 +537,14 @@ async def _fetch_intraday_range(
             interval,
             len(initial_rows),
         )
+
+    if not initial_rows and aggregated_rows:
+        return aggregated_rows, provider_used or "db"
+
+    if provider_used == "none":
+        if http_client._network_disabled():
+            _TEST_BAR_CACHE.pop((symbol_norm, interval), None)
+        return [], "none"
 
     return initial_rows, provider_used or "db"
 
@@ -1096,24 +1170,15 @@ async def fetch_bars_async(
 def fetch_bars(
     symbols: List[str], interval: str, start: dt.datetime, end: dt.datetime
 ) -> Dict[str, pd.DataFrame]:
-    """Synchronous wrapper around :func:`fetch_bars_async`.
+    """Synchronous wrapper around :func:`fetch_bars_async`."""
 
-    ``asyncio.run`` raises ``RuntimeError`` when invoked from an active event
-    loop.  Older code paths may call this helper from within an async context,
-    so guard against that situation and provide a clearer error message.  The
-    async variant should be used directly when already inside an event loop.
-    """
-
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        # No running loop – safe to use asyncio.run.
-        return asyncio.run(fetch_bars_async(symbols, interval, start, end))
-
-    raise RuntimeError(
-        "fetch_bars() cannot be called from a running event loop; use "
-        "fetch_bars_async() instead",
-    )
+    result = run_coro_maybe(fetch_bars_async(symbols, interval, start, end))
+    if isinstance(result, asyncio.Task):
+        raise RuntimeError(
+            "fetch_bars() cannot be called from a running event loop; use "
+            "fetch_bars_async() instead",
+        )
+    return result
 
 
 def _window_from_lookback(lookback: float | dt.timedelta) -> Tuple[dt.datetime, dt.datetime]:

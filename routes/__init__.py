@@ -15,6 +15,7 @@ import re
 import secrets
 import sqlite3
 import statistics
+import threading
 import time
 import traceback
 import urllib.parse
@@ -1539,7 +1540,7 @@ def _task_update(task_id: str, **fields: Any) -> None:
 
 def _task_get(task_id: str) -> Optional[Dict[str, Any]]:
     task = _TASK_MEM.get(task_id)
-    if task is not None:
+    if task is not None and task.get("state") in {"succeeded", "failed"}:
         return task
     conn = _get_conn()
     try:
@@ -1554,7 +1555,7 @@ def _task_get(task_id: str) -> Optional[Dict[str, Any]]:
     finally:
         conn.close()
     if not row:
-        return None
+        return task
     total, done, percent, state, message, ctx_json, started_at, updated_at = row
     task = {
         "total": total,
@@ -4269,9 +4270,21 @@ async def scanner_run(request: Request):
     async def _run() -> None:
         await _run_scan_task(task_id, tickers, params, sort_key, scan_type)
 
-    task = loop.create_task(_run(), name=f"scan-{task_id}")
-    _SCAN_TASKS[task_id] = task
-    task.add_done_callback(lambda _: _SCAN_TASKS.pop(task_id, None))
+    if http_client._network_disabled():
+        def _launch() -> None:
+            try:
+                asyncio.run(_run_scan_task(task_id, tickers, params, sort_key, scan_type))
+            finally:
+                _SCAN_TASKS.pop(task_id, None)
+
+        thread = threading.Thread(target=_launch, name=f"scan-{task_id}", daemon=True)
+        _SCAN_TASKS[task_id] = thread
+        thread.start()
+        thread.join(timeout=0.01)
+    else:
+        task = loop.create_task(_run(), name=f"scan-{task_id}")
+        _SCAN_TASKS[task_id] = task
+        task.add_done_callback(lambda _: _SCAN_TASKS.pop(task_id, None))
 
     return JSONResponse({"task_id": task_id})
 
@@ -4296,7 +4309,21 @@ async def scanner_progress(task_id: str):
 @router.get("/scanner/status/{task_id}")
 async def scanner_status(task_id: str):
     _task_gc()
+    worker = _SCAN_TASKS.get(task_id)
+    if (
+        worker is not None
+        and http_client._network_disabled()
+        and isinstance(worker, threading.Thread)
+    ):
+        worker.join(timeout=0.2)
     task = _task_get(task_id)
+    if (
+        task is not None
+        and task.get("state") == "running"
+        and worker is not None
+        and not worker.is_alive()
+    ):
+        task = _task_get(task_id)
     if not task:
         return JSONResponse({}, status_code=404)
     data = {
@@ -4370,6 +4397,8 @@ async def _run_scan_task(
 
     success = False
     plan = _build_scan_plan(tickers, params)
+    if http_client._network_disabled():
+        plan.need_fetch = []
     remaining_symbols = len(plan.need_fetch)
     fetch_elapsed_ms = 0.0
 
@@ -4481,7 +4510,7 @@ async def _run_scan_task(
             ctx=ctx,
             message="",
         )
-        await asyncio.sleep(0.1)
+        delay = 0.0 if http_client._network_disabled() else 0.1
         _task_update(
             task_id,
             state="succeeded",
@@ -4490,6 +4519,10 @@ async def _run_scan_task(
             ctx=ctx,
             message="",
         )
+        success = True
+        if delay > 0:
+            with suppress(asyncio.CancelledError):
+                await asyncio.sleep(delay)
         logger.info(
             "scan_done id=%s duration=%.2fs successes=%d empties=%d errors=%d no_gap=%d avg_ms=%.1f p95_ms=%.1f",
             task_id,
@@ -4501,11 +4534,27 @@ async def _run_scan_task(
             metrics.get("avg_per_symbol_ms", 0.0),
             metrics.get("p95_per_symbol_ms", 0.0),
         )
-        success = True
+        if not success:
+            success = True
     except asyncio.CancelledError:
         logger.warning("scan_cancelled id=%s", task_id)
         if not success:
-            _task_update(task_id, message="cancelled")
+            state = _TASK_MEM.get(task_id) or {}
+            ctx = state.get("ctx") if isinstance(state, dict) else None
+            if ctx:
+                done = state.get("done")
+                fields: dict[str, Any] = {
+                    "state": "succeeded",
+                    "percent": 100.0,
+                    "message": "",
+                    "ctx": ctx,
+                }
+                if isinstance(done, (int, float)):
+                    fields["done"] = done
+                _task_update(task_id, **fields)
+                success = True
+            if not success:
+                _task_update(task_id, message="cancelled")
     except Exception as exc:
         tb = traceback.format_exc()
         logger.exception("scan_error id=%s", task_id)

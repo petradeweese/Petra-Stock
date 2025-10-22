@@ -7,6 +7,8 @@ import logging
 import math
 import os
 import sqlite3
+
+import db as db_module
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Sequence, Mapping
@@ -83,24 +85,37 @@ def _now_utc_iso(dt: datetime | None = None) -> str:
 
 
 def ensure_settings(db) -> None:
-    db.execute(
-        """
-        CREATE TABLE IF NOT EXISTS paper_settings (
-            id INTEGER PRIMARY KEY CHECK (id=1),
-            starting_balance REAL NOT NULL DEFAULT 10000,
-            max_pct REAL NOT NULL DEFAULT 10,
-            started_at TEXT,
-            status TEXT NOT NULL DEFAULT 'inactive'
-        )
-        """
-    )
-    db.execute(
-        """
-        INSERT OR IGNORE INTO paper_settings(id, starting_balance, max_pct, started_at, status)
-        VALUES(1, 10000, 10, NULL, 'inactive')
-        """
-    )
-    db.connection.commit()
+    conn = getattr(db, "connection", None)
+    if conn is None:
+        raise RuntimeError("paper_trading.ensure_settings requires a DB connection")
+
+    def _apply() -> None:
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS paper_settings (
+                    id INTEGER PRIMARY KEY CHECK (id=1),
+                    starting_balance REAL NOT NULL DEFAULT 10000,
+                    max_pct REAL NOT NULL DEFAULT 10,
+                    started_at TEXT,
+                    status TEXT NOT NULL DEFAULT 'inactive'
+                )
+                """
+            )
+            db.execute(
+                """
+                INSERT OR IGNORE INTO paper_settings(id, starting_balance, max_pct, started_at, status)
+                VALUES(1, 10000, 10, NULL, 'inactive')
+                """
+            )
+        except Exception:
+            conn.rollback()
+            raise
+        else:
+            conn.commit()
+
+    db_module.retry_locked(_apply)
 
 
 def load_settings(db) -> PaperSettings:

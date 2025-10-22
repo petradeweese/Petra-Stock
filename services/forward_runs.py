@@ -1,12 +1,56 @@
-from __future__ import annotations
-
 import hashlib
 import sqlite3
 from typing import Any
 
-import db
+import db as db_module
 from db import row_to_dict
 from services.forward_summary import invalidate_forward_summary
+
+
+SCHEMA_STATEMENTS = [
+    """
+    CREATE TABLE IF NOT EXISTS forward_runs (
+        favorite_id TEXT NOT NULL,
+        entry_ts TEXT NOT NULL,
+        entry_px REAL,
+        exit_ts TEXT,
+        exit_px REAL,
+        outcome TEXT,
+        roi REAL,
+        tt_bars INTEGER,
+        dd REAL,
+        rule_hash TEXT,
+        simulated INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY(favorite_id, entry_ts)
+    );
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_forward_runs_fav_entry ON forward_runs(favorite_id, entry_ts DESC);",
+    "CREATE INDEX IF NOT EXISTS idx_forward_runs_fav_exit ON forward_runs(favorite_id, exit_ts DESC);",
+]
+
+
+def ensure_forward_runs_schema(db: sqlite3.Cursor) -> None:
+    conn = getattr(db, "connection", None)
+    if conn is None:
+        raise RuntimeError("forward_runs.ensure_forward_runs_schema requires a DB connection")
+
+    if getattr(conn, "in_transaction", False):
+        for statement in SCHEMA_STATEMENTS:
+            db.execute(statement)
+        return
+
+    def _apply() -> None:
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            for statement in SCHEMA_STATEMENTS:
+                db.execute(statement)
+        except Exception:
+            conn.rollback()
+            raise
+        else:
+            conn.commit()
+
+    db_module.retry_locked(_apply)
 
 
 def _normalize_favorite_id(favorite_id: Any) -> str | None:
@@ -31,6 +75,7 @@ def log_forward_entry(
     *,
     simulated: bool = False,
 ) -> None:
+    ensure_forward_runs_schema(db)
     fav_key = _normalize_favorite_id(favorite_id)
     if not fav_key or not entry_ts:
         return
@@ -65,6 +110,7 @@ def log_forward_exit(
     *,
     simulated: bool = False,
 ) -> None:
+    ensure_forward_runs_schema(db)
     fav_key = _normalize_favorite_id(favorite_id)
     if not fav_key or not entry_ts:
         return
@@ -144,9 +190,15 @@ def _fetch_history(
 def get_forward_history(
     favorite_id: str, limit: int = 10, offset: int = 0
 ) -> list[dict[str, Any]]:
-    conn = sqlite3.connect(db.DB_PATH, check_same_thread=False)
+    conn = sqlite3.connect(
+        db_module.DB_PATH,
+        check_same_thread=False,
+        isolation_level=None,
+    )
+    db_module._apply_pragmas(conn)
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()
+    ensure_forward_runs_schema(cur)
     try:
         return _fetch_history(cur, favorite_id, limit, offset)
     finally:
@@ -159,8 +211,8 @@ def get_forward_history_for_cursor(
     limit: int = 10,
     offset: int = 0,
 ) -> list[dict[str, Any]]:
+    ensure_forward_runs_schema(db)
     fav_key = _normalize_favorite_id(favorite_id)
     if not fav_key:
         return []
     return _fetch_history(db, fav_key, limit, offset)
-

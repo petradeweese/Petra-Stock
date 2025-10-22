@@ -5,6 +5,8 @@ import csv
 import io
 import logging
 import sqlite3
+
+import db as db_module
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Mapping, Optional, Sequence
@@ -148,8 +150,7 @@ def _row_value(
     return default
 
 
-def _ensure_schema(db) -> None:
-    _ensure_row_factory(db)
+def _create_hf_schema(db) -> None:
     db.execute(
         """
         CREATE TABLE IF NOT EXISTS scalper_hf_settings (
@@ -198,8 +199,10 @@ def _ensure_schema(db) -> None:
         """
     )
     db.execute(
-        """INSERT OR IGNORE INTO scalper_hf_state(id, status, started_at, halted_at, halt_reason)
-               VALUES(1, 'inactive', NULL, NULL, NULL)"""
+        """
+        INSERT OR IGNORE INTO scalper_hf_state(id, status, started_at, halted_at, halt_reason)
+        VALUES(1, 'inactive', NULL, NULL, NULL)
+        """
     )
     db.execute(
         """
@@ -233,7 +236,35 @@ def _ensure_schema(db) -> None:
         )
         """
     )
-    db.connection.commit()
+    db.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_scalper_hf_activity_date
+            ON scalper_hf_activity(trade_date)
+        """
+    )
+
+
+def _ensure_schema(db) -> None:
+    _ensure_row_factory(db)
+    conn = getattr(db, "connection", None)
+    if conn is None:
+        raise RuntimeError("hf_engine._ensure_schema requires a DB connection")
+
+    if getattr(conn, "in_transaction", False):
+        _create_hf_schema(db)
+        return
+
+    def _apply() -> None:
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            _create_hf_schema(db)
+        except Exception:
+            conn.rollback()
+            raise
+        else:
+            conn.commit()
+
+    db_module.retry_locked(_apply)
 
 
 def load_settings(db) -> HFSettings:
