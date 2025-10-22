@@ -7,6 +7,7 @@ import logging
 import math
 import os
 import sqlite3
+import time
 
 import db as db_module
 from dataclasses import dataclass
@@ -25,13 +26,83 @@ PAPER_DRY_RUN = os.getenv("PAPER_TRADING_DRY_RUN", "0").strip().lower() in {
     "on",
 }
 
+DEFAULT_STARTING_BALANCE = 100_000.0
+
+LEGACY_MODE = "paper"
+
+_SETTINGS_COLUMNS = {
+    "starting_balance",
+    "max_pct",
+    "pct_equity_per_trade",
+    "daily_trade_cap",
+    "time_cap_minutes",
+    "cooldown_minutes",
+    "profit_target_pct",
+    "mae_pct",
+    "max_open_positions",
+    "daily_max_drawdown_pct",
+    "volatility_gate",
+    "per_order_fee",
+    "per_contract_fee",
+    "tickers_csv",
+    "rsi_filter_enabled",
+    "status",
+    "started_at",
+}
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS paper_settings (
+  mode TEXT PRIMARY KEY,
+  starting_balance REAL NOT NULL,
+  max_pct REAL,
+  pct_equity_per_trade REAL,
+  daily_trade_cap INTEGER,
+  time_cap_minutes INTEGER,
+  cooldown_minutes INTEGER,
+  profit_target_pct REAL,
+  mae_pct REAL,
+  max_open_positions INTEGER,
+  daily_max_drawdown_pct REAL,
+  volatility_gate REAL,
+  per_order_fee REAL,
+  per_contract_fee REAL,
+  tickers_csv TEXT,
+  rsi_filter_enabled INTEGER DEFAULT 0,
+  status TEXT DEFAULT 'inactive',
+  started_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS equity_log (
+  id INTEGER PRIMARY KEY,
+  mode TEXT NOT NULL,
+  ts INTEGER NOT NULL,
+  equity REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_equity_log_mode_ts ON equity_log(mode, ts DESC);
+"""
+
 
 @dataclass(slots=True)
 class PaperSettings:
+    mode: str
     starting_balance: float
     max_pct: float
     status: str
     started_at: str | None
+    pct_equity_per_trade: float | None = None
+    daily_trade_cap: int | None = None
+    time_cap_minutes: int | None = None
+    cooldown_minutes: int | None = None
+    profit_target_pct: float | None = None
+    mae_pct: float | None = None
+    max_open_positions: int | None = None
+    daily_max_drawdown_pct: float | None = None
+    volatility_gate: float | None = None
+    per_order_fee: float | None = None
+    per_contract_fee: float | None = None
+    tickers_csv: str | None = None
+    rsi_filter_enabled: bool = False
 
 
 @dataclass(slots=True)
@@ -84,31 +155,124 @@ def _now_utc_iso(dt: datetime | None = None) -> str:
     return current.astimezone(timezone.utc).isoformat()
 
 
+def _table_columns(db, table: str) -> list[str]:
+    try:
+        rows = db.execute(f"PRAGMA table_info({table})").fetchall()
+    except Exception:
+        return []
+    names: list[str] = []
+    for row in rows or []:
+        value = _row_get(row, "name", 1, None)
+        if value is None:
+            continue
+        names.append(str(value))
+    return names
+
+
+def _migrate_legacy_paper_settings(db) -> None:
+    columns = _table_columns(db, "paper_settings")
+    if not columns:
+        return
+    if "mode" in columns:
+        return
+    db.executescript(
+        """
+        ALTER TABLE paper_settings RENAME TO paper_settings_old;
+        CREATE TABLE paper_settings (
+          mode TEXT PRIMARY KEY,
+          starting_balance REAL NOT NULL,
+          max_pct REAL,
+          pct_equity_per_trade REAL,
+          daily_trade_cap INTEGER,
+          time_cap_minutes INTEGER,
+          cooldown_minutes INTEGER,
+          profit_target_pct REAL,
+          mae_pct REAL,
+          max_open_positions INTEGER,
+          daily_max_drawdown_pct REAL,
+          volatility_gate REAL,
+          per_order_fee REAL,
+          per_contract_fee REAL,
+          tickers_csv TEXT,
+          rsi_filter_enabled INTEGER DEFAULT 0,
+          status TEXT DEFAULT 'inactive',
+          started_at TEXT
+        );
+        INSERT INTO paper_settings(mode, starting_balance, max_pct, status, started_at)
+            SELECT 'paper', starting_balance, max_pct, status, started_at FROM paper_settings_old WHERE id = 1;
+        DROP TABLE paper_settings_old;
+        """
+    )
+
+
+def _has_equity_log_mode(db) -> bool:
+    columns = _table_columns(db, "equity_log")
+    return "mode" in columns if columns else False
+
+
+def migrate_equity_log_mode(db) -> None:
+    if _has_equity_log_mode(db):
+        return
+    columns = _table_columns(db, "equity_log")
+    if not columns:
+        return
+    db.executescript(
+        """
+        ALTER TABLE equity_log RENAME TO equity_log_old;
+        CREATE TABLE equity_log (
+          id INTEGER PRIMARY KEY,
+          mode TEXT NOT NULL,
+          ts INTEGER NOT NULL,
+          equity REAL NOT NULL
+        );
+        INSERT INTO equity_log(mode, ts, equity)
+          SELECT 'lf' AS mode, ts, equity FROM equity_log_old;
+        DROP TABLE equity_log_old;
+        CREATE INDEX IF NOT EXISTS idx_equity_log_mode_ts ON equity_log(mode, ts DESC);
+        """
+    )
+
+
+def _ensure_mode_rows(db) -> None:
+    defaults = {
+        LEGACY_MODE: {"starting_balance": 10_000.0, "max_pct": 10.0, "status": "inactive"},
+        "hf": {"starting_balance": DEFAULT_STARTING_BALANCE, "status": "inactive"},
+        "lf": {"starting_balance": DEFAULT_STARTING_BALANCE, "status": "inactive"},
+    }
+    for mode, payload in defaults.items():
+        row = db.execute("SELECT 1 FROM paper_settings WHERE mode=?", (mode,)).fetchone()
+        if row:
+            continue
+        db.execute(
+            "INSERT INTO paper_settings(mode, starting_balance, max_pct, status) VALUES(?,?,?,?)",
+            (
+                mode,
+                float(payload.get("starting_balance", DEFAULT_STARTING_BALANCE)),
+                float(payload.get("max_pct", payload.get("pct_equity_per_trade", 0.0) or 0.0)),
+                str(payload.get("status", "inactive")),
+            ),
+        )
+
+
 def ensure_settings(db) -> None:
     conn = getattr(db, "connection", None)
     if conn is None:
         raise RuntimeError("paper_trading.ensure_settings requires a DB connection")
 
+    if getattr(conn, "in_transaction", False):
+        _migrate_legacy_paper_settings(db)
+        migrate_equity_log_mode(db)
+        db.executescript(SCHEMA)
+        _ensure_mode_rows(db)
+        return
+
     def _apply() -> None:
         db.execute("BEGIN IMMEDIATE")
         try:
-            db.execute(
-                """
-                CREATE TABLE IF NOT EXISTS paper_settings (
-                    id INTEGER PRIMARY KEY CHECK (id=1),
-                    starting_balance REAL NOT NULL DEFAULT 10000,
-                    max_pct REAL NOT NULL DEFAULT 10,
-                    started_at TEXT,
-                    status TEXT NOT NULL DEFAULT 'inactive'
-                )
-                """
-            )
-            db.execute(
-                """
-                INSERT OR IGNORE INTO paper_settings(id, starting_balance, max_pct, started_at, status)
-                VALUES(1, 10000, 10, NULL, 'inactive')
-                """
-            )
+            _migrate_legacy_paper_settings(db)
+            migrate_equity_log_mode(db)
+            db.executescript(SCHEMA)
+            _ensure_mode_rows(db)
         except Exception:
             conn.rollback()
             raise
@@ -118,30 +282,146 @@ def ensure_settings(db) -> None:
     db_module.retry_locked(_apply)
 
 
-def load_settings(db) -> PaperSettings:
-    ensure_settings(db)
-    row = db.execute(
-        "SELECT starting_balance, max_pct, status, started_at FROM paper_settings WHERE id=1"
-    ).fetchone()
-    if not row:
-        return PaperSettings(10000.0, 10.0, "inactive", None)
+def _settings_defaults_for_mode(mode: str) -> dict[str, object]:
+    mode_key = (mode or "").lower()
+    if mode_key == LEGACY_MODE:
+        return {"starting_balance": 10_000.0, "max_pct": 10.0, "status": "inactive"}
+    return {"starting_balance": DEFAULT_STARTING_BALANCE, "status": "inactive"}
+
+
+def _row_to_settings(mode: str, row) -> PaperSettings:
+    defaults = _settings_defaults_for_mode(mode)
+    start_default = float(defaults.get("starting_balance", DEFAULT_STARTING_BALANCE))
+    max_pct_default = float(defaults.get("max_pct", defaults.get("pct_equity_per_trade", 0.0) or 0.0))
+    pct_trade = _row_get(row, "pct_equity_per_trade", 3, None)
+    max_pct_value = _row_get(row, "max_pct", 2, None)
+    max_pct_final = max_pct_value if max_pct_value is not None else pct_trade
+    def _as_int(val):
+        if val is None:
+            return None
+        try:
+            return int(val)
+        except (TypeError, ValueError):
+            return None
+
+    def _as_float(val):
+        if val is None:
+            return None
+        try:
+            return float(val)
+        except (TypeError, ValueError):
+            return None
+
     return PaperSettings(
-        float(_row_get(row, "starting_balance", 0, 0.0) or 0.0),
-        float(_row_get(row, "max_pct", 1, 0.0) or 0.0),
-        str(_row_get(row, "status", 2, "inactive") or "inactive"),
-        _row_get(row, "started_at", 3),
+        mode=mode,
+        starting_balance=float(_row_get(row, "starting_balance", 1, start_default) or start_default),
+        max_pct=float(max_pct_final or max_pct_default or 0.0),
+        status=str(_row_get(row, "status", 16, defaults.get("status", "inactive")) or defaults.get("status", "inactive")),
+        started_at=_row_get(row, "started_at", 17),
+        pct_equity_per_trade=_as_float(pct_trade),
+        daily_trade_cap=_as_int(_row_get(row, "daily_trade_cap", 4)),
+        time_cap_minutes=_as_int(_row_get(row, "time_cap_minutes", 5)),
+        cooldown_minutes=_as_int(_row_get(row, "cooldown_minutes", 6)),
+        profit_target_pct=_as_float(_row_get(row, "profit_target_pct", 7)),
+        mae_pct=_as_float(_row_get(row, "mae_pct", 8)),
+        max_open_positions=_as_int(_row_get(row, "max_open_positions", 9)),
+        daily_max_drawdown_pct=_as_float(_row_get(row, "daily_max_drawdown_pct", 10)),
+        volatility_gate=_as_float(_row_get(row, "volatility_gate", 11)),
+        per_order_fee=_as_float(_row_get(row, "per_order_fee", 12)),
+        per_contract_fee=_as_float(_row_get(row, "per_contract_fee", 13)),
+        tickers_csv=_row_get(row, "tickers_csv", 14),
+        rsi_filter_enabled=bool(int(_row_get(row, "rsi_filter_enabled", 15, 0) or 0)),
     )
 
 
-def update_settings(db, *, starting_balance: float, max_pct: float) -> None:
+def load_settings(db, mode: str) -> PaperSettings:
     ensure_settings(db)
+    mode_key = (mode or LEGACY_MODE).lower()
+    row = db.execute("SELECT * FROM paper_settings WHERE mode=?", (mode_key,)).fetchone()
+    if not row:
+        defaults = _settings_defaults_for_mode(mode_key)
+        db.execute(
+            "INSERT OR REPLACE INTO paper_settings(mode, starting_balance, max_pct, status) VALUES(?,?,?,?)",
+            (
+                mode_key,
+                float(defaults.get("starting_balance", DEFAULT_STARTING_BALANCE)),
+                float(defaults.get("max_pct", defaults.get("pct_equity_per_trade", 0.0) or 0.0)),
+                str(defaults.get("status", "inactive")),
+            ),
+        )
+        row = db.execute("SELECT * FROM paper_settings WHERE mode=?", (mode_key,)).fetchone()
+    return _row_to_settings(mode_key, row)
+
+
+def upsert_settings(db, mode: str, payload: dict[str, object]) -> None:
+    ensure_settings(db)
+    mode_key = (mode or LEGACY_MODE).lower()
+    filtered = {k: v for k, v in payload.items() if k in _SETTINGS_COLUMNS}
+    if not filtered:
+        return
+    columns: list[str] = []
+    values: list[object] = []
+    for key, value in filtered.items():
+        columns.append(key)
+        values.append(value)
+    placeholders = ", ".join(["?"] * len(columns))
+    assignments = ", ".join([f"{col}=excluded.{col}" for col in columns])
+    sql = (
+        f"INSERT INTO paper_settings(mode, {', '.join(columns)}) VALUES(?, {placeholders}) "
+        f"ON CONFLICT(mode) DO UPDATE SET {assignments}"
+    )
+    db.execute(sql, [mode_key, *values])
+
+
+def get_latest_equity(db, mode: str) -> float | None:
+    ensure_settings(db)
+    row = db.execute(
+        "SELECT equity FROM equity_log WHERE mode=? ORDER BY ts DESC LIMIT 1",
+        ((mode or LEGACY_MODE).lower(),),
+    ).fetchone()
+    return float(_row_get(row, "equity", 0)) if row else None
+
+
+def seed_equity_if_empty(db, mode: str) -> None:
+    ensure_settings(db)
+    mode_key = (mode or LEGACY_MODE).lower()
+    latest = get_latest_equity(db, mode_key)
+    if latest is not None:
+        return
+    settings = load_settings(db, mode_key)
+    now_ms = int(time.time() * 1000)
+    db.execute(
+        "INSERT INTO equity_log(mode, ts, equity) VALUES(?,?,?)",
+        (mode_key, now_ms, float(settings.starting_balance)),
+    )
+
+
+def append_equity_point(db, mode: str, equity: float, *, ts: int | None = None) -> None:
+    ensure_settings(db)
+    mode_key = (mode or LEGACY_MODE).lower()
+    timestamp = int(ts if ts is not None else time.time() * 1000)
+    db.execute(
+        "INSERT INTO equity_log(mode, ts, equity) VALUES(?,?,?)",
+        (mode_key, timestamp, float(equity)),
+    )
+
+
+def update_settings(db, mode: str, *, starting_balance: float, max_pct: float) -> None:
+    ensure_settings(db)
+    mode_key = (mode or LEGACY_MODE).lower()
     start_value = max(0.0, float(starting_balance))
     max_pct_value = max(0.0, min(float(max_pct), 100.0))
     db.execute(
-        "UPDATE paper_settings SET starting_balance=?, max_pct=? WHERE id=1",
-        (start_value, max_pct_value),
+        """
+        INSERT INTO paper_settings(mode, starting_balance, max_pct)
+        VALUES(?, ?, ?)
+        ON CONFLICT(mode) DO UPDATE SET starting_balance=excluded.starting_balance, max_pct=excluded.max_pct
+        """,
+        (mode_key, start_value, max_pct_value),
     )
-    db.connection.commit()
+    conn = getattr(db, "connection", None)
+    if conn is not None:
+        conn.commit()
 
 
 def _seed_equity(db, settings: PaperSettings, *, now: datetime | None = None) -> None:
@@ -163,7 +443,7 @@ def _latest_balance(db, settings: PaperSettings | None = None) -> float:
     if row:
         return float(_row_get(row, "balance", 0, 0.0) or 0.0)
     if settings is None:
-        settings = load_settings(db)
+        settings = load_settings(db, LEGACY_MODE)
     return float(settings.starting_balance)
 
 
@@ -295,7 +575,7 @@ def open_position(
     source_alert_id: str | None = None,
     now: datetime | None = None,
 ) -> Optional[int]:
-    settings = load_settings(db)
+    settings = load_settings(db, LEGACY_MODE)
     _seed_equity(db, settings, now=now)
     if settings.status.lower() != "active":
         logger.info(
@@ -437,7 +717,7 @@ def close_position(
     status = str(_row_get(row, "status", 13, "")).lower() if row else ""
     if not row or status != "open":
         return None
-    settings = load_settings(db)
+    settings = load_settings(db, LEGACY_MODE)
     balance = _latest_balance(db, settings)
     qty = int(_row_get(row, "qty", 5, 0))
     entry_price = float(_row_get(row, "entry_price", 9, 0.0))
@@ -486,30 +766,31 @@ def close_position(
 
 
 def start_engine(db, *, now: datetime | None = None) -> PaperSettings:
-    settings = load_settings(db)
+    settings = load_settings(db, LEGACY_MODE)
     if settings.status.lower() == "active":
         _seed_equity(db, settings, now=now)
         return settings
     started_at = _now_utc_iso(now or now_et())
     db.execute(
-        "UPDATE paper_settings SET status='active', started_at=? WHERE id=1",
-        (started_at,),
+        "UPDATE paper_settings SET status='active', started_at=? WHERE mode=?",
+        (started_at, LEGACY_MODE),
     )
     db.connection.commit()
     _seed_equity(db, settings, now=now)
-    return load_settings(db)
+    return load_settings(db, LEGACY_MODE)
 
 
 def stop_engine(db) -> PaperSettings:
     db.execute(
-        "UPDATE paper_settings SET status='inactive' WHERE id=1"
+        "UPDATE paper_settings SET status='inactive' WHERE mode=?",
+        (LEGACY_MODE,),
     )
     db.connection.commit()
-    return load_settings(db)
+    return load_settings(db, LEGACY_MODE)
 
 
 def restart_engine(db, *, now: datetime | None = None) -> PaperSettings:
-    settings = load_settings(db)
+    settings = load_settings(db, LEGACY_MODE)
     db.execute("DELETE FROM paper_trades")
     db.execute("DELETE FROM paper_equity")
     db.connection.commit()
@@ -518,23 +799,49 @@ def restart_engine(db, *, now: datetime | None = None) -> PaperSettings:
 
 
 def get_summary(db) -> dict:
-    settings = load_settings(db)
-    _seed_equity(db, settings)
-    balance = _latest_balance(db, settings)
-    starting = float(settings.starting_balance) or 0.0
+    ensure_settings(db)
+    legacy_settings = load_settings(db, LEGACY_MODE)
+    _seed_equity(db, legacy_settings)
+    balance = _latest_balance(db, legacy_settings)
+    starting = float(legacy_settings.starting_balance) or 0.0
     roi = calculate_roi(starting or 1.0, balance) if starting else 0.0
     open_row = db.execute(
         "SELECT COUNT(1) FROM paper_trades WHERE status='open'"
     ).fetchone()
     open_count = int(_row_get(open_row, 0, 0, 0) or 0) if open_row else 0
-    return {
-        "balance": balance,
-        "starting_balance": starting,
-        "roi_pct": roi,
-        "status": settings.status,
-        "started_at": settings.started_at,
-        "open_trades": int(open_count),
+    summary: dict[str, dict[str, float | int | str | None]] = {
+        "legacy": {
+            "balance": balance,
+            "starting_balance": starting,
+            "roi_pct": roi,
+            "status": legacy_settings.status,
+            "started_at": legacy_settings.started_at,
+            "open_trades": int(open_count),
+        }
     }
+    for mode in ("hf", "lf"):
+        seed_equity_if_empty(db, mode)
+        latest = get_latest_equity(db, mode)
+        settings = load_settings(db, mode)
+        starting_balance = float(settings.starting_balance or 0.0)
+        equity_value = float(latest if latest is not None else starting_balance)
+        roi_value = calculate_roi(starting_balance or 1.0, equity_value) if starting_balance else 0.0
+        summary[mode] = {
+            "starting_balance": starting_balance,
+            "account_equity": equity_value,
+            "roi_pct": roi_value,
+        }
+    summary.update(
+        {
+            "balance": balance,
+            "starting_balance": starting,
+            "roi_pct": roi,
+            "status": legacy_settings.status,
+            "started_at": legacy_settings.started_at,
+            "open_trades": int(open_count),
+        }
+    )
+    return summary
 
 
 _RANGE_LOOKUPS = {
@@ -546,7 +853,7 @@ _RANGE_LOOKUPS = {
 
 
 def get_equity_points(db, range_key: str) -> List[EquityPoint]:
-    settings = load_settings(db)
+    settings = load_settings(db, LEGACY_MODE)
     _seed_equity(db, settings)
     range_key = (range_key or "1m").lower()
     delta = _RANGE_LOOKUPS.get(range_key, _RANGE_LOOKUPS["1m"])
@@ -665,6 +972,8 @@ __all__ = [
     "PaperSettings",
     "PaperTrade",
     "EquityPoint",
+    "DEFAULT_STARTING_BALANCE",
+    "LEGACY_MODE",
     "calculate_max_contracts",
     "calculate_roi",
     "resolve_fill_price",
@@ -680,4 +989,8 @@ __all__ = [
     "export_trades_csv",
     "update_settings",
     "load_settings",
+    "upsert_settings",
+    "get_latest_equity",
+    "seed_equity_if_empty",
+    "append_equity_point",
 ]
