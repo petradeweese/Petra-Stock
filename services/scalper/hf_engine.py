@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
+from services import paper_trading
+
 from utils import TZ, now_et
 
 from .lf_engine import evaluate_exit
@@ -415,10 +417,14 @@ def _ensure_equity_seed(db, settings: HFSettings, *, now: datetime | None = None
     row = db.execute("SELECT COUNT(1) FROM scalper_hf_equity").fetchone()
     count = int(row[0]) if row else 0
     if count == 0:
-        current = _now_utc(now).isoformat()
+        current_dt = _now_utc(now)
+        current = current_dt.isoformat()
         db.execute(
             "INSERT OR REPLACE INTO scalper_hf_equity(ts, balance) VALUES(?, ?)",
             (current, float(settings.starting_balance)),
+        )
+        paper_trading.append_equity_point(
+            db, "hf", float(settings.starting_balance), ts=int(current_dt.timestamp() * 1000)
         )
         db.connection.commit()
         return
@@ -428,10 +434,14 @@ def _ensure_equity_seed(db, settings: HFSettings, *, now: datetime | None = None
     activity_count = int(activity_row[0]) if activity_row else 0
     if activity_count > 0:
         return
-    current = _now_utc(now).isoformat()
+    current_dt = _now_utc(now)
+    current = current_dt.isoformat()
     db.execute(
         "UPDATE scalper_hf_equity SET ts=?, balance=? WHERE ROWID = (SELECT ROWID FROM scalper_hf_equity LIMIT 1)",
         (current, float(settings.starting_balance)),
+    )
+    paper_trading.append_equity_point(
+        db, "hf", float(settings.starting_balance), ts=int(current_dt.timestamp() * 1000)
     )
     db.connection.commit()
 
@@ -477,6 +487,13 @@ def _maybe_reset_equity_seed(
         "INSERT INTO scalper_hf_equity(ts, balance) VALUES(?, ?)",
         (seed_ts, float(new_balance)),
     )
+    seed_dt: datetime | None = None
+    try:
+        seed_dt = datetime.fromisoformat(seed_ts)
+    except ValueError:
+        seed_dt = None
+    ts_ms = int(seed_dt.timestamp() * 1000) if seed_dt else None
+    paper_trading.append_equity_point(db, "hf", float(new_balance), ts=ts_ms)
     logger.info(
         "hf_equity_seed_reset previous=%.2f new=%.2f", previous_balance, new_balance
     )
@@ -492,6 +509,7 @@ def start_engine(db, *, now: datetime | None = None) -> HFStatus:
     )
     db.connection.commit()
     _ensure_equity_seed(db, settings, now=now)
+    paper_trading.seed_equity_if_empty(db, "hf")
     return get_status(db, settings=settings)
 
 
@@ -512,6 +530,7 @@ def restart_engine(db, *, now: datetime | None = None) -> HFStatus:
     )
     db.connection.commit()
     _ensure_equity_seed(db, settings, now=now)
+    paper_trading.seed_equity_if_empty(db, "hf")
     return get_status(db, settings=settings)
 
 
@@ -880,6 +899,9 @@ def close_trade(
     db.execute(
         "INSERT INTO scalper_hf_equity(ts, balance) VALUES(?, ?)",
         (exit_dt.isoformat(), new_equity),
+    )
+    paper_trading.append_equity_point(
+        db, "hf", float(new_equity), ts=int(exit_dt.timestamp() * 1000)
     )
     db.connection.commit()
     updated = db.execute(

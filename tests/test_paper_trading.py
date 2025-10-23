@@ -42,8 +42,12 @@ def _restart_active(cursor, *, when: datetime | None = None) -> None:
 def test_load_settings_creates_defaults_when_missing(db_cursor):
     db_cursor.execute("DROP TABLE IF EXISTS paper_settings")
     db_cursor.connection.commit()
-    settings = paper_trading.load_settings(db_cursor)
-    assert settings == paper_trading.PaperSettings(10000.0, 10.0, "inactive", None)
+    settings = paper_trading.load_settings(db_cursor, paper_trading.LEGACY_MODE)
+    assert settings.mode == paper_trading.LEGACY_MODE
+    assert settings.starting_balance == pytest.approx(10_000.0)
+    assert settings.max_pct == pytest.approx(10.0)
+    assert settings.status == "inactive"
+    assert settings.started_at is None
 
 
 def test_settings_roundtrip_with_tuple_rows(tmp_path):
@@ -56,15 +60,21 @@ def test_settings_roundtrip_with_tuple_rows(tmp_path):
             cursor = conn.cursor()
             cursor.execute("DROP TABLE IF EXISTS paper_settings")
             conn.commit()
-            first = paper_trading.load_settings(cursor)
+            first = paper_trading.load_settings(cursor, paper_trading.LEGACY_MODE)
             raw_row = cursor.execute(
-                "SELECT starting_balance, max_pct FROM paper_settings WHERE id=1"
+                "SELECT starting_balance, max_pct FROM paper_settings WHERE mode=?",
+                (paper_trading.LEGACY_MODE,),
             ).fetchone()
             assert isinstance(raw_row, tuple)
             assert first.starting_balance == 10000.0
             assert first.max_pct == 10.0
-            paper_trading.update_settings(cursor, starting_balance=15000, max_pct=12.5)
-            second = paper_trading.load_settings(cursor)
+            paper_trading.update_settings(
+                cursor,
+                paper_trading.LEGACY_MODE,
+                starting_balance=15000,
+                max_pct=12.5,
+            )
+            second = paper_trading.load_settings(cursor, paper_trading.LEGACY_MODE)
             assert second.starting_balance == 15000.0
             assert second.max_pct == 12.5
         finally:
@@ -170,7 +180,9 @@ def test_open_position_skips_when_no_price(db_cursor, caplog):
 
 
 def test_restart_engine_idempotency(db_cursor):
-    paper_trading.update_settings(db_cursor, starting_balance=7500, max_pct=15)
+    paper_trading.update_settings(
+        db_cursor, paper_trading.LEGACY_MODE, starting_balance=7500, max_pct=15
+    )
     first = paper_trading.restart_engine(db_cursor, now=datetime(2024, 6, 1, tzinfo=timezone.utc))
     assert first.status == "active"
     paper_trading.restart_engine(db_cursor, now=datetime(2024, 6, 2, tzinfo=timezone.utc))
@@ -223,7 +235,9 @@ def test_export_trades_csv_schema(db_cursor):
 
 def test_paper_trade_lifecycle(db_cursor, caplog):
     caplog.set_level(logging.INFO, logger="services.paper_trading")
-    paper_trading.update_settings(db_cursor, starting_balance=5000, max_pct=20)
+    paper_trading.update_settings(
+        db_cursor, paper_trading.LEGACY_MODE, starting_balance=5000, max_pct=20
+    )
     paper_trading.restart_engine(db_cursor, now=datetime(2024, 5, 1, tzinfo=timezone.utc))
     trade_id = paper_trading.open_position(
         db_cursor,
@@ -239,7 +253,7 @@ def test_paper_trade_lifecycle(db_cursor, caplog):
         source_alert_id="tsla-hit",
     )
     assert trade_id is not None
-    summary_after_entry = paper_trading.get_summary(db_cursor)
+    summary_after_entry = paper_trading.get_summary(db_cursor)["legacy"]
     assert summary_after_entry["balance"] < summary_after_entry["starting_balance"]
     trade = paper_trading.close_position(
         db_cursor,
@@ -250,7 +264,7 @@ def test_paper_trade_lifecycle(db_cursor, caplog):
     assert trade is not None
     assert trade.interval == "30m"
     assert trade.executed_at
-    summary_after_exit = paper_trading.get_summary(db_cursor)
+    summary_after_exit = paper_trading.get_summary(db_cursor)["legacy"]
     assert summary_after_exit["balance"] > summary_after_entry["balance"]
     points = paper_trading.get_equity_points(db_cursor, "1d")
     assert len(points) >= 2

@@ -2665,7 +2665,7 @@ def forward_page(request: Request, db=Depends(get_db)):
 @router.get("/paper", response_class=HTMLResponse)
 def paper_page(request: Request, db=Depends(get_db)):
     summary = paper_trading.get_summary(db)
-    settings = paper_trading.load_settings(db)
+    settings = paper_trading.load_settings(db, paper_trading.LEGACY_MODE)
     scalper_lf_status = scalper_lf.status_payload(db)
     scalper_hf_status = scalper_hf.status_payload(db)
     lf_equity_seed = [
@@ -3854,7 +3854,7 @@ def settings_page(request: Request, db=Depends(get_db)):
         "twilio_enabled": twilio_enabled,
         "twilio_verify_enabled": twilio_verify_enabled,
     }
-    paper_settings_state = paper_trading.load_settings(db)
+    paper_settings_state = paper_trading.load_settings(db, paper_trading.LEGACY_MODE)
     paper_summary = paper_trading.get_summary(db)
     scalper_settings = scalper_lf.load_settings(db)
     scalper_status = scalper_lf.status_payload(db)
@@ -4041,7 +4041,7 @@ def settings_save(
     if half_life_value <= 0:
         half_life_value = getattr(settings, "forward_recency_halflife_days", 30.0) or 30.0
 
-    current_paper_settings = paper_trading.load_settings(db)
+    current_paper_settings = paper_trading.load_settings(db, paper_trading.LEGACY_MODE)
     current_scalper_settings = scalper_lf.load_settings(db)
     current_scalper_hf_settings = scalper_hf.load_settings(db)
     current_favorites_settings = favorites_sim.load_settings(db)
@@ -4091,6 +4091,7 @@ def settings_save(
     setattr(settings, "FORWARD_RECENCY_HALFLIFE_DAYS", half_life_value)
     paper_trading.update_settings(
         db,
+        paper_trading.LEGACY_MODE,
         starting_balance=start_balance_value,
         max_pct=max_pct_value,
     )
