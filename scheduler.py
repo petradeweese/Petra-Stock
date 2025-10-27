@@ -9,6 +9,11 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Dict
 
+try:  # pragma: no cover - optional dependency
+    from apscheduler.schedulers.asyncio import AsyncIOScheduler
+except Exception:  # pragma: no cover - scheduler optional
+    AsyncIOScheduler = None  # type: ignore[assignment]
+
 from config import settings
 from db import DB_PATH, get_settings, row_to_dict, set_last_run
 from prometheus_client import Counter  # type: ignore
@@ -17,6 +22,7 @@ from scanner import preload_prices  # type: ignore
 from services.http_client import RateLimitTimeoutSoon
 from services.data_provider import compute_request_window, fetch_bars_async
 from services.price_store import covers, get_coverage, missing_ranges, upsert_bars
+from jobs import forecast_email
 from services import favorites_alerts
 from services.scalper import runner as scalper_runner
 from utils import clamp_market_closed, market_is_open as util_market_is_open
@@ -460,8 +466,11 @@ async def forward_tests_loop(
 
 
 def setup_scheduler(app, market_is_open, now_et, compute_scan_for_ticker):
+    forecast_scheduler: Any = None
+
     @app.on_event("startup")
     async def on_startup():
+        nonlocal forecast_scheduler
         asyncio.create_task(work_queue.worker())
         asyncio.create_task(
             favorites_loop(market_is_open, now_et, compute_scan_for_ticker)
@@ -469,3 +478,22 @@ def setup_scheduler(app, market_is_open, now_et, compute_scan_for_ticker):
         asyncio.create_task(forward_tests_loop(market_is_open, now_et))
         asyncio.create_task(scalper_runner.hf_loop(market_is_open, now_et))
         asyncio.create_task(scalper_runner.lf_loop(market_is_open, now_et))
+        if AsyncIOScheduler is None:
+            logger.warning("forecast_email scheduler_disabled reason=missing_dependency")
+        else:
+            scheduler = AsyncIOScheduler(timezone="America/New_York")
+            try:
+                forecast_email.schedule_jobs(scheduler, now_et)
+                scheduler.start()
+                forecast_scheduler = scheduler
+            except Exception:
+                logger.exception("forecast_email scheduler_setup_failed")
+
+    @app.on_event("shutdown")
+    async def on_shutdown():
+        nonlocal forecast_scheduler
+        if forecast_scheduler is not None:
+            try:
+                forecast_scheduler.shutdown(wait=False)
+            except Exception:
+                logger.exception("forecast_email scheduler_shutdown_failed")

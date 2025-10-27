@@ -17,6 +17,7 @@ pyarrow>=15.0.0
 prometheus-client
 pydantic
 alembic
+apscheduler
 
 # development tooling
 pre-commit
