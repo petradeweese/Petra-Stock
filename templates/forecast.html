@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block title %}Today’s Forecast · Petra Stock{% endblock %}
+{% block meta_description %}Explore intraday historical matches and outcome probabilities for today's trading session.{% endblock %}
+{% block head_extra %}
+  <script src="{{ url_for('static', path='js/htmx.min.js') }}" defer></script>
+  <script src="{{ url_for('static', path='js/forecast.js') }}" defer></script>
+{% endblock %}
+{% block body_class %}page-forecast{% endblock %}
+{% block content %}
+<section class="page-section forecast-page" data-symbol="{{ symbol }}">
+  <header class="page-header">
+    <div>
+      <h1>Today’s Forecast</h1>
+      <p class="muted">Run an intraday similarity search for a ticker to see how the rest of the session tends to play out.</p>
+    </div>
+    <form id="forecast-form" class="forecast-form" hx-trigger="submit, change from:#forecast-symbol" hx-get="/api/forecast/PLACEHOLDER" hx-target="#forecast-results" hx-swap="none">
+      <label class="sr-only" for="forecast-symbol">Ticker</label>
+      <input id="forecast-symbol" name="symbol" type="text" inputmode="text" autocapitalize="characters" autocomplete="off" placeholder="e.g. SPY" value="{{ symbol }}" />
+      <button type="submit" class="btn">Run</button>
+    </form>
+  </header>
+
+  <div id="forecast-error" class="forecast-error" role="alert" hidden>No forecast available.</div>
+
+  <section class="forecast-summary card" aria-live="polite">
+    <div class="summary-item">
+      <span class="label">Confidence</span>
+      <span class="value" data-summary="confidence">—</span>
+    </div>
+    <div class="summary-item">
+      <span class="label">Matches</span>
+      <span class="value" data-summary="matches">—</span>
+    </div>
+    <div class="summary-item">
+      <span class="label">Median Close Δ%</span>
+      <span class="value" data-summary="median_close_pct">—</span>
+    </div>
+    <div class="summary-item">
+      <span class="label">IQR Close Δ%</span>
+      <span class="value" data-summary="iqr_close_pct">—</span>
+    </div>
+    <div class="summary-item">
+      <span class="label">Median High +%</span>
+      <span class="value" data-summary="median_high_pct">—</span>
+    </div>
+    <div class="summary-item">
+      <span class="label">Median Low −%</span>
+      <span class="value" data-summary="median_low_pct">—</span>
+    </div>
+  </section>
+
+  <div class="card forecast-table-card">
+    <div class="forecast-table-header">
+      <h2>Historical Matches</h2>
+      <p class="muted">Top 20 analogs by cosine similarity.</p>
+    </div>
+    <div class="table-scroll">
+      <table class="table table-compact" id="forecast-table">
+        <thead>
+          <tr>
+            <th data-sort="date">Date</th>
+            <th data-sort="similarity">Similarity</th>
+            <th data-sort="time">Time of Match</th>
+            <th data-sort="close">Close Δ%</th>
+            <th data-sort="high">High +%</th>
+            <th data-sort="low">Low −%</th>
+          </tr>
+        </thead>
+        <tbody id="forecast-results"></tbody>
+      </table>
+    </div>
+  </div>
+</section>
+{% endblock %}
