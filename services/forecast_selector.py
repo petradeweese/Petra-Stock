@@ -326,6 +326,9 @@ def get_implied_move_pct(ticker: str, asof: dt.datetime) -> Optional[float]:
     except (TypeError, ValueError):
         _IV_CACHE[cache_key] = None
         return None
+    if math.isnan(iv_float) or math.isinf(iv_float):
+        _IV_CACHE[cache_key] = None
+        return None
 
     close_dt = dt.datetime.combine(asof_et.date(), CLOSE_TIME, tzinfo=TZ)
     minutes_remaining = (close_dt - asof_et).total_seconds() / 60.0
@@ -412,7 +415,7 @@ def select_forecast_top5(
         if implied_move is None:
             edge = magnitude
         else:
-            edge = magnitude - implied_move
+            edge = max(magnitude - implied_move, 0.0)
         score_basis = edge if edge > 0 else magnitude
         score = round(confidence * score_basis, 6)
         entry = {
