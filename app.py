@@ -20,6 +20,7 @@ except Exception:
 
 from db import init_db, get_db
 from routes import router
+from routes.api_forecast import router as forecast_api_router
 from scanner import compute_scan_for_ticker
 from scheduler import setup_scheduler
 from services import http_client
@@ -75,6 +76,7 @@ def create_app() -> FastAPI:
     app.mount("/static", StaticFiles(directory="static"), name="static")
 
     app.include_router(router)
+    app.include_router(forecast_api_router)
     setup_scheduler(app, market_is_open, now_et, compute_scan_for_ticker)
 
     def _overnight_scan(payload: dict, silent: bool) -> dict:

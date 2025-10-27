@@ -2664,6 +2664,20 @@ def forward_page(request: Request, db=Depends(get_db)):
     )
 
 
+@router.get("/forecast", response_class=HTMLResponse)
+def forecast_page(request: Request, symbol: str = Query("")):
+    ticker = (symbol or "").strip().upper()
+    return templates.TemplateResponse(
+        request,
+        "forecast.html",
+        {
+            "active_tab": "forecast",
+            "canonical_path": "/forecast",
+            "symbol": ticker,
+        },
+    )
+
+
 @router.get("/paper", response_class=HTMLResponse)
 def paper_page(request: Request, db=Depends(get_db)):
     summary = paper_trading.get_summary(db)

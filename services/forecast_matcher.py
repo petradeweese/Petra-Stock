@@ -271,6 +271,7 @@ def find_similar_days(
             "close_pct": round(match.outcomes["close_pct"], 3),
             "high_pct": round(match.outcomes["high_pct"], 3),
             "low_pct": round(match.outcomes["low_pct"], 3),
+            "timestamp": match.timestamp.isoformat(),
         }
         for match in matches
     ]
