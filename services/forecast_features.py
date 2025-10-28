@@ -152,14 +152,32 @@ def load_price_frame(
         return None, "db_miss"
 
     readable, reason, token_path = _token_path_status()
-    if not readable and reason != "missing":
+    disabled, disabled_reason, _, disabled_error = schwab_client.disabled_state()
+    reason_label = (disabled_reason or "").lower()
+    config_disabled = False
+    if disabled:
+        SchwabAuthError = getattr(schwab_client, "SchwabAuthError", None)
+        if "config" in reason_label:
+            config_disabled = True
+        elif SchwabAuthError is not None and isinstance(disabled_error, SchwabAuthError):
+            message = str(disabled_error or "").lower()
+            if "missing" in message or "config" in message:
+                config_disabled = True
+    if not readable and reason not in (None, "missing"):
         logger.warning(
-            "forecast schwab_fallback_skipped_or_failed reason=token_%s symbol=%s token_path=%s",
+            "forecast schwab_token_path_unavailable reason=%s path=%s disabled_reason=%s",
             reason or "unknown",
-            symbol,
             token_path,
+            disabled_reason or "",
         )
-        return None, "db_miss"
+        if config_disabled:
+            logger.warning(
+                "forecast schwab_fallback_skipped_or_failed reason=token_%s symbol=%s token_path=%s",
+                reason or "unknown",
+                symbol,
+                token_path,
+            )
+            return None, "db_miss"
 
     client_obj = getattr(schwab_client, "_client", None)
     ensure_coro = None
