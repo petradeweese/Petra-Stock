@@ -15,6 +15,7 @@ import pandas as pd
 from config import settings
 from services import price_store
 from services import schwab_client
+from services.data_provider import fetch_bars
 from services.async_utils import run_coro
 from utils import OPEN_TIME, TZ
 
@@ -55,28 +56,6 @@ def ensure_utc(ts: dt.datetime) -> dt.datetime:
     if ts.tzinfo is None:
         return ts.replace(tzinfo=dt.timezone.utc)
     return ts.astimezone(dt.timezone.utc)
-
-
-def _fetch_from_schwab(symbol: str, start: dt.datetime, end: dt.datetime, interval: str) -> pd.DataFrame:
-    try:
-        df = run_coro(
-            schwab_client.get_price_history(symbol, start, end, interval)
-        )
-    except Exception as exc:  # pragma: no cover - defensive logging
-        logger.warning(
-            "forecast schwab_fetch_failed",
-            extra={"symbol": symbol, "err": str(exc)},
-        )
-        return pd.DataFrame()
-
-    if df.empty:
-        return df
-    if df.index.tz is None:
-        df.index = df.index.tz_localize(dt.timezone.utc)
-    else:
-        df.index = df.index.tz_convert(dt.timezone.utc)
-    df = df.sort_index()
-    return df
 
 
 _TOKEN_STATUS_LOGGED = False
@@ -129,90 +108,126 @@ def load_price_frame(
 ) -> Tuple[pd.DataFrame | None, str]:
     start_utc = ensure_utc(start)
     end_utc = ensure_utc(end)
-    initial = price_store.get_prices_from_db([symbol], start_utc, end_utc, interval=interval)
-    df = initial.get(symbol, pd.DataFrame()).copy()
-    if not df.empty:
-        df = df.loc[(df.index >= start_utc) & (df.index < end_utc)]
-    coverage_ok = False
-    if not df.empty:
-        last_ts = df.index.max()
+
+    def _clip(frame: pd.DataFrame) -> pd.DataFrame:
+        if frame.empty:
+            return frame
+        return frame.loc[(frame.index >= start_utc) & (frame.index < end_utc)]
+
+    def _has_coverage(frame: pd.DataFrame) -> bool:
+        if frame.empty:
+            return False
+        last_ts = frame.index.max()
         if interval.endswith("m"):
             expected_last = end_utc - pd.Timedelta(minutes=1)
         else:
             expected_last = end_utc - pd.Timedelta(days=1)
-        coverage_ok = last_ts >= expected_last
-        if coverage_ok:
-            try:
-                gaps = price_store.detect_gaps(
-                    symbol,
-                    start_utc,
-                    end_utc,
-                    interval=interval,
-                )
-                coverage_ok = len(gaps) == 0
-            except Exception:
-                coverage_ok = True
-    source = "db" if not df.empty else "none"
-    if not coverage_ok:
-        _log_token_path_status()
-        allow_network = getattr(settings, "forecast_allow_network", True)
-        if not allow_network:
-            logger.warning(
-                "forecast schwab_fallback_skipped_or_failed reason=network_disabled symbol=%s",
-                symbol,
-            )
-            return None, "db_miss"
-
-        readable, reason, token_path = _token_path_status()
-        if not readable and reason != "missing":
-            logger.warning(
-                "forecast schwab_fallback_skipped_or_failed reason=token_%s symbol=%s token_path=%s",
-                reason or "unknown",
-                symbol,
-                token_path,
-            )
-            return None, "db_miss"
-
-        client_obj = getattr(schwab_client, "_client", None)
-        ensure_coro = None
-        if client_obj is not None and hasattr(client_obj, "_ensure_token"):
-            ensure_coro = client_obj._ensure_token()
+        if last_ts < expected_last:
+            return False
         try:
-            if ensure_coro is not None:
-                run_coro(ensure_coro)
-        except Exception as exc:  # pragma: no cover - defensive logging
-            logger.warning(
-                "forecast schwab_fallback_skipped_or_failed reason=token_refresh_failed symbol=%s err=%s",
+            gaps = price_store.detect_gaps(
                 symbol,
-                str(exc),
+                start_utc,
+                end_utc,
+                interval=interval,
             )
-            return None, "db_miss"
+        except Exception:
+            return True
+        return len(gaps) == 0
 
-        fetched = _fetch_from_schwab(symbol, start_utc, end_utc, interval)
-        if not fetched.empty:
-            price_store.upsert_bars(symbol, fetched, interval=interval)
-            if source == "db" and not df.empty:
-                source = "mixed"
-            else:
-                source = "schwab"
-            refreshed = price_store.get_prices_from_db(
-                [symbol], start_utc, end_utc, interval=interval
-            )
-            df = refreshed.get(symbol, pd.DataFrame()).copy()
-            if not df.empty:
-                df = df.loc[(df.index >= start_utc) & (df.index < end_utc)]
-            logger.info(
-                "forecast schwab_fallback_succeeded symbol=%s rows=%s source=%s",
-                symbol,
-                len(df),
-                source,
-            )
-        else:
-            logger.warning(
-                "forecast schwab_fallback_skipped_or_failed reason=fetch_empty symbol=%s",
-                symbol,
-            )
-            return None, "db_miss"
+    initial = price_store.get_prices_from_db([symbol], start_utc, end_utc, interval=interval)
+    df = _clip(initial.get(symbol, pd.DataFrame()).copy())
+    source = "db" if not df.empty else "none"
+
+    if _has_coverage(df):
+        return df, source
+
+    _log_token_path_status()
+    allow_network = getattr(settings, "forecast_allow_network", True)
+    if not allow_network:
+        logger.warning(
+            "forecast schwab_fallback_skipped_or_failed reason=network_disabled symbol=%s",
+            symbol,
+        )
+        return None, "db_miss"
+
+    readable, reason, token_path = _token_path_status()
+    if not readable and reason != "missing":
+        logger.warning(
+            "forecast schwab_fallback_skipped_or_failed reason=token_%s symbol=%s token_path=%s",
+            reason or "unknown",
+            symbol,
+            token_path,
+        )
+        return None, "db_miss"
+
+    client_obj = getattr(schwab_client, "_client", None)
+    ensure_coro = None
+    if client_obj is not None and hasattr(client_obj, "_ensure_token"):
+        ensure_coro = client_obj._ensure_token()
+    try:
+        if ensure_coro is not None:
+            run_coro(ensure_coro)
+    except Exception as exc:  # pragma: no cover - defensive logging
+        logger.warning(
+            "forecast schwab_fallback_skipped_or_failed reason=token_refresh_failed symbol=%s err=%s",
+            symbol,
+            str(exc),
+        )
+        return None, "db_miss"
+
+    try:
+        fetched_map = fetch_bars([symbol], interval, start_utc, end_utc)
+    except Exception as exc:  # pragma: no cover - defensive logging
+        logger.warning(
+            "forecast schwab_fallback_skipped_or_failed reason=fetch_error symbol=%s err=%s",
+            symbol,
+            str(exc),
+        )
+        return None, "db_miss"
+
+    fetched = _clip(fetched_map.get(symbol, pd.DataFrame()).copy())
+    provider = str(getattr(fetched, "attrs", {}).get("provider") or "")
+    if fetched.empty:
+        logger.warning(
+            "forecast schwab_fallback_skipped_or_failed reason=fetch_empty symbol=%s",
+            symbol,
+        )
+        return None, "db_miss"
+
+    price_store.clear_cache()
+    refreshed = price_store.get_prices_from_db([symbol], start_utc, end_utc, interval=interval)
+    df = _clip(refreshed.get(symbol, pd.DataFrame()).copy())
+    if df.empty:
+        logger.warning(
+            "forecast schwab_fallback_skipped_or_failed reason=fetch_empty_after_refresh symbol=%s",
+            symbol,
+        )
+        return None, "db_miss"
+    if not _has_coverage(df):
+        logger.warning(
+            "forecast schwab_fallback_skipped_or_failed reason=coverage_incomplete symbol=%s",
+            symbol,
+        )
+        return None, "db_miss"
+
+    provider_norm = provider.strip().lower()
+    if not provider_norm:
+        provider_norm = "schwab"
+    if provider_norm == "db":
+        source = "db"
+    elif source == "db":
+        source = "mixed"
+    else:
+        source = provider_norm
+
+    logger.info(
+        "forecast schwab_fallback_succeeded symbol=%s rows=%s source=%s provider=%s",
+        symbol,
+        len(df),
+        source,
+        provider_norm,
+    )
     return df, source
 
 
