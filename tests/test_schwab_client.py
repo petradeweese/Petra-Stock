@@ -1,7 +1,11 @@
 import asyncio
 import asyncio
 import datetime as dt
+import grp
 import json
+import os
+import pwd
+import stat
 import urllib.parse
 
 import pytest
@@ -22,22 +26,82 @@ class DummyResponse:
         return self._payload
 
 
-def test_refresh_flow(monkeypatch):
+def test_refresh_flow(monkeypatch, tmp_path):
+    token_path = tmp_path / "schwab_tokens.json"
+    monkeypatch.setattr(settings, "schwab_token_path", str(token_path), raising=False)
+    monkeypatch.setattr(settings, "schwab_auth_mode", "basic", raising=False)
+
     captured: list[dict] = []
 
     async def fake_request(method, url, **kwargs):
-        captured.append(kwargs.get("content", ""))
+        captured.append(
+            {
+                "content": kwargs.get("content", ""),
+                "headers": kwargs.get("headers", {}),
+            }
+        )
         return DummyResponse(200, {"access_token": "abc", "expires_in": 600})
 
     monkeypatch.setattr(schwab_client.http_client, "request", fake_request)
     client = schwab_client.SchwabClient()
     token = asyncio.run(client._refresh_access_token())
+
     assert captured
-    parsed = urllib.parse.parse_qs(captured[0])
+    request = captured[0]
+    parsed = urllib.parse.parse_qs(request["content"])
     assert parsed.get("refresh_token", [None])[0] == settings.schwab_refresh_token
+    assert "client_id" not in parsed
+    assert "client_secret" not in parsed
+    auth_header = request["headers"].get("Authorization", "")
+    assert auth_header.startswith("Basic ")
+
     assert token.access_token == "abc"
     remaining = token.expires_at - dt.datetime.now(dt.timezone.utc)
     assert abs(remaining.total_seconds() - 540) < 5  # 60s skew applied
+
+    assert token_path.exists()
+    stored = json.loads(token_path.read_text())
+    assert stored["access_token"] == "abc"
+    assert stored["refresh_token"] == settings.schwab_refresh_token
+    assert "obtained_at" in stored
+    stats = os.stat(token_path)
+    assert stat.S_IMODE(stats.st_mode) == 0o600
+    assert stats.st_uid == pwd.getpwnam("root").pw_uid
+    try:
+        ubuntu_gid = grp.getgrnam("ubuntu").gr_gid
+    except KeyError:
+        ubuntu_gid = None
+    if ubuntu_gid is not None:
+        assert stats.st_gid == ubuntu_gid
+
+
+def test_refresh_flow_body_mode(monkeypatch, tmp_path):
+    token_path = tmp_path / "schwab_tokens.json"
+    monkeypatch.setattr(settings, "schwab_token_path", str(token_path), raising=False)
+    monkeypatch.setattr(settings, "schwab_auth_mode", "body", raising=False)
+
+    captured: list[dict] = []
+
+    async def fake_request(method, url, **kwargs):
+        captured.append(
+            {
+                "content": kwargs.get("content", ""),
+                "headers": kwargs.get("headers", {}),
+            }
+        )
+        return DummyResponse(200, {"access_token": "def", "expires_in": 300})
+
+    monkeypatch.setattr(schwab_client.http_client, "request", fake_request)
+    client = schwab_client.SchwabClient()
+    token = asyncio.run(client._refresh_access_token())
+
+    assert captured
+    request = captured[0]
+    parsed = urllib.parse.parse_qs(request["content"])
+    assert parsed.get("client_id", [None])[0] == client._oauth_client_id
+    assert parsed.get("client_secret", [None])[0] == settings.schwab_client_secret
+    assert "Authorization" not in request["headers"]
+    assert token.access_token == "def"
 
 
 def test_refresh_invalid_grant_triggers_reauth(monkeypatch):

@@ -1,11 +1,16 @@
 import asyncio
 import base64
 import datetime as dt
+import grp
+import json
 import logging
 import os
+import pwd
+import tempfile
 import time
 import urllib.parse
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 import pandas as pd
@@ -59,6 +64,8 @@ provider_disabled_total = Counter(
 )
 _provider_disabled_counters: Dict[str, Counter] = {}
 _token_refresh_failure_by_code: Dict[str, Counter] = {}
+
+SENSITIVE_KEYS = {"refresh_token", "access_token", "client_secret", "id_token"}
 
 
 def _normalize_metric_key(value: str) -> str:
@@ -201,24 +208,41 @@ class SchwabClient:
             )
             self._redirect_uri = redirect_uri
 
-        payload = {
+        auth_mode = self._resolve_auth_mode()
+        logger.info(
+            "schwab_refresh attempt mode=%s endpoint=%s", auth_mode, TOKEN_URL
+        )
+
+        base_payload = {
             "grant_type": "refresh_token",
             "refresh_token": refresh_token,
             "redirect_uri": self._redirect_uri,
-            "client_id": self._oauth_client_id,
         }
-        basic_token = base64.b64encode(
-            f"{self._oauth_client_id}:{self._client_secret}".encode()
-        ).decode()
         headers = {
             "Content-Type": "application/x-www-form-urlencoded",
             "Accept": "application/json",
-            "Authorization": f"Basic {basic_token}",
         }
+
+        if auth_mode == "basic":
+            basic_token = base64.b64encode(
+                f"{self._oauth_client_id}:{self._client_secret}".encode()
+            ).decode()
+            headers["Authorization"] = f"Basic {basic_token}"
+            payload = base_payload
+        else:
+            payload = dict(base_payload)
+            payload["client_id"] = self._oauth_client_id
+            payload["client_secret"] = self._client_secret
+
+        payload = {k: v for k, v in payload.items() if v is not None and v != ""}
 
         form_body = urllib.parse.urlencode(payload)
         safe_payload = {
-            key: ("***REDACTED***" if key in {"refresh_token", "client_id"} else value)
+            key: (
+                "***REDACTED***"
+                if key in {"refresh_token", "client_secret"}
+                else value
+            )
             for key, value in payload.items()
         }
         logger.debug(
@@ -250,6 +274,20 @@ class SchwabClient:
         if not token:
             raise SchwabAuthError("Token refresh response missing access_token")
 
+        new_refresh = str(data.get("refresh_token") or "").strip()
+        if new_refresh:
+            self.set_refresh_token(new_refresh)
+            settings.schwab_refresh_token = new_refresh
+            setattr(settings, "SCHWAB_REFRESH_TOKEN", new_refresh)
+
+        stored_payload = dict(data)
+        if "refresh_token" not in stored_payload:
+            stored_payload["refresh_token"] = new_refresh or refresh_token
+        stored_payload.setdefault("expires_in", expires_in)
+        stored_payload.setdefault("access_token", token)
+        stored_payload["obtained_at"] = dt.datetime.now(dt.timezone.utc).isoformat()
+        self._write_token_file(stored_payload)
+
         skewed = max(0, expires_in - 60)
         expires_at = dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=skewed)
         self._clear_disable()
@@ -257,6 +295,93 @@ class SchwabClient:
             "schwab_token_refreshed expires_in=%s duration=%.2f", expires_in, duration
         )
         return _Token(access_token=token, expires_at=expires_at)
+
+    def _resolve_auth_mode(self) -> str:
+        mode = str(getattr(settings, "schwab_auth_mode", "basic") or "basic").lower()
+        return "body" if mode == "body" else "basic"
+
+    def _format_failure_body(self, data: Dict[str, Any], resp: Any) -> str:
+        raw_text: Optional[str] = None
+        try:
+            raw_text = resp.text[:512]
+        except Exception:  # pragma: no cover - defensive logging
+            raw_text = None
+        return self._sanitize_error_body(data, raw_text)
+
+    def _sanitize_error_body(
+        self, data: Dict[str, Any], raw_text: Optional[str]
+    ) -> str:
+        if data:
+            sanitized: Dict[str, Any] = {}
+            for key, value in data.items():
+                if key in SENSITIVE_KEYS:
+                    sanitized[key] = "***REDACTED***"
+                else:
+                    sanitized[key] = value
+            try:
+                return json.dumps(sanitized)
+            except (TypeError, ValueError):  # pragma: no cover - defensive
+                return str(sanitized)
+        if raw_text:
+            return raw_text
+        return "{}"
+
+    def _write_token_file(self, payload: Dict[str, Any]) -> None:
+        path_value = getattr(settings, "schwab_token_path", "") or ""
+        if not path_value:
+            return
+        path = Path(path_value)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            logger.error("schwab_token_file_write_failed path=%s error=%s", path, exc)
+            return
+
+        tmp_fd: Optional[int] = None
+        tmp_name = ""
+        try:
+            tmp_fd, tmp_name = tempfile.mkstemp(
+                dir=str(path.parent),
+                prefix=f".{path.stem or 'token'}.",
+                suffix=".tmp",
+            )
+            with os.fdopen(tmp_fd, "w", encoding="utf-8") as handle:
+                tmp_fd = None
+                json.dump(payload, handle, indent=2, sort_keys=True)
+                handle.write("\n")
+            os.chmod(tmp_name, 0o600)
+            self._apply_owner(tmp_name)
+            os.replace(tmp_name, path)
+            os.chmod(path, 0o600)
+            self._apply_owner(path)
+        except Exception as exc:
+            logger.error("schwab_token_file_write_failed path=%s error=%s", path, exc)
+            if tmp_fd is not None:
+                try:
+                    os.close(tmp_fd)
+                except OSError:
+                    pass
+            if tmp_name:
+                try:
+                    os.unlink(tmp_name)
+                except OSError:
+                    pass
+
+    def _apply_owner(self, target: str) -> None:
+        try:
+            uid = pwd.getpwnam("root").pw_uid
+            gid = grp.getgrnam("ubuntu").gr_gid
+        except KeyError:
+            logger.debug("schwab_token_owner_lookup_failed")
+            return
+        try:
+            os.chown(target, uid, gid)
+        except PermissionError:
+            logger.debug("schwab_token_owner_permission_denied path=%s", target)
+        except OSError as exc:  # pragma: no cover - defensive
+            logger.debug(
+                "schwab_token_owner_error path=%s error=%s", target, exc
+            )
 
     @staticmethod
     def _format_oauth_client_id(client_id: str) -> str:
@@ -276,6 +401,13 @@ class SchwabClient:
             data = resp.json() if resp.content else {}
         except ValueError:
             data = {}
+
+        safe_body = self._format_failure_body(data, resp)
+        logger.error(
+            "schwab_refresh_failed status=%s body=%s",
+            resp.status_code,
+            safe_body,
+        )
 
         error_code_raw = data.get("error")
         error_description_raw = data.get("error_description")
