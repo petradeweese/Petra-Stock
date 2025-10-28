@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import shlex
@@ -115,6 +116,38 @@ def _load_environment() -> None:
 _load_environment()
 
 
+def _load_refresh_token_from_file(path: str) -> str | None:
+    if not path:
+        return None
+    candidate = Path(path).expanduser()
+    try:
+        text = candidate.read_text()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        logger.warning(
+            "config schwab_tokens_unreadable path=%s",
+            candidate,
+        )
+        return None
+
+    try:
+        payload = json.loads(text)
+    except ValueError:
+        logger.warning(
+            "config schwab_tokens_invalid_json path=%s",
+            candidate,
+        )
+        return None
+
+    token = payload.get("refresh_token")
+    if isinstance(token, str):
+        token = token.strip()
+    if not token:
+        return None
+    return token
+
+
 @dataclass
 class Settings:
     run_migrations: bool = _bool("RUN_MIGRATIONS", "true")
@@ -178,6 +211,20 @@ class Settings:
 
 
 settings = Settings()
+
+_file_refresh_token = _load_refresh_token_from_file(settings.schwab_token_path)
+if _file_refresh_token and _file_refresh_token != (
+    getattr(settings, "schwab_refresh_token", "") or ""
+):
+    logger.info(
+        "config schwab_refresh_token_loaded path=%s",
+        settings.schwab_token_path,
+    )
+    settings.schwab_refresh_token = _file_refresh_token
+    os.environ["SCHWAB_REFRESH_TOKEN"] = _file_refresh_token
+
+setattr(settings, "SCHWAB_REFRESH_TOKEN", settings.schwab_refresh_token)
+
 settings.alert_channel = settings.alert_channel or "Email"
 settings.alert_outcomes = (settings.alert_outcomes or "hit").lower()
 setattr(settings, "ALERT_CHANNEL", settings.alert_channel)
