@@ -1,4 +1,5 @@
 fastapi
+anyio>=3.7
 uvicorn
 pandas
 pandas-market-calendars

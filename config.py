@@ -121,6 +121,7 @@ class Settings:
     fetch_retry_max: int = int(os.getenv("FETCH_RETRY_MAX", "4"))
     fetch_retry_base_ms: int = int(os.getenv("FETCH_RETRY_BASE_MS", "300"))
     fetch_retry_cap_ms: int = int(os.getenv("FETCH_RETRY_CAP_MS", "5000"))
+    forecast_allow_network: bool = _bool("FORECAST_ALLOW_NETWORK", "1")
 
     # Market data provider configuration
     data_provider: str = _choice(
@@ -136,6 +137,7 @@ class Settings:
     schwab_refresh_backoff_seconds: int = int(
         os.getenv("SCHWAB_REFRESH_BACKOFF_SECONDS", "180")
     )
+    schwab_token_path: str = os.getenv("SCHWAB_TOKEN_PATH", "")
 
     # Scanner feature flags; all additive and safe to tweak at runtime.
     scan_max_concurrency: int = int(os.getenv("SCAN_MAX_CONCURRENCY", "8"))
