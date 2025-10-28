@@ -1,10 +1,7 @@
 {% extends "base.html" %}
 {% block title %}Today’s Forecast · Petra Stock{% endblock %}
 {% block meta_description %}Explore intraday historical matches and outcome probabilities for today's trading session.{% endblock %}
-{% block head_extra %}
-  <script src="{{ url_for('static', path='js/htmx.min.js') }}" defer></script>
-  <script src="{{ url_for('static', path='js/forecast.js') }}" defer></script>
-{% endblock %}
+{% block head_extra %}{% endblock %}
 {% block body_class %}page-forecast{% endblock %}
 {% block content %}
 <section class="page-section forecast-page" data-symbol="{{ symbol }}">
@@ -13,16 +10,16 @@
       <h1>Today’s Forecast</h1>
       <p class="muted">Run an intraday similarity search for a ticker to see how the rest of the session tends to play out.</p>
     </div>
-    <form id="forecast-form" class="forecast-form" hx-trigger="submit, change from:#forecast-symbol" hx-get="/api/forecast/PLACEHOLDER" hx-target="#forecast-results" hx-swap="none">
+    <form id="forecast-form" class="forecast-form">
       <label class="sr-only" for="forecast-symbol">Ticker</label>
       <input id="forecast-symbol" name="symbol" type="text" inputmode="text" autocapitalize="characters" autocomplete="off" placeholder="e.g. SPY" value="{{ symbol }}" />
-      <button type="submit" class="btn">Run</button>
+      <button id="forecast-run" type="submit" class="btn">Run</button>
     </form>
   </header>
 
   <div id="forecast-error" class="forecast-error" role="alert" hidden>No forecast available.</div>
 
-  <section class="forecast-summary card" aria-live="polite">
+  <section id="forecast-summary" class="forecast-summary card" aria-live="polite">
     <div class="forecast-overview">
       <div class="confidence-gauge is-empty" data-confidence-gauge>
         <div class="confidence-gauge-ring">
@@ -91,9 +88,14 @@
             <th data-sort="low">Low −%</th>
           </tr>
         </thead>
-        <tbody id="forecast-results"></tbody>
+        <tbody id="forecast-tbody"></tbody>
       </table>
     </div>
   </div>
 </section>
+{% endblock %}
+
+{% block extra_body %}
+  {{ super() }}
+  <script src="{{ url_for('static', path='js/forecast.js') }}?v=20240611"></script>
 {% endblock %}

@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Dict, Tuple
 
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import JSONResponse
 
 from services.forecast_features import build_state
 from services.forecast_matcher import find_similar_days
@@ -68,8 +69,8 @@ def get_forecast(
     ticker: str,
     *,
     asof: str | None = Query(None),
-    limit: int | None = Query(None, ge=1, le=100),
-) -> Dict[str, object]:
+    limit: int = Query(20, ge=1, le=100),
+) -> JSONResponse:
     """Return a JSON forecast summary for ``ticker``."""
 
     if not ticker:
@@ -77,6 +78,12 @@ def get_forecast(
 
     ticker_clean = ticker.upper()
     asof_dt = _parse_asof(asof)
+    logger.info(
+        "[forecast] API hit: %s asof=%s limit=%s",
+        ticker_clean,
+        asof_dt.isoformat(),
+        limit,
+    )
 
     cache_key = _cache_key(ticker_clean, asof_dt)
     cached = _get_cached(cache_key)
@@ -98,14 +105,13 @@ def get_forecast(
         forecast = cached
 
     matches = list(forecast.get("matches", []))
-    if limit is not None:
-        matches = matches[:limit]
+    matches = matches[:limit]
     response = dict(forecast)
     response["ticker"] = ticker_clean
     response["asof"] = asof_dt.astimezone(timezone.utc).isoformat()
     response["matches"] = matches
     response.setdefault("n", len(forecast.get("matches", [])))
-    return response
+    return JSONResponse(response)
 
 
 __all__ = ["router"]

@@ -6,9 +6,10 @@
 
   const form = document.getElementById('forecast-form');
   const symbolInput = document.getElementById('forecast-symbol');
-  const resultsBody = document.getElementById('forecast-results');
+  const resultsBody = document.getElementById('forecast-tbody');
   const errorEl = document.getElementById('forecast-error');
   const table = document.getElementById('forecast-table');
+  const summaryContainer = document.getElementById('forecast-summary');
   const summaryMap = {
     matches: document.querySelector('[data-summary="matches"]'),
     median_close_pct: document.querySelector('[data-summary="median_close_pct"]'),
@@ -85,15 +86,20 @@
     if (errorEl) {
       errorEl.textContent = message || 'No forecast available.';
       errorEl.hidden = false;
+      errorEl.style.display = 'block';
     }
     clearSummary();
     clearVisuals();
-    resultsBody.innerHTML = '';
+    matches = [];
+    if (resultsBody) {
+      resultsBody.innerHTML = '';
+    }
   }
 
   function hideError() {
     if (errorEl) {
       errorEl.hidden = true;
+      errorEl.style.display = 'none';
     }
   }
 
@@ -396,58 +402,90 @@
     submitBtn.textContent = loading ? 'Loading…' : 'Run';
   }
 
-  document.body.addEventListener('htmx:configRequest', (event) => {
-    if (event.target !== form) {
-      return;
+  function getSymbolValue() {
+    return (symbolInput?.value || '').trim().toUpperCase();
+  }
+
+  function getInitialSymbol() {
+    const params = new URLSearchParams(window.location.search);
+    const fromQuery = (params.get('symbol') || '').trim();
+    if (fromQuery) {
+      return fromQuery.toUpperCase();
     }
-    const symbol = (symbolInput.value || '').trim().toUpperCase();
-    symbolInput.value = symbol;
-    if (!symbol) {
-      event.preventDefault();
+    const fallback = (page.dataset.symbol || '').trim();
+    if (fallback) {
+      return fallback.toUpperCase();
+    }
+    return 'SPY';
+  }
+
+  function updateUrl(symbol) {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      params.set('symbol', symbol);
+      const qs = params.toString();
+      const newUrl = `${window.location.pathname}${qs ? `?${qs}` : ''}`;
+      window.history.replaceState({}, '', newUrl);
+    } catch (err) {
+      // ignore history errors in unsupported environments
+    }
+  }
+
+  async function loadForecast(symbol) {
+    const targetSymbol = (symbol || '').trim().toUpperCase();
+    if (!targetSymbol) {
       showError('Enter a ticker to see a forecast.');
       return;
     }
+    if (symbolInput) {
+      symbolInput.value = targetSymbol;
+    }
+    currentTicker = targetSymbol;
     hideError();
-    const params = new URLSearchParams();
-    params.set('limit', '20');
-    event.detail.path = `/api/forecast/${encodeURIComponent(symbol)}?${params.toString()}`;
-    event.detail.headers['Accept'] = 'application/json';
-  });
-
-  document.body.addEventListener('htmx:beforeRequest', (event) => {
-    if (event.target === form) {
-      setLoading(true);
+    setLoading(true);
+    if (summaryContainer) {
+      summaryContainer.setAttribute('aria-busy', 'true');
     }
-  });
-
-  document.body.addEventListener('htmx:afterRequest', (event) => {
-    if (event.target !== form) {
-      return;
-    }
-    setLoading(false);
-    if (!event.detail.successful) {
-      showError('No forecast available.');
-      return;
+    if (resultsBody) {
+      resultsBody.innerHTML = '<tr><td colspan="6">Loading…</td></tr>';
     }
     try {
-      const data = JSON.parse(event.detail.xhr.responseText || '{}');
-      currentTicker = data.ticker || symbolInput.value;
+      updateUrl(targetSymbol);
+      const response = await fetch(
+        `/api/forecast/${encodeURIComponent(targetSymbol)}?limit=20`,
+        { cache: 'no-store' },
+      );
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      const data = await response.json();
       matches = Array.isArray(data.matches) ? data.matches : [];
+      currentTicker = data.ticker || targetSymbol;
+      if (!matches.length) {
+        showError(`No forecast available for ${currentTicker}.`);
+        return;
+      }
       updateSummary(data);
-      applySort(sortState.key, false);
       hideError();
+      applySort(sortState.key, false);
     } catch (err) {
-      console.error('Failed to parse forecast response', err); // eslint-disable-line no-console
-      showError('No forecast available.');
-    }
-  });
-
-  document.body.addEventListener('htmx:responseError', (event) => {
-    if (event.target === form) {
+      console.error('Failed to load forecast', err); // eslint-disable-line no-console
+      const message = err && typeof err.message === 'string' ? err.message : 'Unexpected error';
+      showError(`Error loading forecast for ${targetSymbol}: ${message}`);
+    } finally {
+      if (summaryContainer) {
+        summaryContainer.removeAttribute('aria-busy');
+      }
       setLoading(false);
-      showError('No forecast available.');
     }
-  });
+  }
+
+  if (form) {
+    form.addEventListener('submit', (event) => {
+      event.preventDefault();
+      loadForecast(getSymbolValue());
+    });
+  }
 
   if (table) {
     table.querySelectorAll('th').forEach((th) => {
@@ -460,9 +498,9 @@
     });
   }
 
-  const initialSymbol = page.dataset.symbol || '';
-  if (initialSymbol) {
+  const initialSymbol = getInitialSymbol();
+  if (symbolInput) {
     symbolInput.value = initialSymbol;
-    htmx.trigger(form, 'submit');
   }
+  loadForecast(initialSymbol);
 })();
