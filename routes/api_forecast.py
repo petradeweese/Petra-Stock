@@ -90,17 +90,35 @@ def get_forecast(
     if cached is None:
         try:
             asof_state = build_state(ticker_clean, asof_dt)
-        except Exception as exc:  # pragma: no cover - build failures should be rare
-            logger.exception("forecast build_state_failed ticker=%s", ticker_clean)
-            raise HTTPException(status_code=404, detail="Forecast unavailable") from exc
-        try:
             forecast = find_similar_days(
                 ticker_clean, asof_state, asof_dt, lookback_years=2
             )
         except Exception as exc:  # pragma: no cover - safeguard
-            logger.exception("forecast matcher_failed ticker=%s", ticker_clean)
-            raise HTTPException(status_code=502, detail="Forecast unavailable") from exc
-        _CACHE[cache_key] = (time.monotonic() + _CACHE_TTL_SECONDS, forecast)
+            error_message = str(exc)
+            logger.exception(
+                "forecast get_forecast_failed",
+                extra={
+                    "ticker": ticker_clean,
+                    "asof": asof_dt.isoformat(),
+                    "limit": limit,
+                    "err": error_message,
+                },
+            )
+            error_payload = {
+                "ticker": ticker_clean,
+                "asof": asof_dt.astimezone(timezone.utc).isoformat(),
+                "n": 0,
+                "confidence": 0.0,
+                "confidence_pct": 0.0,
+                "low_sample": True,
+                "summary": {},
+                "matches": [],
+                "error": error_message[:300],
+                "sources": {"bars": "error"},
+            }
+            forecast = error_payload
+        else:
+            _CACHE[cache_key] = (time.monotonic() + _CACHE_TTL_SECONDS, forecast)
     else:
         forecast = cached
 

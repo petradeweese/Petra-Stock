@@ -201,8 +201,10 @@ def _compute_outcomes(ticker: str, timestamp: dt.datetime) -> Tuple[Dict[str, fl
     target_date = timestamp.astimezone(TZ).date()
     start = dt.datetime.combine(target_date, OPEN_TIME, tzinfo=TZ).astimezone(dt.timezone.utc)
     end = start + dt.timedelta(hours=6, minutes=30)
-    minute_bars, source = load_price_frame(ticker, start, end + dt.timedelta(minutes=1), "1m")
-    if minute_bars.empty:
+    minute_bars, source = load_price_frame(
+        ticker, start, end + dt.timedelta(minutes=1), "1m"
+    )
+    if minute_bars is None or minute_bars.empty:
         return {}, source
     session = minute_bars.loc[(minute_bars.index >= start) & (minute_bars.index <= end)]
     if session.empty:
@@ -213,13 +215,15 @@ def _compute_outcomes(ticker: str, timestamp: dt.datetime) -> Tuple[Dict[str, fl
     prior_start = start - dt.timedelta(days=7)
     daily_bars, _ = load_price_frame(ticker, prior_start, start, "1d")
     prior_close = None
-    if not daily_bars.empty:
+    if daily_bars is not None and not daily_bars.empty:
         prev = daily_bars.loc[daily_bars.index < start]
         if not prev.empty:
             prior_close = float(prev["Close"].iloc[-1])
     if not prior_close:
-        prev_minute, _ = load_price_frame(ticker, start - dt.timedelta(hours=6, minutes=30), start, "1m")
-        if not prev_minute.empty:
+        prev_minute, _ = load_price_frame(
+            ticker, start - dt.timedelta(hours=6, minutes=30), start, "1m"
+        )
+        if prev_minute is not None and not prev_minute.empty:
             prior_close = float(prev_minute["Close"].iloc[-1])
     if not prior_close or prior_close == 0:
         return {}, source
@@ -248,16 +252,34 @@ def find_similar_days(
     asof_utc = ensure_utc(asof)
     base_state = state or build_state(ticker, asof_utc)
     base_vec, layout = _vector(base_state)
-    if base_vec.size == 0:
+    base_frames = base_state.get("frames") if isinstance(base_state, dict) else {}
+    frame_counts_zero = False
+    if isinstance(base_frames, dict):
+        for frame_data in base_frames.values():
+            if not isinstance(frame_data, dict):
+                continue
+            count_val = frame_data.get("count")
+            if count_val is None:
+                count_val = frame_data.get("n")
+            if count_val in (0, "0"):
+                frame_counts_zero = True
+                break
+    if base_vec.size == 0 or frame_counts_zero:
+        sources_payload = base_state.get("sources") if isinstance(base_state, dict) else {}
+        if not isinstance(sources_payload, dict):
+            sources_payload = {"bars": str(sources_payload)}
+        bars_source = sources_payload.get("bars", "none") if isinstance(sources_payload, dict) else "none"
+        minimal_sources = sources_payload or {"bars": bars_source}
         return {
             "ticker": ticker.upper(),
-            "asof": asof_utc.isoformat(),
+            "asof": base_state.get("asof", asof_utc.isoformat()),
             "n": 0,
             "low_sample": True,
             "confidence": 0.0,
+            "confidence_pct": 0.0,
             "summary": {},
             "matches": [],
-            "sources": {"bars": base_state.get("sources", {}).get("bars", "none")},
+            "sources": minimal_sources,
         }
 
     tod_minute_val = int(base_state.get("tod_minute", tod_minute(asof_utc)))

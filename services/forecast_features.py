@@ -2,17 +2,24 @@
 
 from __future__ import annotations
 
-import asyncio
 import datetime as dt
+import logging
 import math
+import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
 
 import pandas as pd
 
+from config import settings
 from services import price_store
 from services import schwab_client
+from services.async_utils import run_coro
 from utils import OPEN_TIME, TZ
+
+
+logger = logging.getLogger(__name__)
 
 
 MINUTE_INTERVAL = "1m"
@@ -50,22 +57,18 @@ def ensure_utc(ts: dt.datetime) -> dt.datetime:
     return ts.astimezone(dt.timezone.utc)
 
 
-def _run_async(func, *args, **kwargs):
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(func(*args, **kwargs))
-    if loop.is_running():
-        new_loop = asyncio.new_event_loop()
-        try:
-            return new_loop.run_until_complete(func(*args, **kwargs))
-        finally:
-            new_loop.close()
-    return loop.run_until_complete(func(*args, **kwargs))
-
-
 def _fetch_from_schwab(symbol: str, start: dt.datetime, end: dt.datetime, interval: str) -> pd.DataFrame:
-    df = _run_async(schwab_client.get_price_history, symbol, start, end, interval)
+    try:
+        df = run_coro(
+            schwab_client.get_price_history(symbol, start, end, interval)
+        )
+    except Exception as exc:  # pragma: no cover - defensive logging
+        logger.warning(
+            "forecast schwab_fetch_failed",
+            extra={"symbol": symbol, "err": str(exc)},
+        )
+        return pd.DataFrame()
+
     if df.empty:
         return df
     if df.index.tz is None:
@@ -76,7 +79,56 @@ def _fetch_from_schwab(symbol: str, start: dt.datetime, end: dt.datetime, interv
     return df
 
 
-def load_price_frame(symbol: str, start: dt.datetime, end: dt.datetime, interval: str) -> Tuple[pd.DataFrame, str]:
+_TOKEN_STATUS_LOGGED = False
+
+
+def _token_path_status() -> tuple[bool, str | None, str | None]:
+    path_raw = getattr(settings, "schwab_token_path", "") or os.getenv(
+        "SCHWAB_TOKEN_PATH", ""
+    )
+    if not path_raw:
+        return False, "missing", None
+    candidate = Path(path_raw).expanduser()
+    resolved = str(candidate)
+    try:
+        exists = candidate.exists()
+    except OSError:
+        exists = False
+    if not exists:
+        return False, "missing", resolved
+    if not candidate.is_file():
+        return False, "not_file", resolved
+    if not os.access(candidate, os.R_OK):
+        return False, "unreadable", resolved
+    return True, None, resolved
+
+
+def _log_token_path_status() -> None:
+    global _TOKEN_STATUS_LOGGED
+    if _TOKEN_STATUS_LOGGED:
+        return
+    _TOKEN_STATUS_LOGGED = True
+    readable, reason, path = _token_path_status()
+    if readable:
+        logger.info(
+            "forecast schwab_token_path_ok path=%s",
+            path or getattr(settings, "schwab_token_path", ""),
+        )
+    elif reason == "missing":
+        logger.info(
+            "forecast schwab_token_path_unset",
+        )
+    else:
+        logger.warning(
+            "forecast schwab_token_path_unavailable reason=%s path=%s",
+            reason or "unknown",
+            path,
+        )
+
+
+def load_price_frame(
+    symbol: str, start: dt.datetime, end: dt.datetime, interval: str
+) -> Tuple[pd.DataFrame | None, str]:
     start_utc = ensure_utc(start)
     end_utc = ensure_utc(end)
     initial = price_store.get_prices_from_db([symbol], start_utc, end_utc, interval=interval)
@@ -104,6 +156,40 @@ def load_price_frame(symbol: str, start: dt.datetime, end: dt.datetime, interval
                 coverage_ok = True
     source = "db" if not df.empty else "none"
     if not coverage_ok:
+        _log_token_path_status()
+        allow_network = getattr(settings, "forecast_allow_network", True)
+        if not allow_network:
+            logger.warning(
+                "forecast schwab_fallback_skipped_or_failed reason=network_disabled symbol=%s",
+                symbol,
+            )
+            return None, "db_miss"
+
+        readable, reason, token_path = _token_path_status()
+        if not readable and reason != "missing":
+            logger.warning(
+                "forecast schwab_fallback_skipped_or_failed reason=token_%s symbol=%s token_path=%s",
+                reason or "unknown",
+                symbol,
+                token_path,
+            )
+            return None, "db_miss"
+
+        client_obj = getattr(schwab_client, "_client", None)
+        ensure_coro = None
+        if client_obj is not None and hasattr(client_obj, "_ensure_token"):
+            ensure_coro = client_obj._ensure_token()
+        try:
+            if ensure_coro is not None:
+                run_coro(ensure_coro)
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.warning(
+                "forecast schwab_fallback_skipped_or_failed reason=token_refresh_failed symbol=%s err=%s",
+                symbol,
+                str(exc),
+            )
+            return None, "db_miss"
+
         fetched = _fetch_from_schwab(symbol, start_utc, end_utc, interval)
         if not fetched.empty:
             price_store.upsert_bars(symbol, fetched, interval=interval)
@@ -117,9 +203,18 @@ def load_price_frame(symbol: str, start: dt.datetime, end: dt.datetime, interval
             df = refreshed.get(symbol, pd.DataFrame()).copy()
             if not df.empty:
                 df = df.loc[(df.index >= start_utc) & (df.index < end_utc)]
+            logger.info(
+                "forecast schwab_fallback_succeeded symbol=%s rows=%s source=%s",
+                symbol,
+                len(df),
+                source,
+            )
         else:
-            df = fetched
-            source = "schwab" if source == "none" else source
+            logger.warning(
+                "forecast schwab_fallback_skipped_or_failed reason=fetch_empty symbol=%s",
+                symbol,
+            )
+            return None, "db_miss"
     return df, source
 
 
@@ -241,7 +336,24 @@ def build_state(ticker: str, asof: dt.datetime) -> Dict[str, object]:
     start = session_start - dt.timedelta(minutes=390)
 
     bars_df, source = load_price_frame(ticker, start, asof_utc, MINUTE_INTERVAL)
+    required_window = max(minutes * bars for _, minutes, bars in FRAME_ORDER)
+
+    if bars_df is None or len(bars_df) < required_window:
+        return {
+            "ticker": ticker.upper(),
+            "asof": asof_utc.isoformat(),
+            "tod_minute": tod_minute(asof_utc),
+            "vec": [],
+            "frames": {frame: {"n": 0} for frame, _, _ in FRAME_ORDER},
+            "layout": {},
+            "feature_order": FEATURE_ORDER,
+            "context": {},
+            "sources": {"bars": source or "db_miss"},
+        }
+
     spy_df, spy_source = load_price_frame("SPY", start, asof_utc, MINUTE_INTERVAL)
+    if spy_df is None:
+        spy_df = pd.DataFrame()
 
     frames: Dict[str, Dict[str, Dict[str, float]]] = {}
     layout: Dict[str, Tuple[int, int]] = {}
