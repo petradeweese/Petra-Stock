@@ -12,7 +12,7 @@ from typing import Dict, Iterable, List, Tuple
 
 import pandas as pd
 
-from config import settings
+from config import DEFAULT_SCHWAB_TOKENS_PATH, settings
 from services import price_store
 from services import schwab_client
 from services.async_utils import run_coro
@@ -83,9 +83,7 @@ _TOKEN_STATUS_LOGGED = False
 
 
 def _token_path_status() -> tuple[bool, str | None, str | None]:
-    path_raw = getattr(settings, "schwab_token_path", "") or os.getenv(
-        "SCHWAB_TOKEN_PATH", ""
-    )
+    path_raw = getattr(settings, "schwab_token_path", "") or DEFAULT_SCHWAB_TOKENS_PATH
     if not path_raw:
         return False, "missing", None
     candidate = Path(path_raw).expanduser()

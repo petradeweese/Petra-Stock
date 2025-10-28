@@ -1,8 +1,17 @@
+import logging
 import os
 import shlex
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Tuple
+
+
+DEFAULT_DB_PATH = "/home/ubuntu/Petra-Stock/patternfinder.db"
+DEFAULT_DATABASE_URL = f"sqlite:////home/ubuntu/Petra-Stock/patternfinder.db"
+DEFAULT_SCHWAB_TOKENS_PATH = "/etc/petra/secure/schwab_tokens.json"
+
+
+logger = logging.getLogger(__name__)
 
 
 def _bool(name: str, default: str = "false") -> bool:
@@ -112,7 +121,7 @@ _load_environment()
 @dataclass
 class Settings:
     run_migrations: bool = _bool("RUN_MIGRATIONS", "true")
-    database_url: str = os.getenv("DATABASE_URL", "sqlite:///patternfinder.db")
+    database_url: str = os.getenv("DATABASE_URL") or DEFAULT_DATABASE_URL
     http_max_concurrency: int = int(os.getenv("HTTP_MAX_CONCURRENCY", "1"))
     job_timeout: int = int(os.getenv("JOB_TIMEOUT", "60"))
     metrics_enabled: bool = _bool("METRICS_ENABLED", "false")
@@ -137,7 +146,9 @@ class Settings:
     schwab_refresh_backoff_seconds: int = int(
         os.getenv("SCHWAB_REFRESH_BACKOFF_SECONDS", "180")
     )
-    schwab_token_path: str = os.getenv("SCHWAB_TOKEN_PATH", "")
+    schwab_token_path: str = (
+        os.getenv("SCHWAB_TOKEN_PATH") or DEFAULT_SCHWAB_TOKENS_PATH
+    )
 
     # Scanner feature flags; all additive and safe to tweak at runtime.
     scan_max_concurrency: int = int(os.getenv("SCAN_MAX_CONCURRENCY", "8"))
@@ -187,6 +198,13 @@ if half_life_value <= 0:
     half_life_value = 30.0
 settings.forward_recency_halflife_days = half_life_value
 setattr(settings, "FORWARD_RECENCY_HALFLIFE_DAYS", half_life_value)
+
+logger.info(
+    "config startup resolved_paths db_path=%s database_url=%s schwab_tokens_path=%s",
+    DEFAULT_DB_PATH,
+    settings.database_url,
+    settings.schwab_token_path,
+)
 
 if settings.data_provider.lower() == "schwab":
     required = {

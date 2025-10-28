@@ -8,6 +8,8 @@ from typing import Any, Mapping, Optional, Sequence
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
 
+from config import DEFAULT_DB_PATH
+
 try:  # pragma: no cover - prefer real Alembic if available
     from alembic import command as alembic_command
     from alembic.config import Config as AlembicConfig
@@ -21,13 +23,14 @@ logger = logging.getLogger(__name__)
 
 # Derive an absolute path for the default SQLite database so we don't depend on
 # the process working directory (e.g. when run via systemd).
-DB_PATH = str(Path(__file__).resolve().with_name("patternfinder.db"))
+DB_PATH = DEFAULT_DB_PATH
+Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
 # Connection URL used by SQLAlchemy.  Defaults to the local SQLite file but can
 # be overridden with e.g. ``postgresql+psycopg2://user:pass@host/db`` for
 # production deployments.  Using SQLAlchemy here keeps the code database
 # agnostic between SQLite (tests) and Postgres (prod).
 
-_ENV_DATABASE_URL = os.getenv("DATABASE_URL", "")
+_ENV_DATABASE_URL = os.getenv("DATABASE_URL") or ""
 
 
 

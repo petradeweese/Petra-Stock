@@ -2,7 +2,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-DB="patternfinder.db"
+DB="/home/ubuntu/Petra-Stock/patternfinder.db"
 OUT_DIR="db_backups"
 STAMP="$(date -u +%F_%H%M%S)"
 OUT="$OUT_DIR/patternfinder.$STAMP.db"
