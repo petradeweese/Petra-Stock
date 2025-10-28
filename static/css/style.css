@@ -1565,11 +1565,11 @@ select:focus,
   cursor:pointer;
 }
 
-#forecast-results a {
+#forecast-tbody a {
   color:inherit;
   text-decoration:underline;
 }
 
-#forecast-results tr:hover a {
+#forecast-tbody tr:hover a {
   color:var(--accent);
 }
