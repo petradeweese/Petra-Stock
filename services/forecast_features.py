@@ -114,6 +114,10 @@ def _log_token_path_status() -> None:
             "forecast schwab_token_path_ok path=%s",
             path or getattr(settings, "schwab_token_path", ""),
         )
+    elif reason == "missing":
+        logger.info(
+            "forecast schwab_token_path_unset",
+        )
     else:
         logger.warning(
             "forecast schwab_token_path_unavailable reason=%s path=%s",
@@ -162,7 +166,7 @@ def load_price_frame(
             return None, "db_miss"
 
         readable, reason, token_path = _token_path_status()
-        if not readable:
+        if not readable and reason != "missing":
             logger.warning(
                 "forecast schwab_fallback_skipped_or_failed reason=token_%s symbol=%s token_path=%s",
                 reason or "unknown",
