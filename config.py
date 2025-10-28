@@ -56,9 +56,6 @@ def _env_files() -> Iterable[Path]:
     override = os.getenv("PETRA_ENV_FILE")
     if override:
         paths.append(override)
-
-    project_default = Path(__file__).resolve().parent / ".env"
-    paths.append(str(project_default))
     paths.append("/etc/petra/petra.env")
 
     seen: set[Path] = set()
@@ -147,7 +144,9 @@ class Settings:
         os.getenv("SCHWAB_REFRESH_BACKOFF_SECONDS", "180")
     )
     schwab_token_path: str = (
-        os.getenv("SCHWAB_TOKEN_PATH") or DEFAULT_SCHWAB_TOKENS_PATH
+        os.getenv("SCHWAB_TOKENS_PATH")
+        or os.getenv("SCHWAB_TOKEN_PATH")
+        or DEFAULT_SCHWAB_TOKENS_PATH
     )
 
     # Scanner feature flags; all additive and safe to tweak at runtime.
@@ -198,6 +197,8 @@ if half_life_value <= 0:
     half_life_value = 30.0
 settings.forward_recency_halflife_days = half_life_value
 setattr(settings, "FORWARD_RECENCY_HALFLIFE_DAYS", half_life_value)
+setattr(settings, "SCHWAB_TOKEN_PATH", settings.schwab_token_path)
+setattr(settings, "SCHWAB_TOKENS_PATH", settings.schwab_token_path)
 
 logger.info(
     "config startup resolved_paths db_path=%s database_url=%s schwab_tokens_path=%s",
