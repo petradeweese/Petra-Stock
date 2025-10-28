@@ -23,29 +23,54 @@
   <div id="forecast-error" class="forecast-error" role="alert" hidden>No forecast available.</div>
 
   <section class="forecast-summary card" aria-live="polite">
-    <div class="summary-item">
-      <span class="label">Confidence</span>
-      <span class="value" data-summary="confidence">—</span>
+    <div class="forecast-overview">
+      <div class="confidence-gauge is-empty" data-confidence-gauge>
+        <div class="confidence-gauge-ring">
+          <div class="confidence-gauge-inner">
+            <span class="confidence-value" data-confidence-value>—</span>
+            <span class="confidence-label">Confidence</span>
+          </div>
+        </div>
+        <div class="confidence-bias" data-bias-label>Bias —</div>
+      </div>
+      <div class="forecast-range" data-forecast-range>
+        <div class="range-header">
+          <span class="label">Forecast Range</span>
+          <span class="iv-pill" data-iv-pill>IV: —</span>
+        </div>
+        <div class="forecast-range-bar">
+          <div class="range-iqr" data-range-iqr></div>
+          <div class="range-median" data-range-median></div>
+          <div class="range-zero" data-range-zero></div>
+        </div>
+        <div class="range-labels">
+          <span data-range-low>Median Low —</span>
+          <span data-range-close>Median Close —</span>
+          <span data-range-high>Median High —</span>
+        </div>
+      </div>
     </div>
-    <div class="summary-item">
-      <span class="label">Matches</span>
-      <span class="value" data-summary="matches">—</span>
-    </div>
-    <div class="summary-item">
-      <span class="label">Median Close Δ%</span>
-      <span class="value" data-summary="median_close_pct">—</span>
-    </div>
-    <div class="summary-item">
-      <span class="label">IQR Close Δ%</span>
-      <span class="value" data-summary="iqr_close_pct">—</span>
-    </div>
-    <div class="summary-item">
-      <span class="label">Median High +%</span>
-      <span class="value" data-summary="median_high_pct">—</span>
-    </div>
-    <div class="summary-item">
-      <span class="label">Median Low −%</span>
-      <span class="value" data-summary="median_low_pct">—</span>
+    <div class="forecast-summary-grid">
+      <div class="summary-item">
+        <span class="label">Matches</span>
+        <span class="value" data-summary="matches">—</span>
+      </div>
+      <div class="summary-item">
+        <span class="label">Median Close Δ%</span>
+        <span class="value" data-summary="median_close_pct">—</span>
+      </div>
+      <div class="summary-item">
+        <span class="label">Expected Move (IQR)</span>
+        <span class="value" data-summary="expected_move_iqr">—</span>
+      </div>
+      <div class="summary-item">
+        <span class="label">Median High +%</span>
+        <span class="value" data-summary="median_high_pct">—</span>
+      </div>
+      <div class="summary-item">
+        <span class="label">Median Low −%</span>
+        <span class="value" data-summary="median_low_pct">—</span>
+      </div>
     </div>
   </section>
 

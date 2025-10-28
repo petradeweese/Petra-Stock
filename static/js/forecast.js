@@ -10,12 +10,28 @@
   const errorEl = document.getElementById('forecast-error');
   const table = document.getElementById('forecast-table');
   const summaryMap = {
-    confidence: document.querySelector('[data-summary="confidence"]'),
     matches: document.querySelector('[data-summary="matches"]'),
     median_close_pct: document.querySelector('[data-summary="median_close_pct"]'),
-    iqr_close_pct: document.querySelector('[data-summary="iqr_close_pct"]'),
+    expected_move_iqr: document.querySelector('[data-summary="expected_move_iqr"]'),
     median_high_pct: document.querySelector('[data-summary="median_high_pct"]'),
     median_low_pct: document.querySelector('[data-summary="median_low_pct"]')
+  };
+  const gauge = {
+    root: document.querySelector('[data-confidence-gauge]'),
+    value: document.querySelector('[data-confidence-value]'),
+    bias: document.querySelector('[data-bias-label]')
+  };
+  const rangeRoot = document.querySelector('[data-forecast-range]');
+  const range = {
+    root: rangeRoot,
+    bar: rangeRoot ? rangeRoot.querySelector('.forecast-range-bar') : null,
+    iqr: rangeRoot ? rangeRoot.querySelector('[data-range-iqr]') : null,
+    median: rangeRoot ? rangeRoot.querySelector('[data-range-median]') : null,
+    zero: rangeRoot ? rangeRoot.querySelector('[data-range-zero]') : null,
+    lowLabel: rangeRoot ? rangeRoot.querySelector('[data-range-low]') : null,
+    closeLabel: rangeRoot ? rangeRoot.querySelector('[data-range-close]') : null,
+    highLabel: rangeRoot ? rangeRoot.querySelector('[data-range-high]') : null,
+    pill: rangeRoot ? rangeRoot.querySelector('[data-iv-pill]') : null
   };
   const submitBtn = form.querySelector('button[type="submit"]');
 
@@ -39,6 +55,19 @@
     return value.toFixed(digits);
   }
 
+  function toNumber(value) {
+    if (typeof value === 'number') {
+      return Number.isFinite(value) ? value : null;
+    }
+    if (typeof value === 'string' && value.trim() !== '') {
+      const parsed = Number.parseFloat(value);
+      if (Number.isFinite(parsed)) {
+        return parsed;
+      }
+    }
+    return null;
+  }
+
   function clearSummary() {
     Object.values(summaryMap).forEach((el) => {
       if (el) {
@@ -47,12 +76,18 @@
     });
   }
 
+  function clearVisuals() {
+    updateGauge(null);
+    updateRange(null);
+  }
+
   function showError(message) {
     if (errorEl) {
       errorEl.textContent = message || 'No forecast available.';
       errorEl.hidden = false;
     }
     clearSummary();
+    clearVisuals();
     resultsBody.innerHTML = '';
   }
 
@@ -62,27 +97,189 @@
     }
   }
 
+  function updateGauge(data) {
+    if (!gauge.root || !gauge.value || !gauge.bias) {
+      return;
+    }
+    let pct = null;
+    if (data && typeof data.confidence_pct === 'number') {
+      pct = data.confidence_pct;
+    } else if (data && typeof data.confidence === 'number') {
+      pct = data.confidence * 100;
+    }
+    if (pct === null || Number.isNaN(pct)) {
+      gauge.root.classList.add('is-empty');
+      gauge.root.classList.remove('is-strong', 'is-moderate', 'is-weak');
+      gauge.root.style.removeProperty('--confidence');
+      gauge.value.textContent = '—';
+    } else {
+      const clamped = Math.min(100, Math.max(0, pct));
+      gauge.root.classList.remove('is-empty');
+      gauge.root.style.setProperty('--confidence', clamped.toFixed(1));
+      gauge.value.textContent = `${clamped.toFixed(1)}%`;
+      gauge.root.classList.remove('is-strong', 'is-moderate', 'is-weak');
+      if (clamped > 70) {
+        gauge.root.classList.add('is-strong');
+      } else if (clamped >= 40) {
+        gauge.root.classList.add('is-moderate');
+      } else {
+        gauge.root.classList.add('is-weak');
+      }
+    }
+    const bias = data && typeof data.bias === 'string' ? data.bias : null;
+    gauge.root.classList.toggle('bias-up', bias === 'Up');
+    gauge.root.classList.toggle('bias-down', bias === 'Down');
+    gauge.bias.textContent = bias ? `Bias ${bias}` : 'Bias —';
+  }
+
+  function updateRange(data) {
+    if (!range.root || !range.bar) {
+      return;
+    }
+    const summary = (data && data.summary) || {};
+    const iqrRaw = Array.isArray(summary.expected_move_iqr)
+      ? summary.expected_move_iqr
+      : summary.iqr_close_pct;
+    const iqrLow = Array.isArray(iqrRaw) && iqrRaw.length === 2 ? toNumber(iqrRaw[0]) : null;
+    const iqrHigh = Array.isArray(iqrRaw) && iqrRaw.length === 2 ? toNumber(iqrRaw[1]) : null;
+    const medianClose = toNumber(summary.median_close_pct);
+    const medianHigh = toNumber(summary.median_high_pct);
+    const medianLow = toNumber(summary.median_low_pct);
+
+    if (range.lowLabel) {
+      range.lowLabel.textContent = `Median Low ${formatPercent(
+        typeof medianLow === 'number' ? medianLow : Number.NaN,
+        2
+      )}`;
+    }
+    if (range.closeLabel) {
+      range.closeLabel.textContent = `Median Close ${formatPercent(
+        typeof medianClose === 'number' ? medianClose : Number.NaN,
+        2
+      )}`;
+    }
+    if (range.highLabel) {
+      range.highLabel.textContent = `Median High ${formatPercent(
+        typeof medianHigh === 'number' ? medianHigh : Number.NaN,
+        2
+      )}`;
+    }
+
+    const ivHint = (summary.iv_rank_hint || data?.iv_rank_hint || '').toString().toLowerCase();
+    if (range.pill) {
+      range.pill.classList.remove('iv-pill-cheap', 'iv-pill-neutral', 'iv-pill-rich');
+      const normalized = ivHint === 'cheap' || ivHint === 'rich' ? ivHint : 'neutral';
+      range.pill.classList.add(`iv-pill-${normalized}`);
+      const label = normalized.charAt(0).toUpperCase() + normalized.slice(1);
+      range.pill.textContent = `IV: ${label}`;
+    }
+
+    const bias = data && typeof data.bias === 'string' ? data.bias : null;
+    range.root.classList.toggle('bias-up', bias === 'Up');
+    range.root.classList.toggle('bias-down', bias === 'Down');
+
+    const values = [0];
+    if (typeof iqrLow === 'number') {
+      values.push(iqrLow);
+    }
+    if (typeof iqrHigh === 'number') {
+      values.push(iqrHigh);
+    }
+    if (typeof medianClose === 'number') {
+      values.push(medianClose);
+    }
+    if (typeof medianHigh === 'number') {
+      values.push(medianHigh);
+    }
+    if (typeof medianLow === 'number') {
+      values.push(medianLow);
+    }
+
+    if (values.length <= 1) {
+      range.root.classList.add('is-empty');
+      if (range.iqr) {
+        range.iqr.style.width = '0%';
+      }
+      if (range.median) {
+        range.median.style.left = '50%';
+      }
+      if (range.zero) {
+        range.zero.style.left = '50%';
+      }
+      return;
+    }
+
+    let minVal = Math.min(...values);
+    let maxVal = Math.max(...values);
+    if (!Number.isFinite(minVal) || !Number.isFinite(maxVal)) {
+      minVal = -1;
+      maxVal = 1;
+    }
+    if (Math.abs(maxVal - minVal) < 1e-6) {
+      maxVal = minVal + 1;
+      minVal = minVal - 1;
+    }
+    const span = maxVal - minVal || 1;
+    const toPercent = (val) => ((val - minVal) / span) * 100;
+
+    range.root.classList.remove('is-empty');
+
+    if (range.zero) {
+      range.zero.style.left = `${Math.min(100, Math.max(0, toPercent(0)))}%`;
+    }
+
+    if (range.median) {
+      if (typeof medianClose === 'number') {
+        range.median.style.left = `${Math.min(100, Math.max(0, toPercent(medianClose)))}%`;
+        range.median.hidden = false;
+      } else {
+        range.median.hidden = true;
+      }
+    }
+
+    if (range.iqr) {
+      if (typeof iqrLow === 'number' && typeof iqrHigh === 'number') {
+        const start = Math.min(iqrLow, iqrHigh);
+        const end = Math.max(iqrLow, iqrHigh);
+        const startPct = Math.min(100, Math.max(0, toPercent(start)));
+        const endPct = Math.min(100, Math.max(0, toPercent(end)));
+        const width = Math.max(1.5, endPct - startPct);
+        range.iqr.style.left = `${startPct}%`;
+        range.iqr.style.width = `${width}%`;
+        range.iqr.hidden = false;
+      } else {
+        range.iqr.style.width = '0%';
+        range.iqr.hidden = true;
+      }
+    }
+  }
+
   function updateSummary(data) {
     if (!data) {
       clearSummary();
+      clearVisuals();
       return;
     }
     const summary = data.summary || {};
-    if (summaryMap.confidence) {
-      summaryMap.confidence.textContent = formatPercent((data.confidence || 0) * 100, 1);
-    }
+    updateGauge(data);
+    updateRange(data);
     if (summaryMap.matches) {
       summaryMap.matches.textContent = `${data.n ?? matches.length}`;
     }
     if (summaryMap.median_close_pct) {
       summaryMap.median_close_pct.textContent = formatPercent(summary.median_close_pct ?? NaN, 2);
     }
-    if (summaryMap.iqr_close_pct) {
-      const iqr = summary.iqr_close_pct;
+    if (summaryMap.expected_move_iqr) {
+      const iqr = Array.isArray(summary.expected_move_iqr)
+        ? summary.expected_move_iqr
+        : summary.iqr_close_pct;
       if (Array.isArray(iqr) && iqr.length === 2) {
-        summaryMap.iqr_close_pct.textContent = `${formatPercent(iqr[0] ?? NaN, 2)} to ${formatPercent(iqr[1] ?? NaN, 2)}`;
+        summaryMap.expected_move_iqr.textContent = `${formatPercent(
+          iqr[0] ?? NaN,
+          2
+        )} to ${formatPercent(iqr[1] ?? NaN, 2)}`;
       } else {
-        summaryMap.iqr_close_pct.textContent = '—';
+        summaryMap.expected_move_iqr.textContent = '—';
       }
     }
     if (summaryMap.median_high_pct) {
