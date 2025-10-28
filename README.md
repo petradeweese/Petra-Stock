@@ -98,13 +98,16 @@ York Stock Exchange is open.
 
 ## Environment
 
-Copy `.env.example` to `.env` and adjust:
+The application loads configuration from `/etc/petra/petra.env` by default. Set
+`PETRA_ENV_FILE` when you need to point at an alternate file for local
+development or testing. Ensure the file defines:
 
 - `SCHWAB_CLIENT_ID` – Schwab application client ID
 - `SCHWAB_CLIENT_SECRET` – Schwab application client secret
 - `SCHWAB_REDIRECT_URI` – registered redirect URI for the Schwab app
 - `SCHWAB_ACCOUNT_ID` – (optional) account ID to scope requests
 - `SCHWAB_REFRESH_TOKEN` – long-lived refresh token used to mint access tokens
+- `SCHWAB_TOKENS_PATH` – absolute path to the Schwab OAuth token JSON file
 - `DATABASE_URL` – database connection string
 - `SCHWAB_INCLUDE_PREPOST` – include pre/post market bars when true
 - `DB_CACHE_TTL` – in-process DB cache TTL
