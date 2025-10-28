@@ -181,6 +181,9 @@ class Settings:
         or os.getenv("SCHWAB_TOKEN_PATH")
         or DEFAULT_SCHWAB_TOKENS_PATH
     )
+    schwab_auth_mode: str = _choice(
+        "SCHWAB_AUTH_MODE", "basic", allowed=("basic", "body")
+    )
 
     # Scanner feature flags; all additive and safe to tweak at runtime.
     scan_max_concurrency: int = int(os.getenv("SCAN_MAX_CONCURRENCY", "8"))

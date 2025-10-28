@@ -11,6 +11,7 @@ os.environ.setdefault("SCHWAB_REDIRECT_URI", "https://example.com/callback")
 os.environ.setdefault("SCHWAB_ACCOUNT_ID", "00000000")
 os.environ.setdefault("SCHWAB_REFRESH_TOKEN", "test-refresh")
 os.environ.setdefault("SCHWAB_REFRESH_BACKOFF_SECONDS", "1")
+os.environ.setdefault("SCHWAB_TOKENS_PATH", "/tmp/schwab_tokens.json")
 
 # Ensure the project root is on the import path when running ``pytest`` directly.
 ROOT = Path(__file__).resolve().parent.parent
