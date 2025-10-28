@@ -27,6 +27,7 @@ PRICE_HISTORY_URL = os.getenv(
     "SCHWAB_PRICE_HISTORY_URL",
     "https://api.schwabapi.com/marketdata/v1/pricehistory",
 )
+OAUTH_CLIENT_ID_SUFFIX = os.getenv("SCHWAB_OAUTH_CLIENT_ID_SUFFIX", "@AMER.OAUTHAP")
 
 HTTP_400_DISABLE_SECONDS = int(os.getenv("SCHWAB_HTTP_400_DISABLE_SECONDS", "600"))
 
@@ -134,6 +135,7 @@ class SchwabClient:
 
     def __init__(self) -> None:
         self._client_id = settings.schwab_client_id
+        self._oauth_client_id = self._format_oauth_client_id(self._client_id)
         self._client_secret = settings.schwab_client_secret
         self._redirect_uri = settings.schwab_redirect_uri
         self._refresh_token = settings.schwab_refresh_token
@@ -149,7 +151,7 @@ class SchwabClient:
         self._disabled_status: Optional[int] = None
         self._disabled_error: Optional[SchwabAuthError] = None
         missing_core = [
-            ("client_id", self._client_id),
+            ("client_id", self._oauth_client_id),
             ("client_secret", self._client_secret),
             ("redirect_uri", self._redirect_uri),
         ]
@@ -203,10 +205,10 @@ class SchwabClient:
             "grant_type": "refresh_token",
             "refresh_token": refresh_token,
             "redirect_uri": self._redirect_uri,
-            "client_id": self._client_id,
+            "client_id": self._oauth_client_id,
         }
         basic_token = base64.b64encode(
-            f"{self._client_id}:{self._client_secret}".encode()
+            f"{self._oauth_client_id}:{self._client_secret}".encode()
         ).decode()
         headers = {
             "Content-Type": "application/x-www-form-urlencoded",
@@ -255,6 +257,19 @@ class SchwabClient:
             "schwab_token_refreshed expires_in=%s duration=%.2f", expires_in, duration
         )
         return _Token(access_token=token, expires_at=expires_at)
+
+    @staticmethod
+    def _format_oauth_client_id(client_id: str) -> str:
+        value = (client_id or "").strip()
+        suffix = (OAUTH_CLIENT_ID_SUFFIX or "").strip()
+        if not value:
+            return value
+        if suffix and value.endswith(suffix):
+            return value
+        if suffix and "@" not in value:
+            logger.info("schwab_client_id_suffix_applied suffix=%s", suffix)
+            return f"{value}{suffix}"
+        return value
 
     def _handle_refresh_failure(self, resp: Any, duration: float) -> SchwabAuthError:
         try:
