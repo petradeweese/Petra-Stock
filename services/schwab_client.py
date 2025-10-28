@@ -148,16 +148,20 @@ class SchwabClient:
         self._disabled_reason: str = ""
         self._disabled_status: Optional[int] = None
         self._disabled_error: Optional[SchwabAuthError] = None
-        if not all(
-            [
-                self._client_id,
-                self._client_secret,
-                self._redirect_uri,
-                self._refresh_token,
-            ]
-        ):
-            err = SchwabAuthError("Missing Schwab OAuth configuration")
+        missing_core = [
+            ("client_id", self._client_id),
+            ("client_secret", self._client_secret),
+            ("redirect_uri", self._redirect_uri),
+        ]
+        missing_labels = [label for label, value in missing_core if not value]
+        if missing_labels:
+            detail = ", ".join(missing_labels)
+            err = SchwabAuthError(
+                f"Missing Schwab OAuth configuration ({detail})"
+            )
             self.disable(reason="missing_config", status_code=None, error=err)
+        elif not self._refresh_token:
+            logger.info("schwab_refresh_token_deferred")
 
     # ------------------------------------------------------------------
     # Token handling
