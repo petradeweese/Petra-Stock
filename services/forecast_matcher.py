@@ -20,6 +20,95 @@ from services.forecast_features import (
 from utils import OPEN_TIME, TZ, market_is_open
 
 
+def _coerce_float(value: object) -> Optional[float]:
+    """Return ``value`` as a finite float or ``None``."""
+
+    try:
+        num = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(num) or math.isinf(num):
+        return None
+    return num
+
+
+def _option_field(contract: object, *names: str) -> object:
+    """Return the first non-null attribute or mapping field from ``names``."""
+
+    for name in names:
+        if hasattr(contract, name):
+            value = getattr(contract, name)
+            if value is not None:
+                return value
+        if isinstance(contract, dict) and name in contract:
+            value = contract[name]
+            if value is not None:
+                return value
+    return None
+
+
+def _fetch_iv_rank(ticker: str) -> Optional[float]:
+    """Best-effort retrieval of the current IV rank for ``ticker``."""
+
+    try:
+        from services import options_provider
+    except Exception:  # pragma: no cover - optional dependency failure
+        return None
+
+    try:
+        chain = options_provider.get_chain(ticker.upper())
+    except Exception:  # pragma: no cover - defensive
+        return None
+
+    best: Optional[Tuple[Tuple[float, float, float], float]] = None
+    for contract in chain or []:
+        iv_rank_raw = _option_field(
+            contract, "iv_rank", "ivRank", "ivr", "ivRankPercentile"
+        )
+        iv_rank_val = _coerce_float(iv_rank_raw)
+        if iv_rank_val is None:
+            continue
+
+        delta_val = _coerce_float(_option_field(contract, "delta"))
+        distance = abs(abs(delta_val) - 0.5) if delta_val is not None else 0.6
+
+        dte_val = _coerce_float(
+            _option_field(contract, "dte", "days_to_expiration", "daysToExpiration")
+        )
+        dte_rank = abs(dte_val) if dte_val is not None else 999.0
+
+        oi_val = _coerce_float(
+            _option_field(contract, "open_interest", "openInterest")
+        )
+        oi_rank = -(oi_val or 0.0)
+
+        score = (distance, dte_rank, oi_rank)
+        if best is None or score < best[0]:
+            best = (score, iv_rank_val)
+
+    return best[1] if best else None
+
+
+def _iv_rank_hint(iv_rank: Optional[float]) -> str:
+    """Translate ``iv_rank`` to a qualitative label."""
+
+    if iv_rank is None:
+        return "neutral"
+    if iv_rank < 30:
+        return "cheap"
+    if iv_rank > 70:
+        return "rich"
+    return "neutral"
+
+
+def _safe_bias(median_close: Optional[float]) -> str:
+    """Return directional bias from ``median_close``."""
+
+    if median_close is None or math.isnan(median_close):
+        return "Up"
+    return "Up" if median_close >= 0 else "Down"
+
+
 @dataclass
 class MatchCandidate:
     timestamp: dt.datetime
@@ -252,6 +341,31 @@ def find_similar_days(
             "median_low_pct": float(np.nanmedian(winsor_low)) if winsor_low.size else math.nan,
         }
 
+    clean_iqr: List[float] = []
+    iqr_vals = summary.get("iqr_close_pct") if summary else None
+    if isinstance(iqr_vals, Sequence) and len(iqr_vals) == 2:
+        for val in iqr_vals:
+            coerced = _coerce_float(val)
+            clean_iqr.append(coerced if coerced is not None else math.nan)
+    else:
+        clean_iqr = [math.nan, math.nan]
+    summary["iqr_close_pct"] = clean_iqr
+
+    median_close = _coerce_float(summary.get("median_close_pct") if summary else None)
+    median_high = _coerce_float(summary.get("median_high_pct") if summary else None)
+    median_low = _coerce_float(summary.get("median_low_pct") if summary else None)
+
+    if summary is None or not summary:
+        summary = {}
+
+    summary["median_close_pct"] = median_close if median_close is not None else math.nan
+    summary["median_high_pct"] = median_high if median_high is not None else math.nan
+    summary["median_low_pct"] = median_low if median_low is not None else math.nan
+    summary["expected_move_iqr"] = list(clean_iqr)
+
+    iv_rank_val = _fetch_iv_rank(ticker)
+    summary["iv_rank_hint"] = _iv_rank_hint(iv_rank_val)
+
     recency_weights: List[float] = []
     total_days = max(1, lookback_years * 365)
     for match in matches:
@@ -262,6 +376,10 @@ def find_similar_days(
     mean_similarity = float(np.mean([m.similarity for m in matches])) if matches else 0.0
     wilson = _wilson_lower_bound(n, max(k, 1))
     confidence = mean_similarity * wilson * recency_weight
+    confidence_pct = round(max(0.0, min(confidence, 1.0)) * 100.0, 1)
+    bias = _safe_bias(median_close)
+    summary["bias"] = bias
+    summary["confidence_pct"] = confidence_pct
 
     match_payload = [
         {
@@ -286,6 +404,8 @@ def find_similar_days(
         "n": n,
         "low_sample": low_sample,
         "confidence": confidence,
+        "confidence_pct": confidence_pct,
+        "bias": bias,
         "summary": summary,
         "matches": match_payload,
         "sources": {"bars": sources_str},
