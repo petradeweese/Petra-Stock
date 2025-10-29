@@ -14,7 +14,7 @@ try:  # pragma: no cover - optional dependency
 except Exception:  # pragma: no cover - dependency optional in some environments
     mcal = None
 
-from services.forecast_features import build_state
+from services.forecast_features import LOOKBACK_DAYS, build_state
 from services.forecast_matcher import find_similar_days
 from utils import CLOSE_TIME, OPEN_TIME, TZ
 
@@ -396,7 +396,7 @@ def select_forecast_top5(
             continue
         try:
             payload = find_similar_days(
-                ticker, state, asof_utc, lookback_years=2
+                ticker, state, asof_utc, lookback_days=LOOKBACK_DAYS
             )
         except Exception:
             logger.exception("forecast_selector matcher_failed ticker=%s", ticker)

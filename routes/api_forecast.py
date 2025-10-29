@@ -10,7 +10,7 @@ from typing import Dict, Tuple
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse
 
-from services.forecast_features import build_state
+from services.forecast_features import LOOKBACK_DAYS, build_state
 from services.forecast_matcher import find_similar_days
 from utils import TZ, now_et
 
@@ -91,7 +91,7 @@ def get_forecast(
         try:
             asof_state = build_state(ticker_clean, asof_dt)
             forecast = find_similar_days(
-                ticker_clean, asof_state, asof_dt, lookback_years=2
+                ticker_clean, asof_state, asof_dt, lookback_days=LOOKBACK_DAYS
             )
         except Exception as exc:  # pragma: no cover - safeguard
             error_message = str(exc)
