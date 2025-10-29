@@ -6,11 +6,13 @@ import datetime as dt
 import logging
 import math
 import os
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
+import numpy as np
 
 from config import settings
 from services import price_store
@@ -23,20 +25,22 @@ from utils import OPEN_TIME, TZ
 logger = logging.getLogger(__name__)
 
 
-MINUTE_INTERVAL = "1m"
+MINUTE_INTERVAL = "5m"
 
-FRAME_ORDER: List[Tuple[str, int, int]] = [
-    ("5m", 5, 12),
-    ("10m", 10, 9),
-    ("30m", 30, 6),
+# (frame label, pandas frequency string, number of bars used for feature window)
+FRAME_ORDER: List[Tuple[str, str, int]] = [
+    ("5m", "5min", 24),
+    ("30m", "30min", 6),
+    ("1d", "1D", 20),
 ]
 
 FEATURE_ORDER = [
-    "last_bar_return",
-    "cum_return",
-    "ema20_slope",
-    "realized_vol",
+    "rsi",
+    "delta",
+    "gamma",
+    "slope",
     "volume_z",
+    "iv_rank",
 ]
 
 
@@ -45,11 +49,27 @@ class FrameResult:
     """Structured results for an aggregated timeframe."""
 
     frame: str
-    minutes: int
+    freq: str
     bars: int
     raw: Dict[str, float]
     zscores: Dict[str, float]
     count: int
+
+
+@dataclass
+class CachedBars:
+    """Container for cached multi-resolution bar data."""
+
+    start: dt.datetime
+    end: dt.datetime
+    data: pd.DataFrame
+    source: str
+    aggregated: Dict[str, pd.DataFrame]
+    stored: bool = False
+    updated: float = field(default_factory=time.monotonic)
+
+
+LOOKBACK_DAYS = 60
 
 
 def ensure_utc(ts: dt.datetime) -> dt.datetime:
@@ -59,6 +79,10 @@ def ensure_utc(ts: dt.datetime) -> dt.datetime:
 
 
 _TOKEN_STATUS_LOGGED = False
+
+_BAR_CACHE: Dict[Tuple[str, str], CachedBars] = {}
+_IV_RANK_CACHE: Dict[str, Tuple[Optional[float], float]] = {}
+_IV_RANK_TTL = 15 * 60.0  # seconds
 
 
 def _token_path_status() -> tuple[bool, str | None, str | None]:
@@ -103,6 +127,247 @@ def _log_token_path_status() -> None:
         )
 
 
+def _resample_frequency(df: pd.DataFrame, freq: str) -> pd.DataFrame:
+    if df.empty:
+        return df.copy()
+    working = df.copy()
+    if working.index.tz is None:
+        working.index = working.index.tz_localize("UTC")
+    else:
+        working.index = working.index.tz_convert("UTC")
+    if freq.upper().endswith("D"):
+        working = working.tz_convert(TZ)
+        aggregated = (
+            working.resample(freq, label="right", closed="right")
+            .agg(
+                {
+                    "Open": "first",
+                    "High": "max",
+                    "Low": "min",
+                    "Close": "last",
+                    "Volume": "sum",
+                }
+            )
+            .dropna(subset=["Close"])
+        )
+        aggregated.index = aggregated.index.tz_convert("UTC")
+    else:
+        aggregated = (
+            working.resample(freq, label="right", closed="right")
+            .agg(
+                {
+                    "Open": "first",
+                    "High": "max",
+                    "Low": "min",
+                    "Close": "last",
+                    "Volume": "sum",
+                }
+            )
+            .dropna(subset=["Close"])
+        )
+    aggregated["Adj Close"] = aggregated["Close"]
+    return aggregated
+
+
+def _rsi(series: pd.Series, period: int = 14) -> pd.Series:
+    delta = series.diff()
+    gain = delta.clip(lower=0.0)
+    loss = -delta.clip(upper=0.0)
+    avg_gain = gain.ewm(alpha=1.0 / period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1.0 / period, min_periods=period, adjust=False).mean()
+    rs = avg_gain / avg_loss.replace(0.0, math.nan)
+    rsi = 100.0 - (100.0 / (1.0 + rs))
+    return rsi
+
+
+def _linear_slope(values: Iterable[float]) -> float:
+    arr = np.asarray(list(values), dtype=float)
+    if arr.size < 2:
+        return math.nan
+    base = arr[0]
+    if base == 0:
+        base = 1.0
+    normalized = arr / base - 1.0
+    x = np.arange(normalized.size, dtype=float)
+    x_centered = x - x.mean()
+    denominator = np.sum(x_centered ** 2)
+    if denominator == 0:
+        return 0.0
+    slope = float(np.dot(x_centered, normalized) / denominator)
+    return slope
+
+
+def _rolling_slope(series: pd.Series, window: int) -> pd.Series:
+    if series.empty or window <= 1:
+        return pd.Series(index=series.index, dtype=float)
+    return series.rolling(window=window, min_periods=max(2, window // 2)).apply(
+        _linear_slope, raw=False
+    )
+
+
+def _option_field(contract: object, *names: str) -> object:
+    for name in names:
+        if hasattr(contract, name):
+            value = getattr(contract, name)
+            if value is not None:
+                return value
+        if isinstance(contract, dict) and name in contract:
+            value = contract[name]
+            if value is not None:
+                return value
+    return None
+
+
+def _current_iv_rank(ticker: str) -> Tuple[Optional[float], str]:
+    key = ticker.upper()
+    cached = _IV_RANK_CACHE.get(key)
+    now = time.monotonic()
+    if cached and cached[1] > now:
+        value = cached[0]
+        return (value if value is not None else None), "cache"
+
+    try:  # pragma: no cover - optional dependency
+        from services import options_provider
+    except Exception:
+        _IV_RANK_CACHE[key] = (None, now + 300.0)
+        return None, "unavailable"
+
+    try:  # pragma: no cover - defensive
+        chain = options_provider.get_chain(key)
+    except Exception:
+        _IV_RANK_CACHE[key] = (None, now + 300.0)
+        return None, "unavailable"
+
+    best: Optional[Tuple[Tuple[float, float, float], float]] = None
+    for contract in chain or []:
+        iv_rank_raw = _option_field(contract, "iv_rank", "ivRank", "ivr", "ivRankPercentile")
+        try:
+            iv_rank_val = float(iv_rank_raw)
+        except (TypeError, ValueError):
+            continue
+
+        delta_raw = _option_field(contract, "delta")
+        try:
+            delta_val = abs(float(delta_raw))
+        except (TypeError, ValueError):
+            delta_val = 0.5
+        distance = abs(delta_val - 0.5)
+
+        dte_raw = _option_field(
+            contract,
+            "dte",
+            "days_to_expiration",
+            "daysToExpiration",
+        )
+        try:
+            dte_val = abs(float(dte_raw))
+        except (TypeError, ValueError):
+            dte_val = 999.0
+
+        oi_raw = _option_field(contract, "open_interest", "openInterest")
+        try:
+            oi_val = -float(oi_raw)
+        except (TypeError, ValueError):
+            oi_val = -0.0
+
+        score = (distance, dte_val, oi_val)
+        if best is None or score < best[0]:
+            best = (score, iv_rank_val)
+
+    iv_rank = best[1] if best else None
+    _IV_RANK_CACHE[key] = (iv_rank, now + _IV_RANK_TTL)
+    return iv_rank, "options"
+
+
+def _load_cached_history(
+    symbol: str, start: dt.datetime, end: dt.datetime
+) -> Optional[CachedBars]:
+    key = (symbol.upper(), MINUTE_INTERVAL)
+    cached = _BAR_CACHE.get(key)
+
+    fetch_start = ensure_utc(start)
+    fetch_end = ensure_utc(end)
+
+    if cached is not None:
+        if cached.start <= fetch_start and cached.end >= fetch_end and not cached.data.empty:
+            return cached
+        fetch_start = min(fetch_start, cached.start)
+        fetch_end = max(fetch_end, cached.end)
+
+    frame, source = load_price_frame(symbol, fetch_start, fetch_end, MINUTE_INTERVAL)
+    if frame is None or frame.empty:
+        return cached
+
+    frame = frame.sort_index()
+    frame = frame[~frame.index.duplicated(keep="last")]
+
+    if cached is not None:
+        combined = pd.concat([cached.data, frame]).sort_index()
+        combined = combined[~combined.index.duplicated(keep="last")]
+        data_changed = not combined.equals(cached.data)
+        source_parts = {
+            part
+            for part in (cached.source or "", source or "")
+            if part and part != "none"
+        }
+        aggregated = {} if data_changed else dict(cached.aggregated)
+        stored = cached.stored if not data_changed else False
+        cache = CachedBars(
+            min(fetch_start, cached.start),
+            max(fetch_end, cached.end),
+            combined,
+            "|".join(sorted(source_parts)) or cached.source or source or "none",
+            aggregated,
+            stored=stored,
+        )
+    else:
+        cache = CachedBars(
+            fetch_start,
+            fetch_end,
+            frame,
+            source or "none",
+            {},
+        )
+
+    _BAR_CACHE[key] = cache
+    return cache
+
+
+def _ensure_aggregated_frames(symbol: str, cache: CachedBars) -> None:
+    missing = any(frame not in cache.aggregated for frame, _, _ in FRAME_ORDER)
+    if not missing and cache.aggregated:
+        return
+
+    aggregated: Dict[str, pd.DataFrame] = {}
+    base = cache.data
+    for frame, freq, _ in FRAME_ORDER:
+        if frame == "5m":
+            aggregated[frame] = base.copy()
+        else:
+            aggregated[frame] = _resample_frequency(base, freq)
+    cache.aggregated = aggregated
+
+    if not cache.stored:
+        try:
+            thirty = aggregated.get("30m")
+            daily = aggregated.get("1d")
+            if thirty is not None and not thirty.empty:
+                price_store.upsert_bars(symbol, thirty, interval="30m")
+            if daily is not None and not daily.empty:
+                price_store.upsert_bars(symbol, daily, interval="1d")
+            cache.stored = True
+        except Exception:  # pragma: no cover - defensive logging
+            logger.exception("forecast store_aggregated_failed ticker=%s", symbol)
+
+    logger.info(
+        "forecast multiresolution_ready ticker=%s frames=%s rows=%d source=%s",
+        symbol.upper(),
+        ",".join(sorted(aggregated)),
+        len(base),
+        cache.source or "none",
+    )
+
+
 def load_price_frame(
     symbol: str, start: dt.datetime, end: dt.datetime, interval: str
 ) -> Tuple[pd.DataFrame | None, str]:
@@ -119,7 +384,13 @@ def load_price_frame(
             return False
         last_ts = frame.index.max()
         if interval.endswith("m"):
-            expected_last = end_utc - pd.Timedelta(minutes=1)
+            try:
+                minutes = int(interval[:-1])
+            except ValueError:
+                minutes = 1
+            if minutes < 1:
+                minutes = 1
+            expected_last = end_utc - pd.Timedelta(minutes=minutes)
         else:
             expected_last = end_utc - pd.Timedelta(days=1)
         if last_ts < expected_last:
@@ -264,67 +535,56 @@ def _zscore(value: float, history: Iterable[float]) -> float:
     return 0.0
 
 
-def _resample_minutes(df: pd.DataFrame, minutes: int) -> pd.DataFrame:
-    if df.empty:
-        return df
-    return (
-        df.resample(f"{minutes}min", label="right", closed="right")
-        .agg({"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"})
-        .dropna(subset=["Close"])
-    )
-
-
 def _frame_features(
     df: pd.DataFrame,
     frame: str,
-    minutes: int,
+    freq: str,
     bars: int,
     asof: dt.datetime,
+    *,
+    iv_rank: Optional[float],
 ) -> FrameResult:
-    aggregated = _resample_minutes(df, minutes)
-    aggregated = aggregated.loc[aggregated.index < asof]
+    aggregated = df.loc[df.index < asof]
     raw: Dict[str, float] = {name: math.nan for name in FEATURE_ORDER}
     zscores: Dict[str, float] = {name: math.nan for name in FEATURE_ORDER}
     if aggregated.empty or len(aggregated) < 2:
-        return FrameResult(frame, minutes, bars, raw, zscores, len(aggregated))
+        return FrameResult(frame, freq, bars, raw, zscores, len(aggregated))
 
     window = aggregated.iloc[-bars:]
-    returns = aggregated["Close"].pct_change().dropna()
-    last_bar_return = float(returns.iloc[-1]) if not returns.empty else math.nan
-    cum_return = math.nan
-    if len(window) >= 1:
-        first_open = float(window["Open"].iloc[0])
-        last_close = float(window["Close"].iloc[-1])
-        if first_open:
-            cum_return = (last_close / first_open) - 1.0
-    ema = aggregated["Close"].ewm(span=20, adjust=False).mean()
-    ema_slope_series = ema.pct_change()
-    ema_slope = float(ema_slope_series.iloc[-1]) if not ema_slope_series.empty else math.nan
-    realized_series = returns.rolling(window=bars, min_periods=max(2, bars // 2)).std(ddof=0)
-    realized_vol = (
-        float(realized_series.iloc[-1]) if not realized_series.empty else math.nan
-    )
-    volume = float(aggregated["Volume"].iloc[-1]) if len(aggregated) else math.nan
+    closes = aggregated["Close"]
+    returns = closes.pct_change().dropna()
+    delta_val = float(returns.iloc[-1]) if not returns.empty else math.nan
+    gamma_val = math.nan
+    if len(returns) >= 2:
+        prev_delta = float(returns.iloc[-2])
+        gamma_val = delta_val - prev_delta
+    slope_series = _rolling_slope(closes, bars)
+    slope_val = float(slope_series.iloc[-1]) if not slope_series.empty else math.nan
+    volume = float(window["Volume"].iloc[-1]) if len(window) else math.nan
+    rsi_series = _rsi(closes)
+    rsi_val = float(rsi_series.iloc[-1]) if not rsi_series.empty else math.nan
 
     raw.update(
         {
-            "last_bar_return": last_bar_return,
-            "cum_return": cum_return,
-            "ema20_slope": ema_slope,
-            "realized_vol": realized_vol,
+            "rsi": rsi_val,
+            "delta": delta_val,
+            "gamma": gamma_val,
+            "slope": slope_val,
             "volume_z": volume,
+            "iv_rank": iv_rank if iv_rank is not None else math.nan,
         }
     )
 
-    zscores["last_bar_return"] = _zscore(last_bar_return, returns.iloc[:-1])
-    cum_series = aggregated["Close"].pct_change(periods=bars)
-    zscores["cum_return"] = _zscore(cum_return, cum_series.iloc[:-1])
-    zscores["ema20_slope"] = _zscore(ema_slope, ema_slope_series.iloc[:-1])
-    zscores["realized_vol"] = _zscore(realized_vol, realized_series.iloc[:-1])
+    zscores["rsi"] = _zscore(rsi_val, rsi_series.iloc[:-1])
+    zscores["delta"] = _zscore(delta_val, returns.iloc[:-1])
+    gamma_series = returns.diff().dropna()
+    zscores["gamma"] = _zscore(gamma_val, gamma_series.iloc[:-1])
+    zscores["slope"] = _zscore(slope_val, slope_series.iloc[:-1])
     vol_history = aggregated["Volume"].iloc[:-1]
-    zscores["volume_z"] = _zscore(volume, vol_history.tail(20))
+    zscores["volume_z"] = _zscore(volume, vol_history.tail(max(20, bars)))
+    zscores["iv_rank"] = 0.0 if iv_rank is not None else math.nan
 
-    return FrameResult(frame, minutes, bars, raw, zscores, len(aggregated))
+    return FrameResult(frame, freq, bars, raw, zscores, len(aggregated))
 
 
 def tod_minute(asof: dt.datetime) -> int:
@@ -334,9 +594,8 @@ def tod_minute(asof: dt.datetime) -> int:
     return int(delta.total_seconds() // 60)
 
 
-def _context_returns(df: pd.DataFrame, minutes: int, bars: int, asof: dt.datetime) -> float:
-    aggregated = _resample_minutes(df, minutes)
-    aggregated = aggregated.loc[aggregated.index < asof]
+def _context_returns(df: pd.DataFrame, bars: int, asof: dt.datetime) -> float:
+    aggregated = df.loc[df.index < asof]
     if len(aggregated) < bars:
         return math.nan
     window = aggregated.iloc[-bars:]
@@ -348,28 +607,20 @@ def _context_returns(df: pd.DataFrame, minutes: int, bars: int, asof: dt.datetim
 
 
 def build_state(ticker: str, asof: dt.datetime) -> Dict[str, object]:
-    """Build intraday feature state vector for ``ticker`` at ``asof``.
-
-    The function loads one-minute OHLCV bars from the local price store.  When
-    recent data are missing, Schwab is queried, results are cached to the local
-    database and the query is retried.  Features are computed for 5, 10 and
-    30 minute aggregated windows using z-scored metrics.
-    """
+    """Build a multi-resolution feature vector for ``ticker`` at ``asof``."""
 
     if not isinstance(asof, dt.datetime):
         raise TypeError("asof must be a datetime")
     asof_utc = ensure_utc(asof)
 
-    session_start_et = dt.datetime.combine(
-        asof_utc.astimezone(TZ).date(), OPEN_TIME, tzinfo=TZ
+    session_day = asof_utc.astimezone(TZ).date()
+    history_start_day = session_day - dt.timedelta(days=LOOKBACK_DAYS)
+    history_start = dt.datetime.combine(history_start_day, OPEN_TIME, tzinfo=TZ).astimezone(
+        dt.timezone.utc
     )
-    session_start = session_start_et.astimezone(dt.timezone.utc)
-    start = session_start - dt.timedelta(minutes=390)
 
-    bars_df, source = load_price_frame(ticker, start, asof_utc, MINUTE_INTERVAL)
-    required_window = max(minutes * bars for _, minutes, bars in FRAME_ORDER)
-
-    if bars_df is None or len(bars_df) < required_window:
+    cache = _load_cached_history(ticker, history_start, asof_utc)
+    if cache is None or cache.data.empty:
         return {
             "ticker": ticker.upper(),
             "asof": asof_utc.isoformat(),
@@ -379,20 +630,25 @@ def build_state(ticker: str, asof: dt.datetime) -> Dict[str, object]:
             "layout": {},
             "feature_order": FEATURE_ORDER,
             "context": {},
-            "sources": {"bars": source or "db_miss"},
+            "sources": {"bars": (cache.source if cache else "db_miss")},
         }
 
-    spy_df, spy_source = load_price_frame("SPY", start, asof_utc, MINUTE_INTERVAL)
-    if spy_df is None:
-        spy_df = pd.DataFrame()
+    _ensure_aggregated_frames(ticker, cache)
+
+    spy_cache = _load_cached_history("SPY", history_start, asof_utc)
+    if spy_cache is not None and not spy_cache.data.empty:
+        _ensure_aggregated_frames("SPY", spy_cache)
+
+    iv_rank_val, iv_source = _current_iv_rank(ticker)
 
     frames: Dict[str, Dict[str, Dict[str, float]]] = {}
     layout: Dict[str, Tuple[int, int]] = {}
     vector: List[float] = []
 
     offset = 0
-    for frame, minutes, bars in FRAME_ORDER:
-        result = _frame_features(bars_df, frame, minutes, bars, asof_utc)
+    for frame, freq, bars in FRAME_ORDER:
+        aggregated = cache.aggregated.get(frame, pd.DataFrame()) if cache.aggregated else pd.DataFrame()
+        result = _frame_features(aggregated, frame, freq, bars, asof_utc, iv_rank=iv_rank_val)
         frames[frame] = {
             "raw": result.raw,
             "z": result.zscores,
@@ -404,14 +660,31 @@ def build_state(ticker: str, asof: dt.datetime) -> Dict[str, object]:
         offset += len(z_values)
 
     context = {
-        "spy_5m_cum_return": _context_returns(spy_df, 5, 12, asof_utc),
-        "spy_30m_cum_return": _context_returns(spy_df, 30, 6, asof_utc),
+        "spy_5m_cum_return": math.nan,
+        "spy_30m_cum_return": math.nan,
+        "spy_1d_cum_return": math.nan,
+        "iv_rank": iv_rank_val,
+        "iv_rank_source": iv_source,
         "vix_stub": None,
     }
+    if spy_cache is not None and spy_cache.aggregated:
+        spy_5m = spy_cache.aggregated.get("5m", pd.DataFrame())
+        spy_30m = spy_cache.aggregated.get("30m", pd.DataFrame())
+        spy_1d = spy_cache.aggregated.get("1d", pd.DataFrame())
+        if spy_5m is not None:
+            context["spy_5m_cum_return"] = _context_returns(spy_5m, 12, asof_utc)
+        if spy_30m is not None:
+            context["spy_30m_cum_return"] = _context_returns(spy_30m, 6, asof_utc)
+        if spy_1d is not None:
+            context["spy_1d_cum_return"] = _context_returns(spy_1d, 5, asof_utc)
 
-    sources = {source, spy_source}
-    sources.discard("none")
-    bars_source = "|".join(sorted(sources)) if sources else "none"
+    bars_source = cache.source or "none"
+    spy_source = spy_cache.source if spy_cache is not None else "none"
+    combined_sources = set(filter(None, bars_source.split("|"))) | set(
+        filter(None, spy_source.split("|"))
+    )
+    combined_sources.discard("none")
+    bars_label = "|".join(sorted(combined_sources)) if combined_sources else bars_source
 
     return {
         "ticker": ticker.upper(),
@@ -422,7 +695,7 @@ def build_state(ticker: str, asof: dt.datetime) -> Dict[str, object]:
         "layout": layout,
         "feature_order": FEATURE_ORDER,
         "context": context,
-        "sources": {"bars": bars_source or source},
+        "sources": {"bars": bars_label or bars_source, "iv": iv_source},
     }
 
 
@@ -433,5 +706,6 @@ __all__ = [
     "ensure_utc",
     "load_price_frame",
     "tod_minute",
+    "LOOKBACK_DAYS",
 ]
 

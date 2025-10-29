@@ -10,9 +10,9 @@ from services import forecast_features
 def test_load_price_frame_allows_unreadable_token(monkeypatch):
     symbol = "AAPL"
     start = dt.datetime(2024, 1, 1, 14, 0, tzinfo=dt.timezone.utc)
-    end = start + dt.timedelta(minutes=5)
+    end = start + dt.timedelta(minutes=21)
 
-    idx = pd.date_range(start=start, periods=5, freq="1min", tz="UTC")
+    idx = pd.date_range(start=start, periods=5, freq="5min", tz="UTC")
     populated = pd.DataFrame(
         {
             "Open": [100 + i for i in range(5)],
@@ -32,7 +32,7 @@ def test_load_price_frame_allows_unreadable_token(monkeypatch):
 
     def fake_get_prices_from_db(symbols, start_arg, end_arg, *, interval):
         assert symbols == [symbol]
-        assert interval == "1m"
+        assert interval == "5m"
         call_state["count"] += 1
         if call_state["count"] == 1:
             return {symbol: empty}
@@ -43,6 +43,7 @@ def test_load_price_frame_allows_unreadable_token(monkeypatch):
 
     def fake_fetch(symbols, interval, start_arg, end_arg):
         assert symbols == [symbol]
+        assert interval == "5m"
         return {symbol: fetched}
 
     monkeypatch.setattr(price_store, "get_prices_from_db", fake_get_prices_from_db)
@@ -70,7 +71,7 @@ def test_load_price_frame_allows_unreadable_token(monkeypatch):
     )
     monkeypatch.setattr(forecast_features, "fetch_bars", fake_fetch)
 
-    frame, source = forecast_features.load_price_frame(symbol, start, end, "1m")
+    frame, source = forecast_features.load_price_frame(symbol, start, end, "5m")
 
     assert call_state["count"] == 2
     pdt.assert_frame_equal(frame, populated)
