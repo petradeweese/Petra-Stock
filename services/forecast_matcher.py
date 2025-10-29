@@ -6,7 +6,8 @@ import datetime as dt
 import logging
 import math
 import os
-from dataclasses import dataclass
+from collections import Counter
+from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -186,6 +187,44 @@ class MatchCandidate:
     source: str
 
 
+@dataclass
+class RegimeMetrics:
+    day: dt.date
+    iv_rank: Optional[float]
+    realized_vol: Optional[float]
+    liquidity_z: Optional[float]
+
+
+@dataclass
+class RegimeThresholds:
+    ivr_band: Optional[float]
+    rv_band: Optional[float]
+    liq_zmin: Optional[float]
+
+    def describe(self) -> Dict[str, Optional[float]]:
+        return {
+            "ivr_band": self.ivr_band,
+            "rv_band": self.rv_band,
+            "liq_zmin": self.liq_zmin,
+        }
+
+    def relax(self, dimension: str) -> None:
+        dim = (dimension or "").upper()
+        if dim == "IVR":
+            self.ivr_band = None
+        elif dim == "RV":
+            self.rv_band = None
+        elif dim == "LIQ":
+            self.liq_zmin = None
+
+
+@dataclass
+class PrefilterStats:
+    kept_days: int = 0
+    rejected_days: int = 0
+    reason_counts: Counter = field(default_factory=Counter)
+
+
 def _cosine(a: np.ndarray, b: np.ndarray) -> float:
     denom = float(np.linalg.norm(a) * np.linalg.norm(b))
     if denom == 0:
@@ -292,6 +331,181 @@ def _compute_outcomes(ticker: str, timestamp: dt.datetime) -> Tuple[Dict[str, fl
     }, source
 
 
+def _parse_float_env(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return default
+    if math.isnan(value) or math.isinf(value):
+        return default
+    return value
+
+
+def _parse_int_env(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return value
+
+
+def _parse_relax_order(raw: Optional[str]) -> List[str]:
+    if not raw:
+        return []
+    parts = [part.strip().upper() for part in raw.split(",")]
+    return [part for part in parts if part in {"IVR", "RV", "LIQ"}]
+
+
+def _zscore_from_history(value: Optional[float], history: Sequence[float]) -> float:
+    if value is None or math.isnan(value):
+        return math.nan
+    arr = np.asarray(list(history), dtype=float)
+    if arr.size == 0:
+        return math.nan
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        return math.nan
+    mean = float(arr.mean())
+    std = float(arr.std(ddof=0))
+    if std > 1e-9:
+        return (float(value) - mean) / std
+    median = float(np.median(arr))
+    mad = float(np.median(np.abs(arr - median)))
+    if mad > 1e-9:
+        return (float(value) - median) / (1.4826 * mad)
+    return 0.0
+
+
+def _session_regime_metrics(ticker: str, day: dt.date) -> RegimeMetrics:
+    window_days = 90
+    rv_window = 5
+    end = dt.datetime.combine(day + dt.timedelta(days=1), OPEN_TIME, tzinfo=TZ).astimezone(
+        dt.timezone.utc
+    )
+    start = end - dt.timedelta(days=window_days)
+    daily_bars, _ = load_price_frame(ticker, start, end, "1d")
+    if daily_bars is None or daily_bars.empty:
+        return RegimeMetrics(day, math.nan, math.nan, math.nan)
+
+    working = daily_bars.copy()
+    if working.index.tz is None:
+        working.index = working.index.tz_localize(dt.timezone.utc)
+    working = working.tz_convert(TZ)
+    eligible = working.loc[working.index.date <= day]
+    if eligible.empty:
+        return RegimeMetrics(day, math.nan, math.nan, math.nan)
+
+    closes = eligible["Close"].astype(float)
+    returns = closes.pct_change().dropna()
+    tail_returns = returns.iloc[-rv_window:]
+    realized = float(tail_returns.std(ddof=0)) if not tail_returns.empty else math.nan
+
+    volume_series = eligible["Volume"].astype(float)
+    current_volume = float(volume_series.iloc[-1]) if not volume_series.empty else math.nan
+    volume_history = volume_series.iloc[:-1]
+    liquidity_z = _zscore_from_history(current_volume, volume_history.tail(30))
+
+    hv_series = returns.rolling(rv_window).std(ddof=0).dropna()
+    if hv_series.empty:
+        iv_rank = math.nan
+    else:
+        current_hv = float(hv_series.iloc[-1])
+        prior_hv = hv_series.iloc[:-1]
+        if prior_hv.empty:
+            iv_rank = 50.0
+        else:
+            less_or_equal = float((prior_hv <= current_hv).sum())
+            iv_rank = (less_or_equal / float(len(prior_hv))) * 100.0
+
+    if math.isnan(iv_rank):
+        iv_rank = math.nan
+
+    return RegimeMetrics(day, iv_rank, realized, liquidity_z)
+
+
+def _regime_passes(
+    base_metrics: Optional[RegimeMetrics],
+    candidate: RegimeMetrics,
+    thresholds: RegimeThresholds,
+) -> Tuple[bool, str]:
+    if thresholds.ivr_band is not None:
+        base_iv = _coerce_float(getattr(base_metrics, "iv_rank", None))
+        cand_iv = _coerce_float(candidate.iv_rank)
+        if base_iv is None or cand_iv is None:
+            return False, "IVR"
+        if abs(cand_iv - base_iv) > thresholds.ivr_band:
+            return False, "IVR"
+
+    if thresholds.rv_band is not None:
+        base_rv = _coerce_float(getattr(base_metrics, "realized_vol", None))
+        cand_rv = _coerce_float(candidate.realized_vol)
+        if base_rv is None or cand_rv is None or base_rv <= 0:
+            return False, "RV"
+        relative = abs(cand_rv - base_rv) / max(abs(base_rv), 1e-9)
+        if relative > thresholds.rv_band:
+            return False, "RV"
+
+    if thresholds.liq_zmin is not None:
+        cand_liq = _coerce_float(candidate.liquidity_z)
+        if cand_liq is None or cand_liq < thresholds.liq_zmin:
+            return False, "LIQ"
+
+    return True, ""
+
+
+def _nearest_weekly_expiry(asof: dt.datetime) -> str:
+    asof_et = asof.astimezone(TZ)
+    days_ahead = (4 - asof_et.weekday()) % 7
+    expiry_date = asof_et.date() + dt.timedelta(days=days_ahead)
+    if days_ahead == 0 and asof_et.time() >= dt.time(16, 0):
+        expiry_date += dt.timedelta(days=7)
+    return expiry_date.isoformat()
+
+
+def _build_options_hint(summary: Dict[str, object], asof: dt.datetime) -> Dict[str, object]:
+    if not summary:
+        return {}
+    iqr_vals = summary.get("expected_move_iqr")
+    exp_move_pct = math.nan
+    if isinstance(iqr_vals, Sequence) and len(iqr_vals) == 2:
+        magnitudes = [abs(_coerce_float(val) or math.nan) for val in iqr_vals]
+        magnitudes = [val for val in magnitudes if not math.isnan(val)]
+        if magnitudes:
+            exp_move_pct = max(magnitudes)
+    if math.isnan(exp_move_pct):
+        median_val = _coerce_float(summary.get("median_close_pct"))
+        if median_val is not None and not math.isnan(median_val):
+            exp_move_pct = abs(median_val)
+    if math.isnan(exp_move_pct):
+        return {}
+
+    median_close = _coerce_float(summary.get("median_close_pct"))
+    if median_close is None or math.isnan(median_close):
+        bias = "neutral"
+    elif abs(median_close) < 0.15:
+        bias = "neutral"
+    elif median_close > 0:
+        bias = "up"
+    else:
+        bias = "down"
+
+    suggested_delta = 0.20 if bias == "neutral" else 0.30
+    exp_move_fraction = exp_move_pct / 100.0
+    expiry = _nearest_weekly_expiry(asof)
+    return {
+        "bias": bias,
+        "exp_move_pct": round(exp_move_fraction, 6),
+        "suggested_delta": suggested_delta,
+        "suggested_expiry": expiry,
+    }
+
+
 def find_similar_days(
     ticker: str,
     state: Optional[Dict[str, object]],
@@ -347,53 +561,125 @@ def find_similar_days(
         trading_days = [day for day in trading_days if day < target_day]
     recent_cut = set(trading_days[-10:])
     trading_days = [day for day in trading_days if day not in recent_cut]
-    candidates: List[MatchCandidate] = []
+    iv_rank_val = _fetch_iv_rank(ticker)
+
+    ivr_band = _parse_float_env("FORECAST_IVR_BAND", 10.0)
+    rv_band = _parse_float_env("FORECAST_RV_BAND", 0.20)
+    liq_zmin = _parse_float_env("FORECAST_LIQ_ZMIN", -1.0)
+    min_candidates = _parse_int_env("FORECAST_MIN_CANDIDATES", 40)
+    relax_order = _parse_relax_order(os.getenv("FORECAST_RELAX_ORDER", "IVR,RV,LIQ"))
+
+    thresholds = RegimeThresholds(ivr_band=ivr_band, rv_band=rv_band, liq_zmin=liq_zmin)
+    regime_cache: Dict[dt.date, RegimeMetrics] = {}
+
+    def _metrics_for(day: dt.date) -> RegimeMetrics:
+        cached = regime_cache.get(day)
+        if cached is None:
+            cached = _session_regime_metrics(ticker, day)
+            regime_cache[day] = cached
+        return cached
+
+    base_metrics = _metrics_for(target_day)
+
     base_sources_raw = base_state.get("sources", {}).get("bars", "none")
     base_sources = set(filter(None, (base_sources_raw or "").split("|")))
-    sources_used = base_sources or {"none"}
+    base_sources.discard("none")
+    base_sources.discard("")
 
-    for day in reversed(trading_days):
-        best: Optional[MatchCandidate] = None
-        for offset in _offset_sequence(tod_tolerance_min):
-            candidate_ts = _target_time(day, tod_minute_val, offset)
-            if candidate_ts is None or candidate_ts >= asof_utc:
+    def _collect(thresholds_obj: RegimeThresholds) -> Tuple[List[MatchCandidate], PrefilterStats, set[str]]:
+        stats = PrefilterStats()
+        collected: List[MatchCandidate] = []
+        sources_local = set(base_sources) if base_sources else set()
+        for day in reversed(trading_days):
+            metrics = _metrics_for(day)
+            passes_regime, reason = _regime_passes(base_metrics, metrics, thresholds_obj)
+            if not passes_regime:
+                stats.rejected_days += 1
+                stats.reason_counts[reason or "UNKNOWN"] += 1
                 continue
-            try:
-                cand_state = build_state(ticker, candidate_ts)
-            except Exception:
-                continue
-            cand_vec, cand_layout = _vector(cand_state)
-            if cand_vec.size != base_vec.size:
-                continue
-            frame_scores: Dict[str, float] = {}
-            passes = True
-            for frame, _, _ in FRAME_ORDER:
-                base_slice = _frame_slice(layout, frame, base_vec)
-                cand_slice = _frame_slice(cand_layout, frame, cand_vec)
-                if base_slice is None or cand_slice is None:
+            stats.kept_days += 1
+            best: Optional[MatchCandidate] = None
+            for offset in _offset_sequence(tod_tolerance_min):
+                candidate_ts = _target_time(day, tod_minute_val, offset)
+                if candidate_ts is None or candidate_ts >= asof_utc:
                     continue
-                score = _cosine(base_slice, cand_slice)
-                frame_scores[frame] = score
-                if score < per_frame_min:
-                    passes = False
-                    break
-            if not frame_scores or not passes:
-                continue
-            breakdown, overall = scorer.score(frame_scores)
-            if overall < overall_min:
-                continue
-            outcomes, source = _compute_outcomes(ticker, candidate_ts)
-            if not outcomes:
-                continue
-            for part in (source or "none").split("|"):
-                sources_used.add(part)
-            match = MatchCandidate(
-                candidate_ts, overall, frame_scores, breakdown, outcomes, source
-            )
-            if best is None or match.similarity > best.similarity:
-                best = match
-        if best is not None:
-            candidates.append(best)
+                try:
+                    cand_state = build_state(ticker, candidate_ts)
+                except Exception:
+                    continue
+                cand_vec, cand_layout = _vector(cand_state)
+                if cand_vec.size != base_vec.size:
+                    continue
+                frame_scores: Dict[str, float] = {}
+                passes = True
+                for frame, _, _ in FRAME_ORDER:
+                    base_slice = _frame_slice(layout, frame, base_vec)
+                    cand_slice = _frame_slice(cand_layout, frame, cand_vec)
+                    if base_slice is None or cand_slice is None:
+                        continue
+                    score = _cosine(base_slice, cand_slice)
+                    frame_scores[frame] = score
+                    if score < per_frame_min:
+                        passes = False
+                        break
+                if not frame_scores or not passes:
+                    continue
+                breakdown, overall = scorer.score(frame_scores)
+                if overall < overall_min:
+                    continue
+                outcomes, source = _compute_outcomes(ticker, candidate_ts)
+                if not outcomes:
+                    continue
+                for part in (source or "none").split("|"):
+                    sources_local.add(part)
+                match = MatchCandidate(
+                    candidate_ts, overall, frame_scores, breakdown, outcomes, source
+                )
+                if best is None or match.similarity > best.similarity:
+                    best = match
+            if best is not None:
+                collected.append(best)
+        return collected, stats, sources_local
+
+    attempts = 0
+    applied_relaxations: List[str] = []
+    candidates: List[MatchCandidate] = []
+    sources_used: set[str] = base_sources or {"none"}
+
+    while True:
+        attempts += 1
+        attempt_candidates, stats, sources_snapshot = _collect(thresholds)
+        logger.info(
+            "forecast regime_prefilter ticker=%s attempt=%d kept_days=%d rejected_days=%d thresholds=%s reject_breakdown=%s",
+            ticker.upper(),
+            attempts,
+            stats.kept_days,
+            stats.rejected_days,
+            thresholds.describe(),
+            dict(stats.reason_counts),
+        )
+        candidates = attempt_candidates
+        sources_used = sources_snapshot or {"none"}
+        if len(candidates) >= min_candidates or not relax_order:
+            break
+        dimension = relax_order.pop(0)
+        applied_relaxations.append(dimension)
+        thresholds.relax(dimension)
+        logger.info(
+            "forecast regime_relax ticker=%s step=%d dimension=%s",
+            ticker.upper(),
+            attempts,
+            dimension,
+        )
+        if not candidates and not trading_days:
+            break
+
+    if applied_relaxations:
+        logger.info(
+            "forecast regime_relax_summary ticker=%s steps=%s",
+            ticker.upper(),
+            ",".join(applied_relaxations),
+        )
 
     candidates.sort(key=lambda m: m.similarity, reverse=True)
     matches = candidates[:k]
@@ -445,7 +731,6 @@ def find_similar_days(
     summary["median_low_pct"] = median_low if median_low is not None else math.nan
     summary["expected_move_iqr"] = list(clean_iqr)
 
-    iv_rank_val = _fetch_iv_rank(ticker)
     summary["iv_rank_hint"] = _iv_rank_hint(iv_rank_val)
 
     population_scores = np.array([cand.similarity for cand in candidates], dtype=float)
@@ -491,6 +776,8 @@ def find_similar_days(
         for match in matches
     ]
 
+    options_hint = _build_options_hint(summary, asof_utc)
+
     sources_used.discard("none")
     sources_used.discard("")
     sources_str = "|".join(sorted(sources_used)) if sources_used else "none"
@@ -505,6 +792,7 @@ def find_similar_days(
         "bias": bias,
         "summary": summary,
         "matches": match_payload,
+        "options_hint": options_hint,
         "sources": {"bars": sources_str},
     }
 
