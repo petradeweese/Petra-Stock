@@ -450,10 +450,14 @@ def find_similar_days(
 
     population_scores = np.array([cand.similarity for cand in candidates], dtype=float)
     top_score = matches[0].similarity if matches else 0.0
-    if population_scores.size:
-        percentile = float((population_scores <= top_score + 1e-9).sum()) / float(
-            population_scores.size
-        )
+    size = population_scores.size
+    if size:
+        tolerance = 1e-9
+        strictly_lower = np.count_nonzero(population_scores + tolerance < top_score)
+        if size == 1:
+            percentile = 1.0
+        else:
+            percentile = float(strictly_lower) / float(size)
     else:
         percentile = 0.0
     confidence = max(0.0, min(percentile, 1.0))
