@@ -396,10 +396,13 @@ def _session_regime_metrics(ticker: str, day: dt.date) -> RegimeMetrics:
     working = daily_bars.copy()
     if working.index.tz is None:
         working.index = working.index.tz_localize(dt.timezone.utc)
-    working = working.tz_convert(TZ)
-    eligible = working.loc[working.index.date <= day]
+    else:
+        working = working.tz_convert(dt.timezone.utc)
+    cutoff = dt.datetime.combine(day + dt.timedelta(days=1), dt.time.min, tzinfo=dt.timezone.utc)
+    eligible = working.loc[working.index < cutoff]
     if eligible.empty:
         return RegimeMetrics(day, math.nan, math.nan, math.nan)
+    eligible = eligible.tz_convert(TZ)
 
     closes = eligible["Close"].astype(float)
     returns = closes.pct_change().dropna()
