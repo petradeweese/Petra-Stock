@@ -383,7 +383,13 @@ def load_price_frame(
             return False
         last_ts = frame.index.max()
         if interval.endswith("m"):
-            expected_last = end_utc - pd.Timedelta(minutes=1)
+            try:
+                minutes = int(interval[:-1])
+            except ValueError:
+                minutes = 1
+            if minutes < 1:
+                minutes = 1
+            expected_last = end_utc - pd.Timedelta(minutes=minutes)
         else:
             expected_last = end_utc - pd.Timedelta(days=1)
         if last_ts < expected_last:
