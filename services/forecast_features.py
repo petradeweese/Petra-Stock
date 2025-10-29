@@ -304,13 +304,14 @@ def _load_cached_history(
     if cached is not None:
         combined = pd.concat([cached.data, frame]).sort_index()
         combined = combined[~combined.index.duplicated(keep="last")]
+        data_changed = not combined.equals(cached.data)
         source_parts = {
             part
             for part in (cached.source or "", source or "")
             if part and part != "none"
         }
-        aggregated = dict(cached.aggregated)
-        stored = cached.stored
+        aggregated = {} if data_changed else dict(cached.aggregated)
+        stored = cached.stored if not data_changed else False
         cache = CachedBars(
             min(fetch_start, cached.start),
             max(fetch_end, cached.end),
