@@ -453,11 +453,10 @@ def find_similar_days(
     size = population_scores.size
     if size:
         tolerance = 1e-9
-        strictly_lower = np.count_nonzero(population_scores + tolerance < top_score)
-        if size == 1:
-            percentile = 1.0
-        else:
-            percentile = float(strictly_lower) / float(size)
+        strictly_lower = np.count_nonzero(population_scores < top_score - tolerance)
+        tied = np.count_nonzero(np.abs(population_scores - top_score) <= tolerance)
+        effective_rank = float(strictly_lower) + (float(tied) / 2.0)
+        percentile = effective_rank / float(size)
     else:
         percentile = 0.0
     confidence = max(0.0, min(percentile, 1.0))
