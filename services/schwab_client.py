@@ -18,7 +18,6 @@ import pandas as pd
 
 from config import settings
 from services import http_client
-from services.oauth_tokens import latest_refresh_token
 from prometheus_client import Counter, Histogram  # type: ignore
 
 logger = logging.getLogger(__name__)
@@ -67,6 +66,41 @@ _provider_disabled_counters: Dict[str, Counter] = {}
 _token_refresh_failure_by_code: Dict[str, Counter] = {}
 
 SENSITIVE_KEYS = {"refresh_token", "access_token", "client_secret", "id_token"}
+
+AUTH_FAILURE_COOLDOWN_SECONDS = 60.0
+
+
+def mask_tokens(value: str, *sources: Any) -> str:
+    """Mask sensitive token strings appearing in ``value``."""
+
+    if not value:
+        return value
+
+    masked = value
+    tokens: list[str] = []
+    for source in sources:
+        if isinstance(source, str):
+            candidate = _clean_str(source)
+            if candidate:
+                tokens.append(candidate)
+            continue
+        if isinstance(source, dict):
+            for key in SENSITIVE_KEYS:
+                payload_value = source.get(key)
+                if isinstance(payload_value, str):
+                    candidate = _clean_str(payload_value)
+                    if candidate:
+                        tokens.append(candidate)
+
+    for token in tokens:
+        if not token:
+            continue
+        if token in masked:
+            masked = masked.replace(token, "***")
+        encoded = urllib.parse.quote(token, safe="")
+        if encoded and encoded in masked:
+            masked = masked.replace(encoded, "***")
+    return masked
 
 
 def _clean_str(value: Optional[str]) -> str:
@@ -156,6 +190,10 @@ class SchwabClient:
         self._redirect_uri = _clean_str(settings.schwab_redirect_uri)
         settings.schwab_redirect_uri = self._redirect_uri
         self._refresh_token = _clean_str(settings.schwab_refresh_token)
+        self._token_path = _clean_str(getattr(settings, "schwab_token_path", ""))
+        self._persisted_tokens: Dict[str, Any] = {}
+        self._tokens_loaded = False
+        self._load_tokens_from_file()
         settings.schwab_refresh_token = self._refresh_token
         self._account_id = _clean_str(settings.schwab_account_id)
         settings.schwab_account_id = self._account_id
@@ -240,11 +278,12 @@ class SchwabClient:
 
         if auth_mode == "basic":
             basic_token = base64.b64encode(
-                f"{self._oauth_client_id}:{self._client_secret}".encode()
+                f"{self._client_id}:{self._client_secret}".encode()
             ).decode()
             headers = {
                 "Authorization": f"Basic {basic_token}",
                 "Content-Type": "application/x-www-form-urlencoded",
+                "Accept": "application/json",
             }
             request_kwargs = {
                 "data": dict(send_payload),
@@ -264,23 +303,17 @@ class SchwabClient:
                 if value is not None and value != ""
             )
             form_body = urllib.parse.urlencode(send_payload)
-            request_kwargs = {"content": form_body}
+            request_kwargs = {
+                "content": form_body,
+                "timeout": settings.scan_http_timeout,
+            }
 
-        body_keys = ",".join(send_payload.keys()) or ""
+        body_keys = ",".join(sorted(send_payload.keys())) or ""
         logger.info("schwab_refresh attempt mode=%s body_keys=%s", auth_mode, body_keys)
-
-        safe_payload = OrderedDict(
-            (
-                key,
-                "***REDACTED***"
-                if key in {"refresh_token", "client_secret"}
-                else value,
-            )
-            for key, value in send_payload.items()
-        )
+        encoded_payload = urllib.parse.urlencode(send_payload)
         logger.debug(
             "schwab_token_refresh_request body=%s",
-            urllib.parse.urlencode(safe_payload),
+            mask_tokens(encoded_payload, send_payload, self._client_secret),
         )
 
         t0 = time.monotonic()
@@ -288,7 +321,11 @@ class SchwabClient:
         duration = time.monotonic() - t0
         token_refresh_total.inc()
         if resp.status_code >= 400:
-            err = self._handle_refresh_failure(resp, duration)
+            err = self._handle_refresh_failure(
+                resp,
+                duration,
+                request_payload=dict(send_payload),
+            )
             _increment_refresh_error(resp.status_code)
             token_refresh_duration.observe(duration)
             raise err
@@ -328,16 +365,30 @@ class SchwabClient:
         return _Token(access_token=token, expires_at=expires_at)
 
     def _resolve_auth_mode(self) -> str:
-        mode = str(getattr(settings, "schwab_auth_mode", "basic") or "basic").lower()
+        mode = str(
+            getattr(settings, "schwab_refresh_mode", None)
+            or getattr(settings, "schwab_auth_mode", "basic")
+            or "basic"
+        ).lower()
         return "body" if mode == "body" else "basic"
 
-    def _format_failure_body(self, data: Dict[str, Any], resp: Any) -> str:
-        raw_text: Optional[str] = None
+    def _format_failure_body(
+        self,
+        data: Dict[str, Any],
+        resp: Any,
+        request_payload: Dict[str, Any],
+    ) -> str:
+        preview = ""
         try:
-            raw_text = resp.text[:512]
+            raw = resp.text or ""
         except Exception:  # pragma: no cover - defensive logging
-            raw_text = None
-        return self._sanitize_error_body(data, raw_text)
+            raw = ""
+        if raw:
+            preview = raw[:200]
+        elif data:
+            preview = self._sanitize_error_body(data, None)[:200]
+        sources: list[Any] = [data, request_payload, self._client_secret, self._refresh_token]
+        return mask_tokens(preview, *sources)
 
     def _sanitize_error_body(
         self, data: Dict[str, Any], raw_text: Optional[str]
@@ -357,8 +408,48 @@ class SchwabClient:
             return raw_text
         return "{}"
 
+    def _load_tokens_from_file(self, *, force: bool = False) -> None:
+        if self._tokens_loaded and not force:
+            return
+
+        self._tokens_loaded = True
+        path_value = self._token_path
+        if not path_value:
+            return
+
+        path = Path(path_value)
+        try:
+            text = path.read_text()
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            logger.warning(
+                "schwab_token_file_read_failed path=%s error=%s",
+                path,
+                exc,
+            )
+            return
+
+        try:
+            payload = json.loads(text)
+        except ValueError as exc:
+            logger.warning(
+                "schwab_token_file_invalid_json path=%s error=%s",
+                path,
+                exc,
+            )
+            return
+
+        if isinstance(payload, dict):
+            self._persisted_tokens = payload
+            refresh = _clean_str(str(payload.get("refresh_token") or ""))
+            if refresh:
+                self._refresh_token = refresh
+                settings.schwab_refresh_token = refresh
+                setattr(settings, "SCHWAB_REFRESH_TOKEN", refresh)
+
     def _write_token_file(self, payload: Dict[str, Any]) -> None:
-        path_value = getattr(settings, "schwab_token_path", "") or ""
+        path_value = self._token_path or ""
         if not path_value:
             return
         path = Path(path_value)
@@ -385,6 +476,8 @@ class SchwabClient:
             os.replace(tmp_name, path)
             os.chmod(path, 0o600)
             self._apply_owner(path)
+            self._persisted_tokens = dict(payload)
+            self._tokens_loaded = True
         except Exception as exc:
             logger.error("schwab_token_file_write_failed path=%s error=%s", path, exc)
             if tmp_fd is not None:
@@ -427,15 +520,21 @@ class SchwabClient:
             return f"{value}{suffix}"
         return value
 
-    def _handle_refresh_failure(self, resp: Any, duration: float) -> SchwabAuthError:
+    def _handle_refresh_failure(
+        self,
+        resp: Any,
+        duration: float,
+        *,
+        request_payload: Dict[str, Any],
+    ) -> SchwabAuthError:
         try:
             data = resp.json() if resp.content else {}
         except ValueError:
             data = {}
 
-        safe_body = self._format_failure_body(data, resp)
-        logger.error(
-            "schwab_refresh_failed status=%s body=%s",
+        safe_body = self._format_failure_body(data, resp, request_payload) or "{}"
+        logger.warning(
+            "schwab_refresh_error status=%s body=%s",
             resp.status_code,
             safe_body,
         )
@@ -452,9 +551,7 @@ class SchwabClient:
             error_code or "unknown",
             error_description or "unknown",
         )
-        if resp.status_code == 400 and (
-            "invalid_grant" in combined or "invalid_refresh_token" in combined
-        ):
+        if "invalid_grant" in combined or "invalid_refresh_token" in combined:
             logger.warning("schwab_refresh_token_invalid; clearing cached token")
             self._invalidate_refresh_token()
         reason = (error_code or f"status_{resp.status_code}").strip()
@@ -469,7 +566,17 @@ class SchwabClient:
             error_code=error_code or None,
             error_description=error_description or None,
         )
-        if resp.status_code == 400:
+        if resp.status_code == 401 and (
+            "invalid_client" in combined or "invalid_grant" in combined
+        ):
+            ttl = max(float(AUTH_FAILURE_COOLDOWN_SECONDS), 1.0)
+            self.disable(
+                reason=reason or "http_401",
+                status_code=resp.status_code,
+                ttl=ttl,
+                error=err,
+            )
+        elif resp.status_code == 400:
             self.disable(
                 reason=reason or "http_400",
                 status_code=resp.status_code,
@@ -532,13 +639,16 @@ class SchwabClient:
     def _current_refresh_token(self) -> str:
         if self._refresh_token:
             return self._refresh_token
-        if settings.schwab_refresh_token:
-            self._refresh_token = _clean_str(settings.schwab_refresh_token)
-            settings.schwab_refresh_token = self._refresh_token
+
+        self._load_tokens_from_file()
+        if self._refresh_token:
             return self._refresh_token
-        token = latest_refresh_token("schwab")
-        if token:
-            self._refresh_token = _clean_str(token)
+
+        env_token = _clean_str(getattr(settings, "schwab_refresh_token", ""))
+        if env_token:
+            self._refresh_token = env_token
+            settings.schwab_refresh_token = self._refresh_token
+            setattr(settings, "SCHWAB_REFRESH_TOKEN", self._refresh_token)
         return self._refresh_token
 
     async def _ensure_token(self) -> str:

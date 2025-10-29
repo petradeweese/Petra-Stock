@@ -108,6 +108,7 @@ development or testing. Ensure the file defines:
 - `SCHWAB_ACCOUNT_ID` – (optional) account ID to scope requests
 - `SCHWAB_REFRESH_TOKEN` – long-lived refresh token used to mint access tokens
 - `SCHWAB_TOKENS_PATH` – absolute path to the Schwab OAuth token JSON file
+- `SCHWAB_REFRESH_MODE` – refresh auth mode (`basic` for Basic auth header, or `body`)
 - `DATABASE_URL` – database connection string
 - `SCHWAB_INCLUDE_PREPOST` – include pre/post market bars when true
 - `DB_CACHE_TTL` – in-process DB cache TTL
@@ -124,6 +125,24 @@ development or testing. Ensure the file defines:
 The Schwab-backed provider automatically falls back to yfinance if Schwab
 returns an error, times out, or yields no data. Logs include the provider used
 for each fetch to simplify debugging.
+
+### Schwab OAuth refresh
+
+The refresh flow mirrors the working cURL recipe. When `SCHWAB_REFRESH_MODE`
+is left at the default `basic`, refresh requests include an `Authorization`
+header of the form `Basic base64(<SCHWAB_CLIENT_ID>:<SCHWAB_CLIENT_SECRET>)`
+and a `application/x-www-form-urlencoded` body containing only:
+
+```
+grant_type=refresh_token
+refresh_token=<current refresh token>
+redirect_uri=<SCHWAB_REDIRECT_URI>
+```
+
+Refresh tokens are sourced from the JSON at `SCHWAB_TOKENS_PATH` when
+available (falling back to the `SCHWAB_REFRESH_TOKEN` environment variable).
+Successful responses are atomically persisted back to the tokens file so new
+tokens take effect immediately without restarting the service.
 
 ## Backfill and ETL
 

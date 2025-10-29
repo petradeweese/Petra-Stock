@@ -8,6 +8,9 @@ from pathlib import Path
 
 
 def test_app_uses_env_file_for_schwab_settings(tmp_path):
+    token_path = tmp_path / "schwab_tokens.json"
+    token_path.write_text(json.dumps({"refresh_token": "refresh-from-path"}))
+
     env_file = tmp_path / "petra.env"
     env_file.write_text(
         "\n".join(
@@ -18,7 +21,7 @@ def test_app_uses_env_file_for_schwab_settings(tmp_path):
                 "SCHWAB_REDIRECT_URI=https://example.com/callback",
                 "SCHWAB_ACCOUNT_ID=00001234",
                 "SCHWAB_REFRESH_TOKEN=refresh-from-file",
-                "SCHWAB_TOKENS_PATH=/tmp/schwab_tokens.json",
+                f"SCHWAB_TOKENS_PATH={token_path}",
                 "",
             ]
         )
@@ -82,6 +85,6 @@ print(json.dumps(payload))
         "client_secret": "secret#with-comment-char",
         "redirect_uri": "https://example.com/callback",
         "account_id": "00001234",
-        "refresh_token": "refresh-from-file",
-        "tokens_path": "/tmp/schwab_tokens.json",
+        "refresh_token": "refresh-from-path",
+        "tokens_path": str(token_path),
     }

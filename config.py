@@ -10,6 +10,7 @@ from typing import Iterable, Tuple
 DEFAULT_DB_PATH = "/home/ubuntu/Petra-Stock/patternfinder.db"
 DEFAULT_DATABASE_URL = f"sqlite:////home/ubuntu/Petra-Stock/patternfinder.db"
 DEFAULT_SCHWAB_TOKENS_PATH = "/etc/petra/secure/schwab_tokens.json"
+_SCHWAB_REFRESH_MODE_DEFAULT = os.getenv("SCHWAB_AUTH_MODE", "basic")
 
 
 logger = logging.getLogger(__name__)
@@ -181,8 +182,10 @@ class Settings:
         or os.getenv("SCHWAB_TOKEN_PATH")
         or DEFAULT_SCHWAB_TOKENS_PATH
     )
-    schwab_auth_mode: str = _choice(
-        "SCHWAB_AUTH_MODE", "basic", allowed=("basic", "body")
+    schwab_refresh_mode: str = _choice(
+        "SCHWAB_REFRESH_MODE",
+        _SCHWAB_REFRESH_MODE_DEFAULT,
+        allowed=("basic", "body"),
     )
 
     # Scanner feature flags; all additive and safe to tweak at runtime.
@@ -213,6 +216,11 @@ class Settings:
     )
 
 
+    def __post_init__(self) -> None:
+        # Preserve legacy attribute name for downstream compatibility.
+        self.schwab_auth_mode = self.schwab_refresh_mode
+
+
 settings = Settings()
 
 _file_refresh_token = _load_refresh_token_from_file(settings.schwab_token_path)
@@ -227,6 +235,7 @@ if _file_refresh_token and _file_refresh_token != (
     os.environ["SCHWAB_REFRESH_TOKEN"] = _file_refresh_token
 
 setattr(settings, "SCHWAB_REFRESH_TOKEN", settings.schwab_refresh_token)
+setattr(settings, "SCHWAB_REFRESH_MODE", settings.schwab_refresh_mode)
 
 settings.alert_channel = settings.alert_channel or "Email"
 settings.alert_outcomes = (settings.alert_outcomes or "hit").lower()

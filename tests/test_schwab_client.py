@@ -1,5 +1,5 @@
 import asyncio
-import asyncio
+import base64
 import datetime as dt
 import grp
 import json
@@ -11,8 +11,10 @@ import urllib.parse
 import pytest
 
 from config import settings
-from services import schwab_client
+from services import data_provider, schwab_client
+from services.data_provider import _auth_cooldown_state, _clear_auth_cooldown
 from services.schwab_client import SchwabAPIError
+import pandas as pd
 
 
 class DummyResponse:
@@ -29,19 +31,31 @@ class DummyResponse:
 def test_refresh_flow(monkeypatch, tmp_path):
     token_path = tmp_path / "schwab_tokens.json"
     monkeypatch.setattr(settings, "schwab_token_path", str(token_path), raising=False)
-    monkeypatch.setattr(settings, "schwab_auth_mode", "basic", raising=False)
+    monkeypatch.setattr(settings, "schwab_refresh_mode", "basic", raising=False)
+    monkeypatch.setattr(settings, "schwab_client_id", "client123", raising=False)
+    monkeypatch.setattr(settings, "schwab_client_secret", "secret456", raising=False)
+    monkeypatch.setattr(settings, "schwab_redirect_uri", "https://example/cb", raising=False)
+    monkeypatch.setattr(settings, "schwab_refresh_token", "seed-token", raising=False)
 
     captured: list[dict] = []
 
     async def fake_request(method, url, **kwargs):
         captured.append(
             {
+                "method": method,
+                "url": url,
                 "data": kwargs.get("data"),
-                "content": kwargs.get("content"),
                 "headers": kwargs.get("headers", {}),
             }
         )
-        return DummyResponse(200, {"access_token": "abc", "expires_in": 600})
+        return DummyResponse(
+            200,
+            {
+                "access_token": "abc",
+                "refresh_token": "fresh-token",
+                "expires_in": 600,
+            },
+        )
 
     monkeypatch.setattr(schwab_client.http_client, "request", fake_request)
     client = schwab_client.SchwabClient()
@@ -50,6 +64,7 @@ def test_refresh_flow(monkeypatch, tmp_path):
     assert captured
     assert len(captured) == 1
     request = captured[0]
+    assert request["method"] == "POST"
     assert request["data"]
     parsed = request["data"]
     assert set(parsed.keys()) == {
@@ -57,12 +72,11 @@ def test_refresh_flow(monkeypatch, tmp_path):
         "refresh_token",
         "redirect_uri",
     }
-    assert parsed.get("refresh_token") == settings.schwab_refresh_token
-    assert parsed.get("grant_type") == "refresh_token"
-    assert "client_id" not in parsed
-    assert "client_secret" not in parsed
+    assert parsed["refresh_token"] == "seed-token"
+    assert parsed["grant_type"] == "refresh_token"
     auth_header = request["headers"].get("Authorization", "")
-    assert auth_header.startswith("Basic ")
+    expected_basic = base64.b64encode(b"client123:secret456").decode()
+    assert auth_header == f"Basic {expected_basic}"
     assert (
         request["headers"].get("Content-Type")
         == "application/x-www-form-urlencoded"
@@ -72,10 +86,13 @@ def test_refresh_flow(monkeypatch, tmp_path):
     remaining = token.expires_at - dt.datetime.now(dt.timezone.utc)
     assert abs(remaining.total_seconds() - 540) < 5  # 60s skew applied
 
+    assert client._current_refresh_token() == "fresh-token"
+    assert settings.schwab_refresh_token == "fresh-token"
+
     assert token_path.exists()
     stored = json.loads(token_path.read_text())
     assert stored["access_token"] == "abc"
-    assert stored["refresh_token"] == settings.schwab_refresh_token
+    assert stored["refresh_token"] == "fresh-token"
     assert "obtained_at" in stored
     stats = os.stat(token_path)
     assert stat.S_IMODE(stats.st_mode) == 0o600
@@ -91,7 +108,11 @@ def test_refresh_flow(monkeypatch, tmp_path):
 def test_refresh_flow_body_mode(monkeypatch, tmp_path):
     token_path = tmp_path / "schwab_tokens.json"
     monkeypatch.setattr(settings, "schwab_token_path", str(token_path), raising=False)
-    monkeypatch.setattr(settings, "schwab_auth_mode", "body", raising=False)
+    monkeypatch.setattr(settings, "schwab_refresh_mode", "body", raising=False)
+    monkeypatch.setattr(settings, "schwab_client_id", "client123", raising=False)
+    monkeypatch.setattr(settings, "schwab_client_secret", "secret456", raising=False)
+    monkeypatch.setattr(settings, "schwab_redirect_uri", "https://example/cb", raising=False)
+    monkeypatch.setattr(settings, "schwab_refresh_token", "seed-token", raising=False)
 
     captured: list[dict] = []
 
@@ -102,7 +123,9 @@ def test_refresh_flow_body_mode(monkeypatch, tmp_path):
                 "headers": kwargs.get("headers", {}),
             }
         )
-        return DummyResponse(200, {"access_token": "def", "expires_in": 300})
+        return DummyResponse(
+            200, {"access_token": "def", "expires_in": 300, "refresh_token": "seed-token"}
+        )
 
     monkeypatch.setattr(schwab_client.http_client, "request", fake_request)
     client = schwab_client.SchwabClient()
@@ -115,6 +138,23 @@ def test_refresh_flow_body_mode(monkeypatch, tmp_path):
     assert parsed.get("client_secret", [None])[0] == settings.schwab_client_secret
     assert "Authorization" not in request["headers"]
     assert token.access_token == "def"
+
+
+def test_refresh_prefers_token_file(monkeypatch, tmp_path):
+    token_path = tmp_path / "schwab_tokens.json"
+    payload = {"refresh_token": "file-token", "access_token": "cached"}
+    token_path.write_text(json.dumps(payload))
+    monkeypatch.setattr(settings, "schwab_token_path", str(token_path), raising=False)
+    monkeypatch.setattr(settings, "schwab_refresh_token", "env-token", raising=False)
+    monkeypatch.setattr(settings, "schwab_refresh_mode", "basic", raising=False)
+    monkeypatch.setattr(settings, "schwab_client_id", "client123", raising=False)
+    monkeypatch.setattr(settings, "schwab_client_secret", "secret456", raising=False)
+    monkeypatch.setattr(settings, "schwab_redirect_uri", "https://example/cb", raising=False)
+
+    client = schwab_client.SchwabClient()
+
+    assert client._current_refresh_token() == "file-token"
+    assert settings.schwab_refresh_token == "file-token"
 
 
 def test_refresh_invalid_grant_triggers_reauth(monkeypatch):
@@ -168,6 +208,61 @@ def test_refresh_failure_cached(monkeypatch):
     finally:
         settings.schwab_refresh_token = original_token
         client.set_refresh_token(original_token)
+
+
+def test_refresh_401_sets_cooldown_and_fallback(monkeypatch, tmp_path):
+    token_path = tmp_path / "schwab_tokens.json"
+    monkeypatch.setattr(settings, "schwab_token_path", str(token_path), raising=False)
+    monkeypatch.setattr(settings, "schwab_refresh_mode", "basic", raising=False)
+    monkeypatch.setattr(settings, "schwab_client_id", "client123", raising=False)
+    monkeypatch.setattr(settings, "schwab_client_secret", "secret456", raising=False)
+    monkeypatch.setattr(settings, "schwab_redirect_uri", "https://example/cb", raising=False)
+    monkeypatch.setattr(settings, "schwab_refresh_token", "seed-token", raising=False)
+
+    _clear_auth_cooldown()
+
+    async def fake_request(method, url, **kwargs):
+        assert method == "POST"
+        return DummyResponse(401, {"error": "invalid_client"})
+
+    monkeypatch.setattr(schwab_client.http_client, "request", fake_request)
+
+    fallback_index = pd.DatetimeIndex([pd.Timestamp("2024-01-01", tz="UTC")])
+    fallback_df = pd.DataFrame(
+        {
+            "Open": [1.0],
+            "High": [1.0],
+            "Low": [1.0],
+            "Close": [1.0],
+            "Adj Close": [1.0],
+            "Volume": [0],
+        },
+        index=fallback_index,
+    )
+
+    async def fake_yfinance(symbol, start, end, interval):
+        return fallback_df.copy()
+
+    monkeypatch.setattr(data_provider, "_fetch_yfinance", fake_yfinance)
+
+    client = schwab_client.SchwabClient()
+    start = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
+    end = start + dt.timedelta(days=1)
+
+    df, provider = asyncio.run(
+        data_provider._fetch_single("SPY", start, end, interval="1d")
+    )
+
+    assert provider == "yfinance"
+    assert not df.empty
+    assert not token_path.exists()
+
+    cooldown_active, reason, remaining = _auth_cooldown_state()
+    assert cooldown_active
+    assert reason in {"invalid_client", "http_401"}
+    assert remaining >= 55
+
+    _clear_auth_cooldown()
 
 
 def test_price_history_happy_path(monkeypatch):
