@@ -18,6 +18,7 @@ from services import price_store
 from services import schwab_client
 from services import http_client
 from services.schwab_client import (
+    AUTH_FAILURE_COOLDOWN_SECONDS,
     HTTP_400_DISABLE_SECONDS,
     SchwabAPIError,
     SchwabAuthError,
@@ -916,10 +917,15 @@ async def _fetch_single(
                     reason_label = "http_400"
                 error_labels.append(reason_label)
                 base_ttl = _auth_backoff_seconds()
-                ttl = max(
-                    base_ttl,
-                    float(HTTP_400_DISABLE_SECONDS) if status == 400 else base_ttl,
-                )
+                if status == 401 and reason_label.lower() in {
+                    "invalid_client",
+                    "invalid_grant",
+                }:
+                    ttl = max(float(AUTH_FAILURE_COOLDOWN_SECONDS), 1.0)
+                elif status == 400:
+                    ttl = max(base_ttl, float(HTTP_400_DISABLE_SECONDS))
+                else:
+                    ttl = base_ttl
                 _start_auth_cooldown(
                     reason_label,
                     status=status,
