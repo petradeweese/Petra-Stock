@@ -9,6 +9,7 @@ import pwd
 import tempfile
 import time
 import urllib.parse
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -66,6 +67,12 @@ _provider_disabled_counters: Dict[str, Counter] = {}
 _token_refresh_failure_by_code: Dict[str, Counter] = {}
 
 SENSITIVE_KEYS = {"refresh_token", "access_token", "client_secret", "id_token"}
+
+
+def _clean_str(value: Optional[str]) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
 
 
 def _normalize_metric_key(value: str) -> str:
@@ -141,12 +148,17 @@ class SchwabClient:
     """Thin async client for the Charles Schwab market data API."""
 
     def __init__(self) -> None:
-        self._client_id = settings.schwab_client_id
+        self._client_id = _clean_str(settings.schwab_client_id)
+        settings.schwab_client_id = self._client_id
         self._oauth_client_id = self._format_oauth_client_id(self._client_id)
-        self._client_secret = settings.schwab_client_secret
-        self._redirect_uri = settings.schwab_redirect_uri
-        self._refresh_token = settings.schwab_refresh_token
-        self._account_id = settings.schwab_account_id
+        self._client_secret = _clean_str(settings.schwab_client_secret)
+        settings.schwab_client_secret = self._client_secret
+        self._redirect_uri = _clean_str(settings.schwab_redirect_uri)
+        settings.schwab_redirect_uri = self._redirect_uri
+        self._refresh_token = _clean_str(settings.schwab_refresh_token)
+        settings.schwab_refresh_token = self._refresh_token
+        self._account_id = _clean_str(settings.schwab_account_id)
+        settings.schwab_account_id = self._account_id
         self._token: Optional[_Token] = None
         self._token_lock = asyncio.Lock()
         self._lock_loop: Optional[asyncio.AbstractEventLoop] = None
@@ -188,7 +200,7 @@ class SchwabClient:
                 "Token refresh currently disabled", status_code=status
             )
 
-        refresh_token = self._current_refresh_token()
+        refresh_token = _clean_str(self._current_refresh_token())
         if not all(
             [
                 self._client_id,
@@ -199,7 +211,7 @@ class SchwabClient:
         ):
             raise SchwabAuthError("Missing Schwab OAuth configuration")
 
-        redirect_uri = settings.schwab_redirect_uri or self._redirect_uri
+        redirect_uri = _clean_str(settings.schwab_redirect_uri) or self._redirect_uri
         if redirect_uri != self._redirect_uri and redirect_uri:
             logger.info(
                 "schwab_refresh_redirect_uri_updated old=%s new=%s",
@@ -209,51 +221,70 @@ class SchwabClient:
             self._redirect_uri = redirect_uri
 
         auth_mode = self._resolve_auth_mode()
-        logger.info(
-            "schwab_refresh attempt mode=%s endpoint=%s", auth_mode, TOKEN_URL
+        base_payload = OrderedDict(
+            (
+                ("grant_type", "refresh_token"),
+                ("refresh_token", refresh_token),
+                ("redirect_uri", self._redirect_uri),
+            )
+        )
+        payload = OrderedDict(
+            (key, value)
+            for key, value in base_payload.items()
+            if value is not None and value != ""
         )
 
-        base_payload = {
-            "grant_type": "refresh_token",
-            "refresh_token": refresh_token,
-            "redirect_uri": self._redirect_uri,
-        }
-        headers = {
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Accept": "application/json",
-        }
+        send_payload: OrderedDict[str, str] = payload
+        headers: Dict[str, str]
+        request_kwargs: Dict[str, Any]
 
         if auth_mode == "basic":
             basic_token = base64.b64encode(
                 f"{self._oauth_client_id}:{self._client_secret}".encode()
             ).decode()
-            headers["Authorization"] = f"Basic {basic_token}"
-            payload = base_payload
+            headers = {
+                "Authorization": f"Basic {basic_token}",
+                "Content-Type": "application/x-www-form-urlencoded",
+            }
+            request_kwargs = {
+                "data": dict(send_payload),
+                "timeout": settings.scan_http_timeout,
+            }
         else:
-            payload = dict(base_payload)
-            payload["client_id"] = self._oauth_client_id
-            payload["client_secret"] = self._client_secret
+            headers = {
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Accept": "application/json",
+            }
+            body_payload = OrderedDict(send_payload)
+            body_payload["client_id"] = self._oauth_client_id
+            body_payload["client_secret"] = self._client_secret
+            send_payload = OrderedDict(
+                (key, value)
+                for key, value in body_payload.items()
+                if value is not None and value != ""
+            )
+            form_body = urllib.parse.urlencode(send_payload)
+            request_kwargs = {"content": form_body}
 
-        payload = {k: v for k, v in payload.items() if v is not None and v != ""}
+        body_keys = ",".join(send_payload.keys()) or ""
+        logger.info("schwab_refresh attempt mode=%s body_keys=%s", auth_mode, body_keys)
 
-        form_body = urllib.parse.urlencode(payload)
-        safe_payload = {
-            key: (
+        safe_payload = OrderedDict(
+            (
+                key,
                 "***REDACTED***"
                 if key in {"refresh_token", "client_secret"}
-                else value
+                else value,
             )
-            for key, value in payload.items()
-        }
+            for key, value in send_payload.items()
+        )
         logger.debug(
             "schwab_token_refresh_request body=%s",
             urllib.parse.urlencode(safe_payload),
         )
 
         t0 = time.monotonic()
-        resp = await http_client.request(
-            "POST", TOKEN_URL, content=form_body, headers=headers
-        )
+        resp = await http_client.request("POST", TOKEN_URL, headers=headers, **request_kwargs)
         duration = time.monotonic() - t0
         token_refresh_total.inc()
         if resp.status_code >= 400:
@@ -502,11 +533,12 @@ class SchwabClient:
         if self._refresh_token:
             return self._refresh_token
         if settings.schwab_refresh_token:
-            self._refresh_token = settings.schwab_refresh_token
+            self._refresh_token = _clean_str(settings.schwab_refresh_token)
+            settings.schwab_refresh_token = self._refresh_token
             return self._refresh_token
         token = latest_refresh_token("schwab")
         if token:
-            self._refresh_token = token
+            self._refresh_token = _clean_str(token)
         return self._refresh_token
 
     async def _ensure_token(self) -> str:
@@ -561,7 +593,7 @@ class SchwabClient:
         return self._last_status
 
     def set_refresh_token(self, refresh_token: str) -> None:
-        self._refresh_token = refresh_token or ""
+        self._refresh_token = _clean_str(refresh_token)
         self.clear_cached_token()
         self._clear_disable()
 

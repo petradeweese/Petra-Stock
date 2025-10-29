@@ -36,7 +36,8 @@ def test_refresh_flow(monkeypatch, tmp_path):
     async def fake_request(method, url, **kwargs):
         captured.append(
             {
-                "content": kwargs.get("content", ""),
+                "data": kwargs.get("data"),
+                "content": kwargs.get("content"),
                 "headers": kwargs.get("headers", {}),
             }
         )
@@ -47,13 +48,25 @@ def test_refresh_flow(monkeypatch, tmp_path):
     token = asyncio.run(client._refresh_access_token())
 
     assert captured
+    assert len(captured) == 1
     request = captured[0]
-    parsed = urllib.parse.parse_qs(request["content"])
-    assert parsed.get("refresh_token", [None])[0] == settings.schwab_refresh_token
+    assert request["data"]
+    parsed = request["data"]
+    assert set(parsed.keys()) == {
+        "grant_type",
+        "refresh_token",
+        "redirect_uri",
+    }
+    assert parsed.get("refresh_token") == settings.schwab_refresh_token
+    assert parsed.get("grant_type") == "refresh_token"
     assert "client_id" not in parsed
     assert "client_secret" not in parsed
     auth_header = request["headers"].get("Authorization", "")
     assert auth_header.startswith("Basic ")
+    assert (
+        request["headers"].get("Content-Type")
+        == "application/x-www-form-urlencoded"
+    )
 
     assert token.access_token == "abc"
     remaining = token.expires_at - dt.datetime.now(dt.timezone.utc)
