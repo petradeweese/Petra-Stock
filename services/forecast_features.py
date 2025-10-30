@@ -27,8 +27,9 @@ logger = logging.getLogger(__name__)
 
 MINUTE_INTERVAL = "5m"
 
-MIN_BARS_RTH = max(0, int(os.getenv("FORECAST_MIN_RTH_BARS", "20")))
 MIN_BARS_PREOPEN = max(0, int(os.getenv("FORECAST_MIN_PREOPEN_BARS", "30")))
+MIN_BARS_ACTIVE_RTH = max(0, int(os.getenv("FORECAST_MIN_BARS_ACTIVE_RTH", "6")))
+REQUIRE_CONTIG_RTH = bool(int(os.getenv("FORECAST_REQUIRE_CONTIG_RTH", "0")))
 _SESSION_PADDING = dt.timedelta(minutes=1)
 
 # (frame label, pandas frequency string, number of bars used for feature window)
@@ -132,7 +133,7 @@ def _previous_session_date(
 
 
 def _resolve_session_context(
-    asof_utc: dt.datetime, data: pd.DataFrame
+    ticker: str, asof_utc: dt.datetime, data: pd.DataFrame
 ) -> tuple[dt.datetime, dt.date, Optional[str], dict[str, int]]:
     if data.empty or not isinstance(data.index, pd.DatetimeIndex):
         asof_day = asof_utc.astimezone(TZ).date()
@@ -146,35 +147,77 @@ def _resolve_session_context(
     session_day = asof_et.date()
     session_open_et, session_close_et = _session_bounds(session_day)
     session_open_utc = session_open_et.astimezone(dt.timezone.utc)
+    session_close_utc = session_close_et.astimezone(dt.timezone.utc)
 
-    before_mask = index_et < asof_et
+    before_mask = index_et <= asof_et
     history = index_et[before_mask]
     if history.empty:
         return asof_utc, session_day, None, {"premarket": 0, "rth": 0}
 
     day_start_et = dt.datetime.combine(session_day, dt.time(0, 0), tzinfo=TZ)
+    rth_window_end = min(asof_et, session_close_et)
+    today_mask = (history >= day_start_et) & (history <= rth_window_end)
     pre_mask = (history >= day_start_et) & (history < session_open_et)
-    rth_mask = (history >= session_open_et) & (history < session_close_et)
+    rth_mask = (history >= session_open_et) & (history <= rth_window_end)
     pre_count = int(np.count_nonzero(pre_mask))
     rth_count = int(np.count_nonzero(rth_mask))
+    rth_sufficient = int(rth_count >= MIN_BARS_ACTIVE_RTH)
+    bars_ext = max(int(np.count_nonzero(today_mask)) - rth_count, 0)
 
-    reason: Optional[str] = None
+    contiguous = False
+    if rth_count > 0:
+        rth_times = history[rth_mask].sort_values()
+        contiguous = True
+        expected = session_open_et + pd.Timedelta(minutes=5)
+        for ts in rth_times:
+            if ts != expected:
+                contiguous = False
+                break
+            expected += pd.Timedelta(minutes=5)
+
+    logger.info(
+        "forecast rth_coverage symbol=%s bars_rth=%d bars_ext=%d asof=%s",
+        ticker.upper(),
+        rth_count,
+        bars_ext,
+        asof_et.isoformat(),
+    )
+
+    fallback_reason: Optional[str] = None
     if asof_utc < session_open_utc:
         if pre_count < MIN_BARS_PREOPEN:
-            reason = "preopen_insufficient"
-    elif rth_count < MIN_BARS_RTH:
-        reason = "rth_insufficient"
+            fallback_reason = "market_closed"
+    elif asof_utc >= session_close_utc:
+        fallback_reason = "market_closed"
+    elif rth_count == 0:
+        fallback_reason = "no_rth_bars"
+    elif REQUIRE_CONTIG_RTH and not contiguous:
+        fallback_reason = "no_rth_bars"
 
-    if reason:
+    if fallback_reason:
         prev_day = _previous_session_date(index_et, session_day)
         if prev_day is not None:
             _, prev_close_et = _session_bounds(prev_day)
             prev_close_utc = prev_close_et.astimezone(dt.timezone.utc)
             feature_asof = min(asof_utc, prev_close_utc + _SESSION_PADDING)
-            return feature_asof, prev_day, reason, {"premarket": pre_count, "rth": rth_count}
-        reason = None
+            logger.info(
+                "forecast fallback=last_completed_session symbol=%s reason=%s",
+                ticker.upper(),
+                fallback_reason,
+            )
+            return (
+                feature_asof,
+                prev_day,
+                fallback_reason,
+                {"premarket": pre_count, "rth": rth_count, "rth_sufficient": rth_sufficient},
+            )
+        fallback_reason = None
 
-    return asof_utc, session_day, reason, {"premarket": pre_count, "rth": rth_count}
+    return asof_utc, session_day, fallback_reason, {
+        "premarket": pre_count,
+        "rth": rth_count,
+        "rth_sufficient": rth_sufficient,
+    }
 
 
 def _log_token_path_status() -> None:
@@ -711,7 +754,9 @@ def build_state(ticker: str, asof: dt.datetime) -> Dict[str, object]:
         }
 
     feature_asof_utc, session_date, session_reason, session_counts = _resolve_session_context(
-        asof_utc, cache.data
+        ticker,
+        asof_utc,
+        cache.data,
     )
     if session_reason:
         logger.info(
