@@ -19,13 +19,17 @@ from services import price_store
 from services import schwab_client
 from services.data_provider import fetch_bars
 from services.async_utils import run_coro
-from utils import OPEN_TIME, TZ
+from utils import CLOSE_TIME, OPEN_TIME, TZ
 
 
 logger = logging.getLogger(__name__)
 
 
 MINUTE_INTERVAL = "5m"
+
+MIN_BARS_RTH = max(0, int(os.getenv("FORECAST_MIN_RTH_BARS", "20")))
+MIN_BARS_PREOPEN = max(0, int(os.getenv("FORECAST_MIN_PREOPEN_BARS", "30")))
+_SESSION_PADDING = dt.timedelta(minutes=1)
 
 # (frame label, pandas frequency string, number of bars used for feature window)
 FRAME_ORDER: List[Tuple[str, str, int]] = [
@@ -102,6 +106,75 @@ def _token_path_status() -> tuple[bool, str | None, str | None]:
     if not os.access(candidate, os.R_OK):
         return False, "unreadable", resolved
     return True, None, resolved
+
+
+def _session_bounds(day: dt.date) -> tuple[dt.datetime, dt.datetime]:
+    open_dt = dt.datetime.combine(day, OPEN_TIME, tzinfo=TZ)
+    close_dt = dt.datetime.combine(day, CLOSE_TIME, tzinfo=TZ)
+    return open_dt, close_dt
+
+
+def _previous_session_date(
+    index_et: pd.DatetimeIndex, before_day: dt.date
+) -> Optional[dt.date]:
+    if index_et.empty:
+        return None
+    candidate = before_day - dt.timedelta(days=1)
+    attempts = 0
+    while attempts < 10:
+        open_dt, close_dt = _session_bounds(candidate)
+        window_mask = (index_et >= open_dt) & (index_et < close_dt)
+        if bool(window_mask.any()):
+            return candidate
+        candidate -= dt.timedelta(days=1)
+        attempts += 1
+    return None
+
+
+def _resolve_session_context(
+    asof_utc: dt.datetime, data: pd.DataFrame
+) -> tuple[dt.datetime, dt.date, Optional[str], dict[str, int]]:
+    if data.empty or not isinstance(data.index, pd.DatetimeIndex):
+        asof_day = asof_utc.astimezone(TZ).date()
+        return asof_utc, asof_day, None, {"premarket": 0, "rth": 0}
+
+    index = data.index
+    if index.tz is None:
+        index = index.tz_localize("UTC")
+    index_et = index.tz_convert(TZ)
+    asof_et = asof_utc.astimezone(TZ)
+    session_day = asof_et.date()
+    session_open_et, session_close_et = _session_bounds(session_day)
+    session_open_utc = session_open_et.astimezone(dt.timezone.utc)
+
+    before_mask = index_et < asof_et
+    history = index_et[before_mask]
+    if history.empty:
+        return asof_utc, session_day, None, {"premarket": 0, "rth": 0}
+
+    day_start_et = dt.datetime.combine(session_day, dt.time(0, 0), tzinfo=TZ)
+    pre_mask = (history >= day_start_et) & (history < session_open_et)
+    rth_mask = (history >= session_open_et) & (history < session_close_et)
+    pre_count = int(np.count_nonzero(pre_mask))
+    rth_count = int(np.count_nonzero(rth_mask))
+
+    reason: Optional[str] = None
+    if asof_utc < session_open_utc:
+        if pre_count < MIN_BARS_PREOPEN:
+            reason = "preopen_insufficient"
+    elif rth_count < MIN_BARS_RTH:
+        reason = "rth_insufficient"
+
+    if reason:
+        prev_day = _previous_session_date(index_et, session_day)
+        if prev_day is not None:
+            _, prev_close_et = _session_bounds(prev_day)
+            prev_close_utc = prev_close_et.astimezone(dt.timezone.utc)
+            feature_asof = min(asof_utc, prev_close_utc + _SESSION_PADDING)
+            return feature_asof, prev_day, reason, {"premarket": pre_count, "rth": rth_count}
+        reason = None
+
+    return asof_utc, session_day, reason, {"premarket": pre_count, "rth": rth_count}
 
 
 def _log_token_path_status() -> None:
@@ -613,14 +686,18 @@ def build_state(ticker: str, asof: dt.datetime) -> Dict[str, object]:
         raise TypeError("asof must be a datetime")
     asof_utc = ensure_utc(asof)
 
-    session_day = asof_utc.astimezone(TZ).date()
-    history_start_day = session_day - dt.timedelta(days=LOOKBACK_DAYS)
+    requested_session_day = asof_utc.astimezone(TZ).date()
+    history_start_day = requested_session_day - dt.timedelta(days=LOOKBACK_DAYS)
     history_start = dt.datetime.combine(history_start_day, OPEN_TIME, tzinfo=TZ).astimezone(
         dt.timezone.utc
     )
 
     cache = _load_cached_history(ticker, history_start, asof_utc)
     if cache is None or cache.data.empty:
+        base_context = {
+            "session_date": requested_session_day.isoformat(),
+            "requested_asof": asof_utc.isoformat(),
+        }
         return {
             "ticker": ticker.upper(),
             "asof": asof_utc.isoformat(),
@@ -629,9 +706,23 @@ def build_state(ticker: str, asof: dt.datetime) -> Dict[str, object]:
             "frames": {frame: {"n": 0} for frame, _, _ in FRAME_ORDER},
             "layout": {},
             "feature_order": FEATURE_ORDER,
-            "context": {},
+            "context": base_context,
             "sources": {"bars": (cache.source if cache else "db_miss")},
         }
+
+    feature_asof_utc, session_date, session_reason, session_counts = _resolve_session_context(
+        asof_utc, cache.data
+    )
+    if session_reason:
+        logger.info(
+            "forecast session_rollover ticker=%s requested_session=%s session_date=%s reason=%s premarket_bars=%d rth_bars=%d",
+            ticker.upper(),
+            requested_session_day.isoformat(),
+            session_date.isoformat(),
+            session_reason,
+            session_counts.get("premarket", 0),
+            session_counts.get("rth", 0),
+        )
 
     _ensure_aggregated_frames(ticker, cache)
 
@@ -648,7 +739,9 @@ def build_state(ticker: str, asof: dt.datetime) -> Dict[str, object]:
     offset = 0
     for frame, freq, bars in FRAME_ORDER:
         aggregated = cache.aggregated.get(frame, pd.DataFrame()) if cache.aggregated else pd.DataFrame()
-        result = _frame_features(aggregated, frame, freq, bars, asof_utc, iv_rank=iv_rank_val)
+        result = _frame_features(
+            aggregated, frame, freq, bars, feature_asof_utc, iv_rank=iv_rank_val
+        )
         frames[frame] = {
             "raw": result.raw,
             "z": result.zscores,
@@ -672,11 +765,16 @@ def build_state(ticker: str, asof: dt.datetime) -> Dict[str, object]:
         spy_30m = spy_cache.aggregated.get("30m", pd.DataFrame())
         spy_1d = spy_cache.aggregated.get("1d", pd.DataFrame())
         if spy_5m is not None:
-            context["spy_5m_cum_return"] = _context_returns(spy_5m, 12, asof_utc)
+            context["spy_5m_cum_return"] = _context_returns(spy_5m, 12, feature_asof_utc)
         if spy_30m is not None:
-            context["spy_30m_cum_return"] = _context_returns(spy_30m, 6, asof_utc)
+            context["spy_30m_cum_return"] = _context_returns(spy_30m, 6, feature_asof_utc)
         if spy_1d is not None:
-            context["spy_1d_cum_return"] = _context_returns(spy_1d, 5, asof_utc)
+            context["spy_1d_cum_return"] = _context_returns(spy_1d, 5, feature_asof_utc)
+
+    context["session_date"] = session_date.isoformat()
+    context["requested_asof"] = asof_utc.isoformat()
+    if session_reason:
+        context["session_roll_reason"] = session_reason
 
     bars_source = cache.source or "none"
     spy_source = spy_cache.source if spy_cache is not None else "none"
@@ -688,8 +786,8 @@ def build_state(ticker: str, asof: dt.datetime) -> Dict[str, object]:
 
     return {
         "ticker": ticker.upper(),
-        "asof": asof_utc.isoformat(),
-        "tod_minute": tod_minute(asof_utc),
+        "asof": feature_asof_utc.isoformat(),
+        "tod_minute": tod_minute(feature_asof_utc),
         "vec": vector,
         "frames": frames,
         "layout": layout,
