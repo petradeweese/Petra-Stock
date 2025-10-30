@@ -3968,6 +3968,7 @@ def settings_save(
     mail_from: str = Form(""),
     recipients: str = Form(""),
     scanner_recipients: str = Form(""),
+    forecast_recipients: str = Form(""),
     scheduler_enabled: int = Form(1),
     throttle_minutes: int = Form(60),
     alert_outcomes: str = Form("hit"),
@@ -4025,17 +4026,23 @@ def settings_save(
     def _clean(raw: str, *, allow_sms: bool) -> str:
         parts = [r.strip() for r in raw.split(",") if r.strip()]
         cleaned: list[str] = []
+        seen: set[str] = set()
         for r in parts:
             addr = parseaddr(r)[1]
             if "@" not in addr:
                 continue
             if not allow_sms and is_carrier_address(addr):
                 continue
+            key = addr.lower()
+            if key in seen:
+                continue
+            seen.add(key)
             cleaned.append(addr)
         return ",".join(cleaned)
 
     clean_fav = _clean(recipients, allow_sms=True)
     clean_scan = _clean(scanner_recipients, allow_sms=False)
+    clean_forecast = _clean(forecast_recipients, allow_sms=False)
 
     try:
         port_value = int(smtp_port)
@@ -4077,7 +4084,7 @@ def settings_save(
     db.execute(
         """
         UPDATE settings
-           SET smtp_host=?, smtp_port=?, smtp_user=?, smtp_pass=?, mail_from=?, recipients=?, scanner_recipients=?, alert_outcomes=?, forward_recency_mode=?, forward_recency_halflife_days=?, scheduler_enabled=?, throttle_minutes=?
+           SET smtp_host=?, smtp_port=?, smtp_user=?, smtp_pass=?, mail_from=?, recipients=?, scanner_recipients=?, forecast_recipients=?, alert_outcomes=?, forward_recency_mode=?, forward_recency_halflife_days=?, scheduler_enabled=?, throttle_minutes=?
          WHERE id=1
         """,
         (
@@ -4088,6 +4095,7 @@ def settings_save(
             mail_from.strip(),
             clean_fav,
             clean_scan,
+            clean_forecast,
             outcomes_choice,
             mode_choice,
             half_life_value,

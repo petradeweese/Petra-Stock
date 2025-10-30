@@ -40,12 +40,14 @@ def send_email_smtp(
     body: str,
     *,
     context: Optional[Mapping[str, object]] = None,
+    raise_exceptions: bool = False,
 ) -> Dict[str, Any]:
     """Send an email using SMTP with STARTTLS.
 
     Parameters mirror the fields stored in the ``settings`` table.  The
     connection uses STARTTLS which is compatible with providers such as Gmail
-    when ``port`` is 587.
+    when ``port`` is 587.  When ``raise_exceptions`` is true ``SMTPException``
+    instances are re-raised to allow callers to implement retry logic.
     """
 
     display_name, from_email = parseaddr(mail_from)
@@ -71,6 +73,8 @@ def send_email_smtp(
             server.send_message(msg, from_addr=from_email or user, to_addrs=to)
     except Exception as exc:  # pragma: no cover - network interaction
         _log_delivery(False, to, context)
+        if raise_exceptions and isinstance(exc, smtplib.SMTPException):
+            raise
         return {"ok": False, "error": str(exc)}
 
     _log_delivery(True, to, context)

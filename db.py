@@ -91,6 +91,7 @@ SCHEMA = [
         mail_from TEXT,
         recipients TEXT,
         scanner_recipients TEXT,
+        forecast_recipients TEXT,
         alert_outcomes TEXT DEFAULT 'hit',
         forward_recency_mode TEXT DEFAULT 'off',
         forward_recency_halflife_days REAL DEFAULT 30,
@@ -112,13 +113,14 @@ SCHEMA = [
         mail_from,
         recipients,
         scanner_recipients,
+        forecast_recipients,
         scheduler_enabled,
         throttle_minutes,
         last_boundary,
         last_run_at
       )
     VALUES
-      (1, '', 587, '', '', '', '', '', 0, 60, '', '');
+      (1, '', 587, '', '', '', '', '', '', 0, 60, '', '');
     """,
     # Favorites
     """
@@ -434,6 +436,9 @@ def _ensure_scanner_column(db: sqlite3.Cursor) -> None:
     cols = [r[1] for r in db.fetchall()]
     if "scanner_recipients" not in cols:
         db.execute("ALTER TABLE settings ADD COLUMN scanner_recipients TEXT DEFAULT ''")
+        db.connection.commit()
+    if "forecast_recipients" not in cols:
+        db.execute("ALTER TABLE settings ADD COLUMN forecast_recipients TEXT DEFAULT ''")
         db.connection.commit()
     if "greeks_profile_json" not in cols:
         db.execute(
