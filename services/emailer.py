@@ -22,12 +22,16 @@ def _normalize_recipients(recipients: Iterable[str]) -> list[str]:
     return cleaned
 
 
-def _smtp_config() -> dict[str, object]:
+def load_smtp_settings() -> dict[str, object]:
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
         db = conn.cursor()
         row = get_settings(db) or {}
     return row
+
+
+def _smtp_config() -> dict[str, object]:
+    return load_smtp_settings()
 
 
 def send_email(
@@ -88,4 +92,4 @@ def send_email(
     return result
 
 
-__all__ = ["send_email"]
+__all__ = ["load_smtp_settings", "send_email"]

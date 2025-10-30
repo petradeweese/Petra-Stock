@@ -7,7 +7,7 @@ import logging
 import math
 import os
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Iterable, List, Mapping, Optional, Sequence
 
 try:  # pragma: no cover - optional dependency
     import pandas_market_calendars as mcal
@@ -360,6 +360,18 @@ def _clean_float(value: float | None) -> Optional[float]:
     return round(num, 3)
 
 
+def _safe_float(value: float | None) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(num) or math.isinf(num):
+        return None
+    return num
+
+
 def _clean_pair(values: Iterable[float]) -> Optional[list[float]]:
     sanitized: list[float] = []
     for value in values:
@@ -377,9 +389,17 @@ def _bias_from_median(median_close: float) -> str:
 
 
 def select_forecast_top5(
-    asof: dt.datetime, tickers: List[str] = DEFAULT_UNIVERSE
-) -> List[dict]:
-    """Select the top five forecast candidates for ``asof``."""
+    asof: dt.datetime,
+    tickers: List[str] = DEFAULT_UNIVERSE,
+    *,
+    include_metadata: bool = False,
+) -> List[dict] | tuple[List[dict], dict[str, int]]:
+    """Select the top five forecast candidates for ``asof``.
+
+    When ``include_metadata`` is true the function returns a tuple of the
+    selected rows and a stats dictionary containing ``processed`` and
+    ``selected`` counts. Otherwise only the list of candidates is returned.
+    """
 
     asof_utc = _ensure_datetime(asof)
     results: list[dict] = []
@@ -418,6 +438,43 @@ def select_forecast_top5(
             edge = max(magnitude - implied_move, 0.0)
         score_basis = edge if edge > 0 else magnitude
         score = round(confidence * score_basis, 6)
+        matches = payload.get("matches") or []
+        top_match = matches[0] if matches else {}
+        breakdown_raw = (
+            top_match.get("similarity_breakdown")
+            if isinstance(top_match, Mapping)
+            else {}
+        )
+        clean_breakdown: dict[str, object] = {
+            "S5m": None,
+            "S30m": None,
+            "S1d": None,
+            "weights": {},
+        }
+        final_score = None
+        if isinstance(breakdown_raw, Mapping):
+            clean_breakdown["S5m"] = _safe_float(breakdown_raw.get("S5m"))
+            clean_breakdown["S30m"] = _safe_float(breakdown_raw.get("S30m"))
+            clean_breakdown["S1d"] = _safe_float(breakdown_raw.get("S1d"))
+            weights_raw = breakdown_raw.get("weights")
+            weights_clean: dict[str, float] = {}
+            if isinstance(weights_raw, Mapping):
+                for key, value in weights_raw.items():
+                    cleaned_weight = _safe_float(value)
+                    if cleaned_weight is None:
+                        continue
+                    weights_clean[str(key)] = round(cleaned_weight, 4)
+            clean_breakdown["weights"] = weights_clean
+            final_score = _safe_float(breakdown_raw.get("final_score"))
+        raw_options = payload.get("options_hint")
+        options_hint: dict[str, object] = {}
+        if isinstance(raw_options, Mapping):
+            options_hint = {
+                "bias": raw_options.get("bias"),
+                "exp_move_pct": _safe_float(raw_options.get("exp_move_pct")),
+                "suggested_delta": _safe_float(raw_options.get("suggested_delta")),
+                "suggested_expiry": raw_options.get("suggested_expiry"),
+            }
         entry = {
             "ticker": ticker,
             "asof": asof_utc.isoformat(),
@@ -433,12 +490,15 @@ def select_forecast_top5(
             "score": score,
             "bias": _bias_from_median(median_close),
             "low_sample": bool(payload.get("low_sample")),
+            "final_score": final_score if final_score is not None else score,
+            "similarity_breakdown": clean_breakdown,
+            "options_hint": options_hint,
         }
         results.append(entry)
 
     results.sort(
         key=lambda item: (
-            -(item.get("score") or 0.0),
+            -(item.get("final_score") or 0.0),
             -(item.get("confidence") or 0.0),
             -(item.get("n") or 0),
         )
@@ -451,6 +511,9 @@ def select_forecast_top5(
         len(top5),
         [row["ticker"] for row in top5],
     )
+    stats = {"processed": total, "selected": len(top5)}
+    if include_metadata:
+        return top5, stats
     return top5
 
 
