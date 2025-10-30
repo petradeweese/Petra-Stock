@@ -1,0 +1,3 @@
+# systemd unit snippet for Petra. Merge with the primary unit definition as needed.
+[Service]
+Environment=SCHWAB_TOKEN_PATH=/etc/petra/secure/schwab_tokens.json

@@ -16,7 +16,7 @@ from typing import Any, Dict, Optional, Tuple
 
 import pandas as pd
 
-from config import settings
+from config import DEFAULT_SCHWAB_TOKENS_PATH, settings
 from services import http_client
 from prometheus_client import Counter, Histogram  # type: ignore
 
@@ -190,7 +190,16 @@ class SchwabClient:
         self._redirect_uri = _clean_str(settings.schwab_redirect_uri)
         settings.schwab_redirect_uri = self._redirect_uri
         self._refresh_token = _clean_str(settings.schwab_refresh_token)
-        self._token_path = _clean_str(getattr(settings, "schwab_token_path", ""))
+        token_path_env = _clean_str(os.getenv("SCHWAB_TOKEN_PATH", ""))
+        token_path_config = _clean_str(getattr(settings, "schwab_token_path", ""))
+        resolved_token_path = (
+            token_path_env
+            or token_path_config
+            or _clean_str(DEFAULT_SCHWAB_TOKENS_PATH)
+        )
+        self._token_path = resolved_token_path
+        setattr(settings, "schwab_token_path", resolved_token_path)
+        setattr(settings, "SCHWAB_TOKEN_PATH", resolved_token_path)
         self._persisted_tokens: Dict[str, Any] = {}
         self._tokens_loaded = False
         self._load_tokens_from_file()
@@ -455,6 +464,14 @@ class SchwabClient:
         path = Path(path_value)
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
+        except PermissionError as exc:
+            logger.error(
+                "schwab_token_file_permission_denied path=%s error=%s hint=%s",
+                path,
+                exc,
+                "chown or chmod the token directory for the service user",
+            )
+            return
         except OSError as exc:
             logger.error("schwab_token_file_write_failed path=%s error=%s", path, exc)
             return
@@ -478,6 +495,23 @@ class SchwabClient:
             self._apply_owner(path)
             self._persisted_tokens = dict(payload)
             self._tokens_loaded = True
+        except PermissionError as exc:
+            logger.error(
+                "schwab_token_file_permission_denied path=%s error=%s hint=%s",
+                path,
+                exc,
+                "chown or chmod the token file so the service can persist refreshed tokens",
+            )
+            if tmp_fd is not None:
+                try:
+                    os.close(tmp_fd)
+                except OSError:
+                    pass
+            if tmp_name:
+                try:
+                    os.unlink(tmp_name)
+                except OSError:
+                    pass
         except Exception as exc:
             logger.error("schwab_token_file_write_failed path=%s error=%s", path, exc)
             if tmp_fd is not None:
