@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Kade Operator UI</title>
+    <link rel="stylesheet" href="/static/dashboard.css" />
+  </head>
+  <body>
+    <header><h1>Kade Operator Console</h1></header>
+    <main class="layout">
+      <section class="chat card">
+        <h2>Chat + Commands</h2>
+        <div id="chat-log"></div>
+        <form id="chat-form">
+          <input id="chat-input" placeholder="Ask naturally or type command e.g. status" />
+          <button type="submit">Send</button>
+        </form>
+        <details>
+          <summary>Latest Interpreted Action</summary>
+          <pre id="latest-intent"></pre>
+        </details>
+        <details>
+          <summary>Latest Raw Structured Result</summary>
+          <pre id="latest-raw"></pre>
+        </details>
+      </section>
+
+      <section class="dashboard">
+        <div class="grid">
+          <article class="card"><h3>Runtime</h3><pre id="runtime-summary">{{ dashboard.summary | tojson(indent=2) }}</pre></article>
+          <article class="card"><h3>Ticker Cards</h3><pre id="ticker-cards">{{ dashboard.ticker_cards | tojson(indent=2) }}</pre></article>
+          <article class="card"><h3>Radar Queue</h3><pre id="radar-queue">{{ dashboard.radar_queue | tojson(indent=2) }}</pre></article>
+          <article class="card"><h3>Market Intelligence</h3><pre id="market-intelligence">{{ dashboard.market_intelligence | tojson(indent=2) }}</pre></article>
+          <article class="card"><h3>Premarket Gameplan</h3><pre id="premarket-gameplan">{{ dashboard.premarket_gameplan | tojson(indent=2) }}</pre></article>
+          <article class="card"><h3>Trade Idea</h3><pre id="trade-idea">{{ dashboard.trade_idea | tojson(indent=2) }}</pre></article>
+          <article class="card"><h3>Target Move Board</h3><pre id="target-move">{{ dashboard.target_move_board | tojson(indent=2) }}</pre></article>
+          <article class="card"><h3>Trade Plan</h3><pre id="trade-plan">{{ dashboard.trade_plan | tojson(indent=2) }}</pre></article>
+          <article class="card"><h3>Trade Plan Tracking</h3><pre id="trade-plan-tracking">{{ dashboard.trade_plan_tracking | tojson(indent=2) }}</pre></article>
+          <article class="card"><h3>Trade Review</h3><pre id="trade-review">{{ dashboard.trade_review | tojson(indent=2) }}</pre></article>
+          <article class="card"><h3>Visual Explainability</h3><pre id="visual">{{ dashboard.visual_explainability | tojson(indent=2) }}</pre></article>
+          <article class="card"><h3>Strategy Intelligence</h3><pre id="strategy">{{ dashboard.strategy_intelligence | tojson(indent=2) }}</pre></article>
+          <article class="card"><h3>Execution Monitor</h3><pre id="execution">{{ dashboard.execution_monitor | tojson(indent=2) }}</pre></article>
+          <article class="card"><h3>Timeline</h3><pre id="timeline">{{ dashboard.timeline | tojson(indent=2) }}</pre></article>
+          <article class="card"><h3>Provider Diagnostics</h3><pre id="providers">{{ dashboard.provider_diagnostics | tojson(indent=2) }}</pre></article>
+        </div>
+        <button id="refresh">Refresh Dashboard</button>
+      </section>
+    </main>
+    <script src="/static/dashboard.js"></script>
+  </body>
+</html>
